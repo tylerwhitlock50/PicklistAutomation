@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+picklist_history.db
+exports/*.xlsx
+logs/*.log

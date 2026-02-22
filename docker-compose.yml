@@ -1,0 +1,14 @@
+services:
+  picklist-app:
+    build: .
+    container_name: picklist-app
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    volumes:
+      - ./exports:/app/exports
+      - ./logs:/app/logs
+      - ./picklist_history.db:/app/picklist_history.db
+      - ./query.sql:/app/query.sql:ro
+    restart: unless-stopped

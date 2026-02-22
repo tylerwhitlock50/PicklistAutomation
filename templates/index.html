@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Picklist Automation</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <main class="container">
+      <h1>Picklist Automation</h1>
+
+      <section class="actions">
+        <form method="post" action="{{ url_for('run_picklist') }}">
+          <button type="submit">Run New Picklist</button>
+        </form>
+        <a class="button secondary" href="{{ url_for('export_latest') }}">Export Latest to Excel</a>
+      </section>
+
+      {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+      <section>
+        {% for category, message in messages %}
+        <div class="flash {{ category }}">{{ message }}</div>
+        {% endfor %}
+      </section>
+      {% endif %}
+      {% endwith %}
+
+      <section class="meta">
+        {% if latest_run %}
+        <p><strong>Latest Run ID:</strong> {{ latest_run['id'] }}</p>
+        <p><strong>Status:</strong> {{ latest_run['status'] }}</p>
+        <p><strong>Rows:</strong> {{ latest_run['row_count'] }}</p>
+        <p><strong>Run Time (UTC):</strong> {{ latest_run['run_timestamp'] }}</p>
+        {% if next_run %}
+        <p><strong>Next Scheduled Run:</strong> {{ next_run }}</p>
+        {% endif %}
+        {% if latest_run['error_message'] %}
+        <p><strong>Error:</strong> {{ latest_run['error_message'] }}</p>
+        {% endif %}
+        {% else %}
+        <p>No runs yet. Click <em>Run New Picklist</em> to begin.</p>
+        {% endif %}
+        <p><strong>Scheduler:</strong> Daily at 05:00 by default (configurable via <code>SCHEDULE_TIME</code>).</p>
+      </section>
+
+      {% if rows %}
+      <section>
+        <h2>Current Picklist</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                {% for col in columns %}
+                <th>{{ col }}</th>
+                {% endfor %}
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in rows %}
+              <tr>
+                {% for col in columns %}
+                <td>{{ row[col] }}</td>
+                {% endfor %}
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      {% endif %}
+    </main>
+  </body>
+</html>
