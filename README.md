@@ -35,9 +35,9 @@ See `.env.example` for all settings.
 
 ## Notes
 
-- `MSSQL_CONNECTION_STRING` must be a valid SQLAlchemy URL for SQL Server + `pyodbc`.
+- `MSSQL_CONNECTION_STRING` must be a valid SQLAlchemy URL for SQL Server + `pyodbc` (the password is masked in app logs).
 - Run history is stored in `picklist_history.db`.
-- Logs are written to `logs/app.log`.
+- Logs are written to `logs/app.log` with run duration and failure tracebacks for diagnostics.
 - Excel exports are written to `exports/` and also available via browser download.
 
 
@@ -46,7 +46,7 @@ See `.env.example` for all settings.
 - By default, the app schedules a daily picklist run at `05:00` (`SCHEDULE_TIME=05:00`) in `UTC`.
 - Configure the timezone with `SCHEDULE_TIMEZONE` (example: `America/Chicago`).
 - Disable scheduling with `ENABLE_SCHEDULER=false`.
-- Time format must be `HH:MM` in 24-hour format.
+- Time format must be `HH:MM` in 24-hour format. Invalid values are logged and scheduler startup is safely skipped instead of crashing the app.
 
 
 ## Docker
@@ -70,3 +70,9 @@ docker compose up --build -d
 ```
 
 This image includes the Microsoft ODBC Driver 18 and `pyodbc`, so SQL Server connectivity works inside the container when `MSSQL_CONNECTION_STRING` is set correctly.
+
+
+### SMTP Notes
+
+- `SMTP_RECIPIENT` supports comma-separated addresses.
+- Set `SMTP_USE_TLS=false` only when your SMTP server expects plaintext or already-terminated TLS.
