@@ -6,3 +6,4 @@ pyodbc==5.1.0
 openpyxl==3.1.5
 requests==2.32.3
 APScheduler==3.10.4
+gunicorn==22.0.0

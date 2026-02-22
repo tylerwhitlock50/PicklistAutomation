@@ -47,3 +47,26 @@ See `.env.example` for all settings.
 - Configure the timezone with `SCHEDULE_TIMEZONE` (example: `America/Chicago`).
 - Disable scheduling with `ENABLE_SCHEDULER=false`.
 - Time format must be `HH:MM` in 24-hour format.
+
+
+## Docker
+
+Build and run with Docker:
+
+```bash
+docker build -t picklist-automation .
+docker run --rm -p 5000:5000 --env-file .env \
+  -v $(pwd)/exports:/app/exports \
+  -v $(pwd)/logs:/app/logs \
+  -v $(pwd)/picklist_history.db:/app/picklist_history.db \
+  -v $(pwd)/query.sql:/app/query.sql:ro \
+  picklist-automation
+```
+
+Or use Docker Compose:
+
+```bash
+docker compose up --build -d
+```
+
+This image includes the Microsoft ODBC Driver 18 and `pyodbc`, so SQL Server connectivity works inside the container when `MSSQL_CONNECTION_STRING` is set correctly.
