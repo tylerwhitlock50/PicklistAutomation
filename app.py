@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sqlite3
+import time
 from datetime import datetime
 from email.message import EmailMessage
 from pathlib import Path
@@ -44,6 +45,20 @@ logger = logging.getLogger("picklist-app")
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-key")
 scheduler = BackgroundScheduler(timezone=os.getenv("SCHEDULE_TIMEZONE", "UTC"))
+
+
+def mask_connection_string(connection_string: str) -> str:
+    if "://" not in connection_string:
+        return "<invalid-connection-string>"
+
+    scheme, rest = connection_string.split("://", maxsplit=1)
+    if "@" in rest:
+        credentials, host_part = rest.split("@", maxsplit=1)
+        if ":" in credentials:
+            username, _ = credentials.split(":", maxsplit=1)
+            return f"{scheme}://{username}:***@{host_part}"
+        return f"{scheme}://***@{host_part}"
+    return f"{scheme}://{rest}"
 
 
 def get_sqlite_conn() -> sqlite3.Connection:
@@ -90,9 +105,15 @@ def fetch_picklist_from_mssql() -> pd.DataFrame:
     if not mssql_conn_string:
         raise ValueError("MSSQL_CONNECTION_STRING is not set. Add it to your .env file.")
 
+    logger.info(
+        "Connecting to SQL Server using %s",
+        mask_connection_string(mssql_conn_string),
+    )
     engine = create_engine(mssql_conn_string)
     with engine.connect() as connection:
-        return pd.read_sql_query(query, connection)
+        df = pd.read_sql_query(query, connection)
+        logger.info("Picklist query returned %d rows.", len(df.index))
+        return df
 
 
 def prune_old_runs(conn: sqlite3.Connection) -> None:
@@ -164,15 +185,18 @@ def send_email_notification(subject: str, body: str, attachment: Optional[Path] 
     smtp_password = os.getenv("SMTP_PASSWORD")
     smtp_sender = os.getenv("SMTP_SENDER")
     smtp_recipient = os.getenv("SMTP_RECIPIENT")
+    smtp_use_tls = os.getenv("SMTP_USE_TLS", "true").lower() == "true"
+    recipients = [item.strip() for item in smtp_recipient.split(",")] if smtp_recipient else []
+    recipients = [item for item in recipients if item]
 
-    if not all([smtp_host, smtp_user, smtp_password, smtp_sender, smtp_recipient]):
+    if not all([smtp_host, smtp_user, smtp_password, smtp_sender, recipients]):
         logger.info("SMTP credentials incomplete; skipping email notification.")
         return
 
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = smtp_sender
-    msg["To"] = smtp_recipient
+    msg["To"] = ", ".join(recipients)
     msg.set_content(body)
 
     if attachment and attachment.exists():
@@ -188,9 +212,11 @@ def send_email_notification(subject: str, body: str, attachment: Optional[Path] 
         import smtplib
 
         with smtplib.SMTP(smtp_host, smtp_port, timeout=15) as server:
-            server.starttls()
+            if smtp_use_tls:
+                server.starttls()
             server.login(smtp_user, smtp_password)
             server.send_message(msg)
+            logger.info("Email sent to %s with subject '%s'.", msg["To"], subject)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to send SMTP email: %s", exc)
 
@@ -210,12 +236,17 @@ def get_latest_run():
 
 
 def execute_picklist_run() -> Optional[Path]:
+    started_at = time.perf_counter()
     try:
         df = fetch_picklist_from_mssql()
         run_id = save_run(df=df, status="success")
         export_path = generate_export(df=df, run_id=run_id)
+        elapsed_seconds = time.perf_counter() - started_at
 
-        message = f"✅ Picklist run {run_id} succeeded with {len(df.index)} rows."
+        message = (
+            f"✅ Picklist run {run_id} succeeded with {len(df.index)} rows "
+            f"in {elapsed_seconds:.2f}s."
+        )
         logger.info(message)
         send_telegram_notification(message)
         send_email_notification(
@@ -225,13 +256,17 @@ def execute_picklist_run() -> Optional[Path]:
         )
         return export_path
     except Exception as exc:  # noqa: BLE001
+        elapsed_seconds = time.perf_counter() - started_at
         logger.exception("Picklist run failed: %s", exc)
         run_id = save_run(pd.DataFrame(), status="failed", error_message=str(exc))
-        message = f"❌ Picklist run {run_id} failed: {exc}"
+        message = f"❌ Picklist run {run_id} failed after {elapsed_seconds:.2f}s: {exc}"
         send_telegram_notification(message)
         send_email_notification(
             subject=f"Picklist run {run_id} failed",
-            body=message,
+            body=(
+                f"{message}\n\n"
+                "Please review logs/app.log for the full traceback and failure context."
+            ),
         )
         return None
 
@@ -254,7 +289,12 @@ def start_scheduler() -> None:
         logger.info("Daily scheduler disabled via ENABLE_SCHEDULER=false.")
         return
 
-    hour, minute = parse_schedule_time(SCHEDULE_TIME)
+    try:
+        hour, minute = parse_schedule_time(SCHEDULE_TIME)
+    except ValueError as exc:
+        logger.error("Scheduler configuration error: %s", exc)
+        logger.warning("Scheduler startup skipped due to invalid SCHEDULE_TIME value.")
+        return
     scheduler.add_job(
         execute_picklist_run,
         trigger=CronTrigger(hour=hour, minute=minute),
