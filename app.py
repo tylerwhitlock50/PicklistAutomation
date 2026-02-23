@@ -9,6 +9,7 @@ from datetime import datetime
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pandas as pd
 import requests
@@ -34,6 +35,7 @@ if DEFAULT_QUERY_TYPE not in QUERY_FILES:
 MAX_RUNS = int(os.getenv("MAX_RUNS_TO_KEEP", "10"))
 SCHEDULE_TIME = os.getenv("SCHEDULE_TIME", "05:00")
 ENABLE_SCHEDULER = os.getenv("ENABLE_SCHEDULER", "true").lower() == "true"
+DISPLAY_TIMEZONE = os.getenv("DISPLAY_TIMEZONE")
 
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -51,6 +53,40 @@ logger = logging.getLogger("picklist-app")
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-key")
 scheduler = BackgroundScheduler(timezone=os.getenv("SCHEDULE_TIMEZONE", "UTC"))
+
+
+def resolve_timezone() -> ZoneInfo:
+    configured_timezone = DISPLAY_TIMEZONE or os.getenv("SCHEDULE_TIMEZONE", "UTC")
+    try:
+        return ZoneInfo(configured_timezone)
+    except ZoneInfoNotFoundError:
+        logger.warning(
+            "Invalid timezone '%s'. Falling back to UTC for display formatting.",
+            configured_timezone,
+        )
+        return ZoneInfo("UTC")
+
+
+def get_timezone_label() -> str:
+    return resolve_timezone().key
+
+
+def format_datetime_for_display(value: datetime) -> str:
+    return value.astimezone(resolve_timezone()).strftime("%Y-%m-%d %H:%M %Z")
+
+
+def format_run_timestamp(run_timestamp: str) -> str:
+    parsed = datetime.fromisoformat(run_timestamp)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo("UTC"))
+    return format_datetime_for_display(parsed)
+
+
+def format_schedule_time(time_value: str) -> str:
+    hour, minute = parse_schedule_time(time_value)
+    timezone = resolve_timezone()
+    sample = datetime(2000, 1, 1, hour, minute, tzinfo=timezone)
+    return sample.strftime("%H:%M %Z")
 
 
 def mask_connection_string(connection_string: str) -> str:
@@ -155,16 +191,17 @@ def save_run(
     df: pd.DataFrame,
     status: str,
     query_type: str,
+    run_timestamp: datetime,
     error_message: Optional[str] = None,
 ) -> int:
-    run_timestamp = datetime.utcnow().isoformat()
+    run_timestamp_iso = run_timestamp.isoformat()
     with get_sqlite_conn() as conn:
         cursor = conn.execute(
             """
             INSERT INTO runs (run_timestamp, status, row_count, query_type, error_message)
             VALUES (?, ?, ?, ?, ?)
             """,
-            (run_timestamp, status, len(df.index), query_type, error_message),
+            (run_timestamp_iso, status, len(df.index), query_type, error_message),
         )
         run_id = cursor.lastrowid
 
@@ -176,8 +213,25 @@ def save_run(
         return run_id
 
 
-def generate_export(df: pd.DataFrame, run_id: int) -> Path:
-    export_path = EXPORT_DIR / f"picklist_run_{run_id}.xlsx"
+def format_run_timestamp_for_filename(run_timestamp: datetime) -> str:
+    return run_timestamp.strftime("%Y-%m-%d_%H%M")
+
+
+def parse_run_timestamp(run_timestamp: str) -> datetime:
+    return datetime.fromisoformat(run_timestamp)
+
+
+def build_export_filename(query_type: str, run_timestamp: datetime, run_id: int) -> str:
+    formatted_timestamp = format_run_timestamp_for_filename(run_timestamp)
+    return f"picklist_{query_type}_{formatted_timestamp}_run{run_id}.xlsx"
+
+
+def generate_export(df: pd.DataFrame, run_id: int, query_type: str, run_timestamp: datetime) -> Path:
+    export_path = EXPORT_DIR / build_export_filename(
+        query_type=query_type,
+        run_timestamp=run_timestamp,
+        run_id=run_id,
+    )
     df.to_excel(export_path, index=False)
 
     with get_sqlite_conn() as conn:
@@ -281,11 +335,22 @@ def get_recent_runs(query_type: str, limit: int = 10) -> list[sqlite3.Row]:
 
 def execute_picklist_run(query_type: Optional[str] = None) -> Optional[Path]:
     started_at = time.perf_counter()
+    run_timestamp = datetime.utcnow()
     normalized_query_type = get_query_type(query_type)
     try:
         df = fetch_picklist_from_mssql(normalized_query_type)
-        run_id = save_run(df=df, status="success", query_type=normalized_query_type)
-        export_path = generate_export(df=df, run_id=run_id)
+        run_id = save_run(
+            df=df,
+            status="success",
+            query_type=normalized_query_type,
+            run_timestamp=run_timestamp,
+        )
+        export_path = generate_export(
+            df=df,
+            run_id=run_id,
+            query_type=normalized_query_type,
+            run_timestamp=run_timestamp,
+        )
         elapsed_seconds = time.perf_counter() - started_at
 
         message = (
@@ -307,6 +372,7 @@ def execute_picklist_run(query_type: Optional[str] = None) -> Optional[Path]:
             pd.DataFrame(),
             status="failed",
             query_type=normalized_query_type,
+            run_timestamp=run_timestamp,
             error_message=str(exc),
         )
         message = (
@@ -365,11 +431,11 @@ def start_scheduler() -> None:
     atexit.register(lambda: scheduler.shutdown(wait=False))
 
 
-def get_next_scheduled_run() -> Optional[str]:
+def get_next_scheduled_run() -> Optional[datetime]:
     job = scheduler.get_job("daily_picklist_run")
     if not job or not job.next_run_time:
         return None
-    return job.next_run_time.isoformat()
+    return job.next_run_time
 
 
 initialize_db()
@@ -382,17 +448,33 @@ def index():
     latest_run, rows = get_latest_run(query_type=query_type)
 
     recent_runs = get_recent_runs(query_type=query_type)
+    formatted_latest_run = None
+    if latest_run:
+        formatted_latest_run = dict(latest_run)
+        formatted_latest_run["formatted_run_timestamp"] = format_run_timestamp(
+            latest_run["run_timestamp"]
+        )
+
+    formatted_recent_runs = []
+    for run in recent_runs:
+        formatted_run = dict(run)
+        formatted_run["formatted_run_timestamp"] = format_run_timestamp(run["run_timestamp"])
+        formatted_recent_runs.append(formatted_run)
+
     columns = list(rows[0].keys()) if rows else []
     next_run = get_next_scheduled_run()
+    formatted_next_run = format_datetime_for_display(next_run) if next_run else None
     return render_template(
         "index.html",
-        latest_run=latest_run,
+        latest_run=formatted_latest_run,
         rows=rows,
         columns=columns,
         next_run=next_run,
         recent_runs=recent_runs,
         active_query_type=query_type,
         query_options=QUERY_FILES.keys(),
+        schedule_time_display=format_schedule_time(SCHEDULE_TIME),
+        timezone_label=get_timezone_label(),
     )
 
 
@@ -423,7 +505,12 @@ def export_latest():
     df.to_excel(output, index=False)
     output.seek(0)
 
-    filename = f"picklist_{query_type}_latest_{latest_run['id']}.xlsx"
+    run_timestamp = parse_run_timestamp(latest_run["run_timestamp"])
+    filename = build_export_filename(
+        query_type=query_type,
+        run_timestamp=run_timestamp,
+        run_id=latest_run["id"],
+    )
     return send_file(
         output,
         as_attachment=True,

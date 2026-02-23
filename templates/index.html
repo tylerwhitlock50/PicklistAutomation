@@ -61,8 +61,8 @@
               <dd>{{ latest_run['row_count'] }}</dd>
             </div>
             <div>
-              <dt>Run Time (UTC)</dt>
-              <dd>{{ latest_run['run_timestamp'] }}</dd>
+              <dt>Run Time ({{ timezone_label }})</dt>
+              <dd>{{ latest_run['formatted_run_timestamp'] }}</dd>
             </div>
             {% if next_run %}
             <div>
@@ -85,8 +85,9 @@
         <article class="card status-card">
           <h2>Automation Schedule</h2>
           <p>
-            The scheduler runs daily at <strong>05:00</strong> by default. You can change it with
-            <code>SCHEDULE_TIME</code>.
+            The scheduler runs daily at <strong>{{ schedule_time_display }}</strong>.
+            Configure it with <code>SCHEDULE_TIME</code> and <code>SCHEDULE_TIMEZONE</code>
+            (or <code>DISPLAY_TIMEZONE</code> for dashboard display).
           </p>
           <p>
             Keep this page open for quick checks and one-click exports after each automated run.
@@ -108,7 +109,7 @@
                 <th>Status</th>
                 <th>Type</th>
                 <th>Rows</th>
-                <th>Run Time (UTC)</th>
+                <th>Run Time ({{ timezone_label }})</th>
                 <th>Error</th>
               </tr>
             </thead>
@@ -119,7 +120,7 @@
                 <td><span class="pill {{ run['status'] }}">{{ run['status'] }}</span></td>
                 <td>{{ run['query_type']|capitalize }}</td>
                 <td>{{ run['row_count'] }}</td>
-                <td>{{ run['run_timestamp'] }}</td>
+                <td>{{ run['formatted_run_timestamp'] }}</td>
                 <td>{{ run['error_message'] or '-' }}</td>
               </tr>
               {% endfor %}
