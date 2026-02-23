@@ -279,35 +279,6 @@ def get_recent_runs(query_type: str, limit: int = 10) -> list[sqlite3.Row]:
         ).fetchall()
 
 
-def get_dummy_picklist_rows() -> list[dict[str, str]]:
-    return [
-        {
-            "Order": "SO-10425",
-            "SKU": "LAMP-BASE-01",
-            "Description": "Desk Lamp Base",
-            "Location": "A1-03",
-            "Qty": "8",
-            "Priority": "High",
-        },
-        {
-            "Order": "SO-10426",
-            "SKU": "SHADE-IVY-08",
-            "Description": "Ivy Fabric Shade",
-            "Location": "B2-11",
-            "Qty": "4",
-            "Priority": "Medium",
-        },
-        {
-            "Order": "SO-10427",
-            "SKU": "BULB-WARM-60",
-            "Description": "Warm White Bulb 60W",
-            "Location": "C1-07",
-            "Qty": "12",
-            "Priority": "High",
-        },
-    ]
-
-
 def execute_picklist_run(query_type: Optional[str] = None) -> Optional[Path]:
     started_at = time.perf_counter()
     normalized_query_type = get_query_type(query_type)
@@ -409,10 +380,6 @@ start_scheduler()
 def index():
     query_type = get_query_type(request.args.get("query_type"))
     latest_run, rows = get_latest_run(query_type=query_type)
-    using_dummy_data = False
-    if not rows:
-        rows = get_dummy_picklist_rows()
-        using_dummy_data = True
 
     recent_runs = get_recent_runs(query_type=query_type)
     columns = list(rows[0].keys()) if rows else []
@@ -424,7 +391,6 @@ def index():
         columns=columns,
         next_run=next_run,
         recent_runs=recent_runs,
-        using_dummy_data=using_dummy_data,
         active_query_type=query_type,
         query_options=QUERY_FILES.keys(),
     )
