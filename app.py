@@ -15,7 +15,7 @@ import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
-from flask import Flask, flash, redirect, render_template, send_file, url_for
+from flask import Flask, flash, redirect, render_template, request, send_file, url_for
 from sqlalchemy import create_engine
 
 load_dotenv()
@@ -24,7 +24,13 @@ BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "picklist_history.db"
 EXPORT_DIR = BASE_DIR / "exports"
 LOG_DIR = BASE_DIR / "logs"
-QUERY_FILE = Path(os.getenv("QUERY_FILE", BASE_DIR / "query.sql"))
+QUERY_FILES = {
+    "guns": Path(os.getenv("GUNS_QUERY_FILE", BASE_DIR / "query_guns.sql")),
+    "components": Path(os.getenv("COMPONENTS_QUERY_FILE", BASE_DIR / "query_components.sql")),
+}
+DEFAULT_QUERY_TYPE = os.getenv("DEFAULT_QUERY_TYPE", "guns").lower()
+if DEFAULT_QUERY_TYPE not in QUERY_FILES:
+    DEFAULT_QUERY_TYPE = "guns"
 MAX_RUNS = int(os.getenv("MAX_RUNS_TO_KEEP", "10"))
 SCHEDULE_TIME = os.getenv("SCHEDULE_TIME", "05:00")
 ENABLE_SCHEDULER = os.getenv("ENABLE_SCHEDULER", "true").lower() == "true"
@@ -77,10 +83,19 @@ def initialize_db() -> None:
                 status TEXT NOT NULL,
                 row_count INTEGER DEFAULT 0,
                 export_path TEXT,
+                query_type TEXT NOT NULL DEFAULT 'guns',
                 error_message TEXT
             )
             """
         )
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(runs)").fetchall()
+        }
+        if "query_type" not in columns:
+            conn.execute(
+                "ALTER TABLE runs ADD COLUMN query_type TEXT NOT NULL DEFAULT 'guns'"
+            )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS run_rows (
@@ -93,14 +108,21 @@ def initialize_db() -> None:
         )
 
 
-def load_query() -> str:
-    if not QUERY_FILE.exists():
-        raise FileNotFoundError(f"Query file not found at: {QUERY_FILE}")
-    return QUERY_FILE.read_text(encoding="utf-8")
+def get_query_type(value: Optional[str]) -> str:
+    if value in QUERY_FILES:
+        return value
+    return DEFAULT_QUERY_TYPE
 
 
-def fetch_picklist_from_mssql() -> pd.DataFrame:
-    query = load_query()
+def load_query(query_type: str) -> str:
+    query_file = QUERY_FILES[query_type]
+    if not query_file.exists():
+        raise FileNotFoundError(f"Query file not found at: {query_file}")
+    return query_file.read_text(encoding="utf-8")
+
+
+def fetch_picklist_from_mssql(query_type: str) -> pd.DataFrame:
+    query = load_query(query_type)
     mssql_conn_string = os.getenv("MSSQL_CONNECTION_STRING")
     if not mssql_conn_string:
         raise ValueError("MSSQL_CONNECTION_STRING is not set. Add it to your .env file.")
@@ -129,15 +151,20 @@ def prune_old_runs(conn: sqlite3.Connection) -> None:
     conn.execute(f"DELETE FROM runs WHERE id IN ({placeholders})", ids)
 
 
-def save_run(df: pd.DataFrame, status: str, error_message: Optional[str] = None) -> int:
+def save_run(
+    df: pd.DataFrame,
+    status: str,
+    query_type: str,
+    error_message: Optional[str] = None,
+) -> int:
     run_timestamp = datetime.utcnow().isoformat()
     with get_sqlite_conn() as conn:
         cursor = conn.execute(
             """
-            INSERT INTO runs (run_timestamp, status, row_count, error_message)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO runs (run_timestamp, status, row_count, query_type, error_message)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (run_timestamp, status, len(df.index), error_message),
+            (run_timestamp, status, len(df.index), query_type, error_message),
         )
         run_id = cursor.lastrowid
 
@@ -221,9 +248,12 @@ def send_email_notification(subject: str, body: str, attachment: Optional[Path] 
         logger.exception("Failed to send SMTP email: %s", exc)
 
 
-def get_latest_run():
+def get_latest_run(query_type: str):
     with get_sqlite_conn() as conn:
-        run = conn.execute("SELECT * FROM runs ORDER BY id DESC LIMIT 1").fetchone()
+        run = conn.execute(
+            "SELECT * FROM runs WHERE query_type = ? ORDER BY id DESC LIMIT 1",
+            (query_type,),
+        ).fetchone()
         if not run:
             return None, []
 
@@ -235,16 +265,17 @@ def get_latest_run():
         return run, parsed_rows
 
 
-def get_recent_runs(limit: int = 10) -> list[sqlite3.Row]:
+def get_recent_runs(query_type: str, limit: int = 10) -> list[sqlite3.Row]:
     with get_sqlite_conn() as conn:
         return conn.execute(
             """
-            SELECT id, run_timestamp, status, row_count, error_message
+            SELECT id, run_timestamp, status, row_count, query_type, error_message
             FROM runs
+            WHERE query_type = ?
             ORDER BY id DESC
             LIMIT ?
             """,
-            (limit,),
+            (query_type, limit),
         ).fetchall()
 
 
@@ -277,16 +308,17 @@ def get_dummy_picklist_rows() -> list[dict[str, str]]:
     ]
 
 
-def execute_picklist_run() -> Optional[Path]:
+def execute_picklist_run(query_type: Optional[str] = None) -> Optional[Path]:
     started_at = time.perf_counter()
+    normalized_query_type = get_query_type(query_type)
     try:
-        df = fetch_picklist_from_mssql()
-        run_id = save_run(df=df, status="success")
+        df = fetch_picklist_from_mssql(normalized_query_type)
+        run_id = save_run(df=df, status="success", query_type=normalized_query_type)
         export_path = generate_export(df=df, run_id=run_id)
         elapsed_seconds = time.perf_counter() - started_at
 
         message = (
-            f"✅ Picklist run {run_id} succeeded with {len(df.index)} rows "
+            f"✅ Picklist run {run_id} ({normalized_query_type}) succeeded with {len(df.index)} rows "
             f"in {elapsed_seconds:.2f}s."
         )
         logger.info(message)
@@ -300,8 +332,16 @@ def execute_picklist_run() -> Optional[Path]:
     except Exception as exc:  # noqa: BLE001
         elapsed_seconds = time.perf_counter() - started_at
         logger.exception("Picklist run failed: %s", exc)
-        run_id = save_run(pd.DataFrame(), status="failed", error_message=str(exc))
-        message = f"❌ Picklist run {run_id} failed after {elapsed_seconds:.2f}s: {exc}"
+        run_id = save_run(
+            pd.DataFrame(),
+            status="failed",
+            query_type=normalized_query_type,
+            error_message=str(exc),
+        )
+        message = (
+            f"❌ Picklist run {run_id} ({normalized_query_type}) failed "
+            f"after {elapsed_seconds:.2f}s: {exc}"
+        )
         send_telegram_notification(message)
         send_email_notification(
             subject=f"Picklist run {run_id} failed",
@@ -339,6 +379,7 @@ def start_scheduler() -> None:
         return
     scheduler.add_job(
         execute_picklist_run,
+        kwargs={"query_type": DEFAULT_QUERY_TYPE},
         trigger=CronTrigger(hour=hour, minute=minute),
         id="daily_picklist_run",
         replace_existing=True,
@@ -366,13 +407,14 @@ start_scheduler()
 
 @app.route("/")
 def index():
-    latest_run, rows = get_latest_run()
+    query_type = get_query_type(request.args.get("query_type"))
+    latest_run, rows = get_latest_run(query_type=query_type)
     using_dummy_data = False
     if not rows:
         rows = get_dummy_picklist_rows()
         using_dummy_data = True
 
-    recent_runs = get_recent_runs()
+    recent_runs = get_recent_runs(query_type=query_type)
     columns = list(rows[0].keys()) if rows else []
     next_run = get_next_scheduled_run()
     return render_template(
@@ -383,32 +425,39 @@ def index():
         next_run=next_run,
         recent_runs=recent_runs,
         using_dummy_data=using_dummy_data,
+        active_query_type=query_type,
+        query_options=QUERY_FILES.keys(),
     )
 
 
 @app.post("/run")
 def run_picklist():
-    export_path = execute_picklist_run()
+    query_type = get_query_type(request.form.get("query_type"))
+    export_path = execute_picklist_run(query_type=query_type)
     if export_path:
-        flash(f"Picklist run complete. Export created at {export_path.name}", "success")
+        flash(
+            f"Picklist run complete for {query_type}. Export created at {export_path.name}",
+            "success",
+        )
     else:
         flash("Picklist run failed. Check logs for details.", "error")
-    return redirect(url_for("index"))
+    return redirect(url_for("index", query_type=query_type))
 
 
 @app.get("/export")
 def export_latest():
-    latest_run, rows = get_latest_run()
+    query_type = get_query_type(request.args.get("query_type"))
+    latest_run, rows = get_latest_run(query_type=query_type)
     if not latest_run or not rows:
         flash("No picklist data available to export yet.", "error")
-        return redirect(url_for("index"))
+        return redirect(url_for("index", query_type=query_type))
 
     df = pd.DataFrame(rows)
     output = io.BytesIO()
     df.to_excel(output, index=False)
     output.seek(0)
 
-    filename = f"picklist_latest_{latest_run['id']}.xlsx"
+    filename = f"picklist_{query_type}_latest_{latest_run['id']}.xlsx"
     return send_file(
         output,
         as_attachment=True,
