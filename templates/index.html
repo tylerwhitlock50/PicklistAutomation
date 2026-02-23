@@ -7,19 +7,25 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
   </head>
   <body>
-    <main class="container">
-      <h1>Picklist Automation</h1>
+    <main class="page-shell">
+      <section class="hero card">
+        <p class="eyebrow">Operations Dashboard</p>
+        <h1>Picklist Automation</h1>
+        <p class="hero-copy">
+          Run the latest warehouse picklist, review run details, and export the newest sheet in one place.
+        </p>
 
-      <section class="actions">
-        <form method="post" action="{{ url_for('run_picklist') }}">
-          <button type="submit">Run New Picklist</button>
-        </form>
-        <a class="button secondary" href="{{ url_for('export_latest') }}">Export Latest to Excel</a>
+        <section class="actions">
+          <form method="post" action="{{ url_for('run_picklist') }}">
+            <button type="submit">Run New Picklist</button>
+          </form>
+          <a class="button secondary" href="{{ url_for('export_latest') }}">Export Latest to Excel</a>
+        </section>
       </section>
 
       {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
-      <section>
+      <section class="alerts">
         {% for category, message in messages %}
         <div class="flash {{ category }}">{{ message }}</div>
         {% endfor %}
@@ -27,27 +33,103 @@
       {% endif %}
       {% endwith %}
 
-      <section class="meta">
-        {% if latest_run %}
-        <p><strong>Latest Run ID:</strong> {{ latest_run['id'] }}</p>
-        <p><strong>Status:</strong> {{ latest_run['status'] }}</p>
-        <p><strong>Rows:</strong> {{ latest_run['row_count'] }}</p>
-        <p><strong>Run Time (UTC):</strong> {{ latest_run['run_timestamp'] }}</p>
-        {% if next_run %}
-        <p><strong>Next Scheduled Run:</strong> {{ next_run }}</p>
-        {% endif %}
-        {% if latest_run['error_message'] %}
-        <p><strong>Error:</strong> {{ latest_run['error_message'] }}</p>
-        {% endif %}
+      <section class="status-grid">
+        <article class="card status-card">
+          <h2>Run Status</h2>
+          {% if latest_run %}
+          <dl>
+            <div>
+              <dt>Latest Run ID</dt>
+              <dd>#{{ latest_run['id'] }}</dd>
+            </div>
+            <div>
+              <dt>Status</dt>
+              <dd class="pill {{ latest_run['status'] }}">{{ latest_run['status'] }}</dd>
+            </div>
+            <div>
+              <dt>Rows</dt>
+              <dd>{{ latest_run['row_count'] }}</dd>
+            </div>
+            <div>
+              <dt>Run Time (UTC)</dt>
+              <dd>{{ latest_run['run_timestamp'] }}</dd>
+            </div>
+            {% if next_run %}
+            <div>
+              <dt>Next Scheduled Run</dt>
+              <dd>{{ next_run }}</dd>
+            </div>
+            {% endif %}
+            {% if latest_run['error_message'] %}
+            <div>
+              <dt>Error</dt>
+              <dd class="error-text">{{ latest_run['error_message'] }}</dd>
+            </div>
+            {% endif %}
+          </dl>
+          {% else %}
+          <p class="empty-state">No runs yet. Click <em>Run New Picklist</em> to begin.</p>
+          {% endif %}
+        </article>
+
+        <article class="card status-card">
+          <h2>Automation Schedule</h2>
+          <p>
+            The scheduler runs daily at <strong>05:00</strong> by default. You can change it with
+            <code>SCHEDULE_TIME</code>.
+          </p>
+          <p>
+            Keep this page open for quick checks and one-click exports after each automated run.
+          </p>
+        </article>
+      </section>
+
+      <section class="card">
+        <div class="table-header">
+          <h2>Recent Runs</h2>
+          <p>Last {{ recent_runs|length }} runs</p>
+        </div>
+        {% if recent_runs %}
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Run ID</th>
+                <th>Status</th>
+                <th>Rows</th>
+                <th>Run Time (UTC)</th>
+                <th>Error</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for run in recent_runs %}
+              <tr>
+                <td>#{{ run['id'] }}</td>
+                <td><span class="pill {{ run['status'] }}">{{ run['status'] }}</span></td>
+                <td>{{ run['row_count'] }}</td>
+                <td>{{ run['run_timestamp'] }}</td>
+                <td>{{ run['error_message'] or '-' }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
         {% else %}
-        <p>No runs yet. Click <em>Run New Picklist</em> to begin.</p>
+        <p class="empty-state">No historical runs yet. Once runs complete, they will appear here.</p>
         {% endif %}
-        <p><strong>Scheduler:</strong> Daily at 05:00 by default (configurable via <code>SCHEDULE_TIME</code>).</p>
       </section>
 
       {% if rows %}
-      <section>
-        <h2>Current Picklist</h2>
+      <section class="card table-card">
+        <div class="table-header">
+          <h2>Current Picklist</h2>
+          <p>{{ rows|length }} records{% if using_dummy_data %} (sample data){% endif %}</p>
+        </div>
+        {% if using_dummy_data %}
+        <p class="empty-state">
+          No picklist data has been generated yet. Showing sample rows to preview the layout.
+        </p>
+        {% endif %}
         <div class="table-wrap">
           <table>
             <thead>
