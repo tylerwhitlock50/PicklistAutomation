@@ -209,6 +209,48 @@ def get_latest_run():
         return run, parsed_rows
 
 
+def get_recent_runs(limit: int = 10) -> list[sqlite3.Row]:
+    with get_sqlite_conn() as conn:
+        return conn.execute(
+            """
+            SELECT id, run_timestamp, status, row_count, error_message
+            FROM runs
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+
+def get_dummy_picklist_rows() -> list[dict[str, str]]:
+    return [
+        {
+            "Order": "SO-10425",
+            "SKU": "LAMP-BASE-01",
+            "Description": "Desk Lamp Base",
+            "Location": "A1-03",
+            "Qty": "8",
+            "Priority": "High",
+        },
+        {
+            "Order": "SO-10426",
+            "SKU": "SHADE-IVY-08",
+            "Description": "Ivy Fabric Shade",
+            "Location": "B2-11",
+            "Qty": "4",
+            "Priority": "Medium",
+        },
+        {
+            "Order": "SO-10427",
+            "SKU": "BULB-WARM-60",
+            "Description": "Warm White Bulb 60W",
+            "Location": "C1-07",
+            "Qty": "12",
+            "Priority": "High",
+        },
+    ]
+
+
 def execute_picklist_run() -> Optional[Path]:
     try:
         df = fetch_picklist_from_mssql()
@@ -285,10 +327,22 @@ start_scheduler()
 @app.route("/")
 def index():
     latest_run, rows = get_latest_run()
+    using_dummy_data = False
+    if not rows:
+        rows = get_dummy_picklist_rows()
+        using_dummy_data = True
+
+    recent_runs = get_recent_runs()
     columns = list(rows[0].keys()) if rows else []
     next_run = get_next_scheduled_run()
     return render_template(
-        "index.html", latest_run=latest_run, rows=rows, columns=columns, next_run=next_run
+        "index.html",
+        latest_run=latest_run,
+        rows=rows,
+        columns=columns,
+        next_run=next_run,
+        recent_runs=recent_runs,
+        using_dummy_data=using_dummy_data,
     )
 
 
