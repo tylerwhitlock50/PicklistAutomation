@@ -1,7 +1,7 @@
 # Picklist Automation (Flask)
 
 Simple Python app that:
-- Reads a SQL query from a file (`query.sql` by default)
+- Reads SQL queries from files (`query_guns.sql` and `query_components.sql` by default)
 - Runs it against Microsoft SQL Server
 - Stores each run in SQLite (keeps last 10 runs)
 - Shows latest picklist in a web UI
@@ -22,7 +22,7 @@ Simple Python app that:
    ```bash
    cp .env.example .env
    ```
-3. Update `query.sql` with your actual picklist query.
+3. Update `query_guns.sql` and `query_components.sql` with your actual picklist queries.
 4. Start app:
    ```bash
    python app.py
@@ -59,7 +59,8 @@ docker run --rm -p 5000:5000 --env-file .env \
   -v $(pwd)/exports:/app/exports \
   -v $(pwd)/logs:/app/logs \
   -v $(pwd)/picklist_history.db:/app/picklist_history.db \
-  -v $(pwd)/query.sql:/app/query.sql:ro \
+  -v $(pwd)/query_guns.sql:/app/query_guns.sql:ro \
+  -v $(pwd)/query_components.sql:/app/query_components.sql:ro \
   picklist-automation
 ```
 

@@ -17,9 +17,15 @@
 
         <section class="actions">
           <form method="post" action="{{ url_for('run_picklist') }}">
+            <label for="query_type">Picklist mode</label>
+            <select id="query_type" name="query_type">
+              {% for option in query_options %}
+              <option value="{{ option }}" {% if option == active_query_type %}selected{% endif %}>{{ option|capitalize }}</option>
+              {% endfor %}
+            </select>
             <button type="submit">Run New Picklist</button>
           </form>
-          <a class="button secondary" href="{{ url_for('export_latest') }}">Export Latest to Excel</a>
+          <a class="button secondary" href="{{ url_for('export_latest', query_type=active_query_type) }}">Export Latest to Excel</a>
         </section>
       </section>
 
@@ -45,6 +51,10 @@
             <div>
               <dt>Status</dt>
               <dd class="pill {{ latest_run['status'] }}">{{ latest_run['status'] }}</dd>
+            </div>
+            <div>
+              <dt>Query Type</dt>
+              <dd>{{ latest_run['query_type']|capitalize }}</dd>
             </div>
             <div>
               <dt>Rows</dt>
@@ -87,7 +97,7 @@
       <section class="card">
         <div class="table-header">
           <h2>Recent Runs</h2>
-          <p>Last {{ recent_runs|length }} runs</p>
+          <p>Last {{ recent_runs|length }} {{ active_query_type }} runs</p>
         </div>
         {% if recent_runs %}
         <div class="table-wrap">
@@ -96,6 +106,7 @@
               <tr>
                 <th>Run ID</th>
                 <th>Status</th>
+                <th>Type</th>
                 <th>Rows</th>
                 <th>Run Time (UTC)</th>
                 <th>Error</th>
@@ -106,6 +117,7 @@
               <tr>
                 <td>#{{ run['id'] }}</td>
                 <td><span class="pill {{ run['status'] }}">{{ run['status'] }}</span></td>
+                <td>{{ run['query_type']|capitalize }}</td>
                 <td>{{ run['row_count'] }}</td>
                 <td>{{ run['run_timestamp'] }}</td>
                 <td>{{ run['error_message'] or '-' }}</td>
@@ -123,7 +135,7 @@
       <section class="card table-card">
         <div class="table-header">
           <h2>Current Picklist</h2>
-          <p>{{ rows|length }} records{% if using_dummy_data %} (sample data){% endif %}</p>
+          <p>{{ active_query_type|capitalize }} · {{ rows|length }} records{% if using_dummy_data %} (sample data){% endif %}</p>
         </div>
         {% if using_dummy_data %}
         <p class="empty-state">
