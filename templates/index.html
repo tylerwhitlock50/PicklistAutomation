@@ -132,17 +132,12 @@
         {% endif %}
       </section>
 
-      {% if rows %}
+      {% if latest_run and rows %}
       <section class="card table-card">
         <div class="table-header">
           <h2>Current Picklist</h2>
-          <p>{{ active_query_type|capitalize }} · {{ rows|length }} records{% if using_dummy_data %} (sample data){% endif %}</p>
+          <p>{{ active_query_type|capitalize }} · {{ rows|length }} records</p>
         </div>
-        {% if using_dummy_data %}
-        <p class="empty-state">
-          No picklist data has been generated yet. Showing sample rows to preview the layout.
-        </p>
-        {% endif %}
         <div class="table-wrap">
           <table>
             <thead>
@@ -163,6 +158,16 @@
             </tbody>
           </table>
         </div>
+      </section>
+      {% else %}
+      <section class="card table-card">
+        <div class="table-header">
+          <h2>Current Picklist</h2>
+        </div>
+        <p class="empty-state">
+          No picklist sheet is available yet.
+          <strong>Run New Picklist to generate your first sheet.</strong>
+        </p>
       </section>
       {% endif %}
     </main>
