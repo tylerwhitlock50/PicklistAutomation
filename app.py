@@ -155,16 +155,17 @@ def save_run(
     df: pd.DataFrame,
     status: str,
     query_type: str,
+    run_timestamp: datetime,
     error_message: Optional[str] = None,
 ) -> int:
-    run_timestamp = datetime.utcnow().isoformat()
+    run_timestamp_iso = run_timestamp.isoformat()
     with get_sqlite_conn() as conn:
         cursor = conn.execute(
             """
             INSERT INTO runs (run_timestamp, status, row_count, query_type, error_message)
             VALUES (?, ?, ?, ?, ?)
             """,
-            (run_timestamp, status, len(df.index), query_type, error_message),
+            (run_timestamp_iso, status, len(df.index), query_type, error_message),
         )
         run_id = cursor.lastrowid
 
@@ -176,8 +177,25 @@ def save_run(
         return run_id
 
 
-def generate_export(df: pd.DataFrame, run_id: int) -> Path:
-    export_path = EXPORT_DIR / f"picklist_run_{run_id}.xlsx"
+def format_run_timestamp_for_filename(run_timestamp: datetime) -> str:
+    return run_timestamp.strftime("%Y-%m-%d_%H%M")
+
+
+def parse_run_timestamp(run_timestamp: str) -> datetime:
+    return datetime.fromisoformat(run_timestamp)
+
+
+def build_export_filename(query_type: str, run_timestamp: datetime, run_id: int) -> str:
+    formatted_timestamp = format_run_timestamp_for_filename(run_timestamp)
+    return f"picklist_{query_type}_{formatted_timestamp}_run{run_id}.xlsx"
+
+
+def generate_export(df: pd.DataFrame, run_id: int, query_type: str, run_timestamp: datetime) -> Path:
+    export_path = EXPORT_DIR / build_export_filename(
+        query_type=query_type,
+        run_timestamp=run_timestamp,
+        run_id=run_id,
+    )
     df.to_excel(export_path, index=False)
 
     with get_sqlite_conn() as conn:
@@ -310,11 +328,22 @@ def get_dummy_picklist_rows() -> list[dict[str, str]]:
 
 def execute_picklist_run(query_type: Optional[str] = None) -> Optional[Path]:
     started_at = time.perf_counter()
+    run_timestamp = datetime.utcnow()
     normalized_query_type = get_query_type(query_type)
     try:
         df = fetch_picklist_from_mssql(normalized_query_type)
-        run_id = save_run(df=df, status="success", query_type=normalized_query_type)
-        export_path = generate_export(df=df, run_id=run_id)
+        run_id = save_run(
+            df=df,
+            status="success",
+            query_type=normalized_query_type,
+            run_timestamp=run_timestamp,
+        )
+        export_path = generate_export(
+            df=df,
+            run_id=run_id,
+            query_type=normalized_query_type,
+            run_timestamp=run_timestamp,
+        )
         elapsed_seconds = time.perf_counter() - started_at
 
         message = (
@@ -336,6 +365,7 @@ def execute_picklist_run(query_type: Optional[str] = None) -> Optional[Path]:
             pd.DataFrame(),
             status="failed",
             query_type=normalized_query_type,
+            run_timestamp=run_timestamp,
             error_message=str(exc),
         )
         message = (
@@ -457,7 +487,12 @@ def export_latest():
     df.to_excel(output, index=False)
     output.seek(0)
 
-    filename = f"picklist_{query_type}_latest_{latest_run['id']}.xlsx"
+    run_timestamp = parse_run_timestamp(latest_run["run_timestamp"])
+    filename = build_export_filename(
+        query_type=query_type,
+        run_timestamp=run_timestamp,
+        run_id=latest_run["id"],
+    )
     return send_file(
         output,
         as_attachment=True,
