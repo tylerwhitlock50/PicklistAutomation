@@ -6,4 +6,4 @@ __pycache__/
 .env
 logs/
 exports/
-picklist_history.db
+data/

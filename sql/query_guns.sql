@@ -2,44 +2,32 @@ WITH
 Params AS (
     SELECT
         CAST(GETDATE() AS date) AS TODAY,
-        DATEADD(day, 10, CAST(GETDATE() AS date)) AS THROUGH_DATE
+        DATEADD(day, 30, CAST(GETDATE() AS date)) AS THROUGH_DATE
 ),
 
-/* 1) Supply */
+-- DETERMINE SUPPLY: SHIPPING warehouse, Racks R01-R09 only, exclude Stage/International, Rack10 and Rack11
 Supply AS (
     SELECT
         pl.PART_ID,
         pl.LOCATION_ID,
-        pl.WAREHOUSE_ID,
         SUM(CAST(pl.QTY AS int)) AS QTY
     FROM dbo.PART_LOCATION pl
-    WHERE pl.QTY > 0
-      AND (
-            (
-                pl.WAREHOUSE_ID = 'DISTRIBUTION'
-                -- Exclude overstock (example: R03-OVERSTOCK)
-                AND UPPER(pl.LOCATION_ID) NOT LIKE '%OVERSTOCK%'
-                -- Optional broad exclusion (keep if you truly mean *any* STOCK-labelled locations)
-                AND UPPER(pl.LOCATION_ID) NOT LIKE '%STOCK%'
-            )
-         OR (
-                pl.WAREHOUSE_ID = 'SHIPPING'
-                AND pl.LOCATION_ID LIKE 'R11%'
-            )
-      )
+    WHERE pl.WAREHOUSE_ID = 'SHIPPING'
+      AND pl.QTY > 0
+      AND COALESCE(pl.LOCATION_ID, '') <> ''
+      AND UPPER(COALESCE(pl.LOCATION_ID, '')) NOT LIKE '%STAGE%'
+      AND UPPER(COALESCE(pl.LOCATION_ID, '')) NOT LIKE '%INTERNATIONAL%'
+      AND LEFT(COALESCE(pl.LOCATION_ID, ''), 3) BETWEEN 'R01' AND 'R09'
     GROUP BY
         pl.PART_ID,
-        pl.LOCATION_ID,
-        pl.WAREHOUSE_ID
+        pl.LOCATION_ID
 ),
 
-/* 2) Demand base (open order lines) */
+-- DETERMINE DEMAND: open SO lines (Released Orders, Available Lines, Good credit status, Not RMA, Not International, and Not Employee)
 DemandBase AS (
     SELECT
         co.ORDER_DATE,
         co.ID AS CUST_ORDER_ID,
-        co.SHIPTO_ID,
-        co.SHIP_VIA,
         c.ID AS CUSTOMER_ID,
         col.LINE_NO,
         col.PART_ID,
@@ -55,15 +43,16 @@ DemandBase AS (
        AND ce.CREDIT_STATUS = 'A'
     WHERE co.STATUS = 'R'
       AND col.LINE_STATUS = 'A'
-      AND co.SALESREP_ID <> 'RMA'
-      AND co.CUSTOMER_PO_REF NOT LIKE '%RMA%'
-      AND c.DISCOUNT_CODE NOT LIKE '%International%'
-      AND c.DISCOUNT_CODE NOT LIKE '%Employee%'
+      AND (ce.CUSTOMER_ID IS NULL OR ce.CUSTOMER_ID NOT LIKE '%CA MARK%')
+      AND (co.SALESREP_ID IS NULL OR co.SALESREP_ID <> 'RMA')
+      AND (co.CUSTOMER_PO_REF IS NULL OR co.CUSTOMER_PO_REF NOT LIKE '%RMA%')
+      AND (c.DISCOUNT_CODE IS NULL OR c.DISCOUNT_CODE NOT LIKE '%International%')
+      AND (c.DISCOUNT_CODE IS NULL OR c.DISCOUNT_CODE NOT LIKE '%Employee%')
       AND (col.ORDER_QTY - col.TOTAL_SHIPPED_QTY) > 0
-      AND co.SHIPTO_ID IS NOT NULL
 ),
 
-/* 3) Demand filtered to parts with supply + horizon (<= today+10, includes past due; NULL treated as today) */
+-- Determine Demand horizon: customer want date is either past due OR due within next 30 days
+-- NULL promise dates are included by treating them as TODAY
 Demand AS (
     SELECT
         d.*,
@@ -76,39 +65,30 @@ Demand AS (
       AND COALESCE(d.PROMISE_DEL_DATE, p.TODAY) <= p.THROUGH_DATE
 ),
 
-/* 4) Supply cumulative ranges */
+-- Supply ranges per part (location order is arbitrary but deterministic)
 SupplyRanges AS (
     SELECT
         s.PART_ID,
         s.LOCATION_ID,
-        s.WAREHOUSE_ID,
         s.QTY,
-
         SUM(s.QTY) OVER (
             PARTITION BY s.PART_ID
-            ORDER BY
-                CASE WHEN s.WAREHOUSE_ID = 'DISTRIBUTION' THEN 0 ELSE 1 END,
-                s.LOCATION_ID
+            ORDER BY s.LOCATION_ID
             ROWS UNBOUNDED PRECEDING
         ) AS SUPPLY_CUM_END,
-
         SUM(s.QTY) OVER (
             PARTITION BY s.PART_ID
-            ORDER BY
-                CASE WHEN s.WAREHOUSE_ID = 'DISTRIBUTION' THEN 0 ELSE 1 END,
-                s.LOCATION_ID
+            ORDER BY s.LOCATION_ID
             ROWS UNBOUNDED PRECEDING
         ) - s.QTY AS SUPPLY_CUM_START
     FROM Supply s
 ),
 
-/* 5) Demand FIFO cumulative ranges (Promise date FIFO; overdue first) */
+-- Demand ranges per part, FIFO, then tie-breakers
 DemandRanges AS (
     SELECT
         d.ORDER_DATE,
         d.CUST_ORDER_ID,
-        d.SHIPTO_ID,
-        d.SHIP_VIA,
         d.CUSTOMER_ID,
         d.LINE_NO,
         d.PART_ID,
@@ -139,21 +119,16 @@ DemandRanges AS (
     FROM Demand d
 ),
 
-/* 6) Allocation */
 Allocations AS (
     SELECT
         dr.PART_ID,
         sr.LOCATION_ID,
-        sr.WAREHOUSE_ID,
         dr.CUST_ORDER_ID,
-        dr.SHIPTO_ID,
-        dr.SHIP_VIA,
         dr.CUSTOMER_ID,
         dr.LINE_NO,
         dr.PROMISE_DEL_DATE,
         dr.ORDER_DATE,
-
-        (CASE WHEN sr.SUPPLY_CUM_END < dr.DEMAND_CUM_END THEN sr.SUPPLY_CUM_END ELSE dr.DEMAND_CUM_END END)
+        (CASE WHEN sr.SUPPLY_CUM_END   < dr.DEMAND_CUM_END   THEN sr.SUPPLY_CUM_END   ELSE dr.DEMAND_CUM_END   END)
       - (CASE WHEN sr.SUPPLY_CUM_START > dr.DEMAND_CUM_START THEN sr.SUPPLY_CUM_START ELSE dr.DEMAND_CUM_START END)
         AS ALLOC_QTY
     FROM DemandRanges dr
@@ -163,26 +138,20 @@ Allocations AS (
      AND sr.SUPPLY_CUM_START < dr.DEMAND_CUM_END
 )
 
-/* 7) Final output */
 SELECT
     p.PRODUCT_CODE  AS [Product code],
     a.PART_ID       AS [Part Id],
     a.LOCATION_ID   AS [Location],
-    a.WAREHOUSE_ID  AS [Warehouse],
     a.CUST_ORDER_ID AS [Cust Order ID],
     a.CUSTOMER_ID   AS [Customer ID],
-    a.SHIPTO_ID     AS [Ship To ID],
-    a.SHIP_VIA      AS [Ship Via],
     a.ALLOC_QTY     AS [SO Qty]
 FROM Allocations a
-JOIN dbo.PART p
+LEFT JOIN dbo.PART p
   ON p.ID = a.PART_ID
 WHERE a.ALLOC_QTY > 0
 ORDER BY
-    a.PROMISE_DEL_DATE,
-    a.ORDER_DATE,
     a.CUST_ORDER_ID,
     a.LINE_NO,
     a.PART_ID,
-    a.WAREHOUSE_ID,
+    p.PRODUCT_CODE,
     a.LOCATION_ID;

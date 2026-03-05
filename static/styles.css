@@ -86,6 +86,16 @@ select {
   font: inherit;
 }
 
+input[type="text"],
+input[type="password"] {
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font: inherit;
+  width: 100%;
+}
+
 button,
 .button {
   border: 0;
@@ -104,6 +114,12 @@ button:hover,
   background: var(--primary-hover);
 }
 
+button:disabled,
+.button.is-disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
 .button.secondary {
   background: var(--secondary);
   color: #332012;
@@ -111,6 +127,21 @@ button:hover,
 
 .button.secondary:hover {
   background: var(--secondary-hover);
+}
+
+.button.tertiary {
+  background: #dce5ef;
+  color: #2a3f53;
+}
+
+.button.tertiary:hover {
+  background: #ccd8e5;
+}
+
+.table-button {
+  padding: 7px 10px;
+  font-size: 0.85rem;
+  white-space: nowrap;
 }
 
 .alerts {
@@ -140,6 +171,37 @@ button:hover,
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
 }
 
+.mode-grid {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(auto-fit, minmax(460px, 1fr));
+}
+
+.mode-card .table-header {
+  margin-bottom: 8px;
+}
+
+.mode-actions {
+  margin-top: 12px;
+}
+
+.status-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.age-badge {
+  display: inline-block;
+  background: #e7eef5;
+  color: #2e4a60;
+  border-radius: 999px;
+  padding: 4px 9px;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
 .status-card h2,
 .table-card h2 {
   margin-top: 0;
@@ -149,6 +211,10 @@ dl {
   margin: 0;
   display: grid;
   gap: 12px;
+}
+
+.time-grid {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
 }
 
 dl div {
@@ -229,4 +295,59 @@ th {
   color: #4f5c67;
   position: sticky;
   top: 0;
+}
+
+.error-cell {
+  max-width: 280px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.run-form.is-submitting button {
+  opacity: 0.65;
+}
+
+.settings-form {
+  display: grid;
+  gap: 12px;
+  max-width: 760px;
+}
+
+.settings-form h2 {
+  margin: 14px 0 0;
+}
+
+.helper-text {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.checkbox-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  width: fit-content;
+}
+
+@media (max-width: 720px) {
+  .mode-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .table-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+
+  .status-badges {
+    justify-content: flex-start;
+  }
+
+  .actions form {
+    width: 100%;
+  }
 }

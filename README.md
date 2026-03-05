@@ -1,20 +1,21 @@
 # Picklist Automation (Flask)
 
 Simple Python app that:
-- Reads SQL queries from files (`query_guns.sql` and `query_components.sql` by default)
-- Runs it against Microsoft SQL Server
-- Stores each run in SQLite (keeps last 10 runs)
+- Reads SQL queries from files (`sql/query_guns.sql` and `sql/query_components.sql`)
+- Runs against Microsoft SQL Server
+- Stores each run in SQLite (keeps last `MAX_RUNS_TO_KEEP` runs)
 - Shows latest picklist in a web UI
 - Exports latest picklist to Excel
+- Exports prior successful runs from the Recent Runs table
 - Sends Telegram + SMTP notifications for success/failure
-- Uses `python-dotenv` for secrets/config
-- Runs automatically on a daily scheduler (default 05:00 UTC)
+- Supports UI-managed runtime settings (stored in SQLite, override `.env`)
+- Runs automatically on a daily scheduler
 
 ## Setup
 
 1. Create virtual environment and install requirements:
    ```bash
-   python -m venv .venv
+   python3 -m venv .venv
    source .venv/bin/activate
    pip install -r requirements.txt
    ```
@@ -22,58 +23,99 @@ Simple Python app that:
    ```bash
    cp .env.example .env
    ```
-3. Update `query_guns.sql` and `query_components.sql` with your actual picklist queries.
-4. Start app:
+3. Run setup script (creates required runtime directories):
    ```bash
-   python app.py
+   ./scripts/setup.sh
    ```
-5. Open: `http://localhost:5000`
+4. Update SQL files in `sql/` with your real queries.
+5. Start app:
+   ```bash
+   python3 app.py
+   ```
+6. Open: `http://localhost:5000`
 
-## Environment Variables
+## Runtime Settings UI
 
-See `.env.example` for all settings.
+Open `http://localhost:5000/settings` to set:
+- `MSSQL_CONNECTION_STRING`
+- Telegram token/chat ID
+- SMTP settings
 
-## Notes
+The settings page is password-gated:
+- Env var: `SETTINGS_PASSWORD`
+- Default: `TylerW`
 
-- `MSSQL_CONNECTION_STRING` must be a valid SQLAlchemy URL for SQL Server + `pyodbc` (the password is masked in app logs).
-- Run history is stored in `picklist_history.db`.
-- Logs are written to `logs/app.log` with run duration and failure tracebacks for diagnostics.
-- Excel exports are written to `exports/` and also available via browser download.
+Values saved in Settings are persisted in `picklist_history.db` and take precedence over matching `.env` values.
 
+## Access Control
+
+Default is lightweight network-based protection (`ACCESS_MODE=private`):
+- Allows private and loopback clients
+- Blocks public internet clients
+- No additional passwords for warehouse users
+
+Options:
+- `ACCESS_MODE=private` (default)
+- `ACCESS_MODE=cidr` with `ACCESS_ALLOWED_CIDRS=10.0.0.0/8,192.168.1.0/24`
+- `ACCESS_MODE=off` (not recommended)
+
+If behind a reverse proxy, set `TRUST_PROXY_HEADERS=true`.
 
 ## Scheduler
 
-- By default, the app schedules a daily picklist run at `05:00` (`SCHEDULE_TIME=05:00`) in `UTC`.
-- Configure the timezone with `SCHEDULE_TIMEZONE` (example: `America/Chicago`).
-- Disable scheduling with `ENABLE_SCHEDULER=false`.
-- Time format must be `HH:MM` in 24-hour format. Invalid values are logged and scheduler startup is safely skipped instead of crashing the app.
-
+- Controlled by `ENABLE_SCHEDULER=true|false`
+- Daily run time from `SCHEDULE_TIME` (`HH:MM`) and `SCHEDULE_TIMEZONE`
+- Uses a file lock so only one process starts the scheduler
+- For 5:00 AM Denver local time, set:
+  `SCHEDULE_TIME=05:00`
+  `SCHEDULE_TIMEZONE=America/Denver`
+- For fixed MST year-round (UTC-7), use:
+  `SCHEDULE_TIMEZONE=Etc/GMT+7`
 
 ## Docker
 
-Build and run with Docker:
+Build and run:
 
 ```bash
 docker build -t picklist-automation .
+./scripts/setup.sh
 docker run --rm -p 5000:5000 --env-file .env \
-  -v $(pwd)/exports:/app/exports \
-  -v $(pwd)/logs:/app/logs \
-  -v $(pwd)/picklist_history.db:/app/picklist_history.db \
-  -v $(pwd)/query_guns.sql:/app/query_guns.sql:ro \
-  -v $(pwd)/query_components.sql:/app/query_components.sql:ro \
+  -v "$(pwd)/exports:/app/exports" \
+  -v "$(pwd)/logs:/app/logs" \
+  -v "$(pwd)/data:/app/data" \
+  -v "$(pwd)/sql:/app/sql:ro" \
   picklist-automation
 ```
 
-Or use Docker Compose:
+Or with Compose:
 
 ```bash
+./scripts/setup.sh
 docker compose up --build -d
 ```
 
-This image includes the Microsoft ODBC Driver 18 and `pyodbc`, so SQL Server connectivity works inside the container when `MSSQL_CONNECTION_STRING` is set correctly.
+## API / curl
 
+If you run via this repository's Compose file (`8081:5000`), use `http://127.0.0.1:8081`.
 
-### SMTP Notes
+Health check:
 
-- `SMTP_RECIPIENT` supports comma-separated addresses.
-- Set `SMTP_USE_TLS=false` only when your SMTP server expects plaintext or already-terminated TLS.
+```bash
+curl -sS http://127.0.0.1:8081/health
+```
+
+Trigger a run (no CSRF needed for API endpoint):
+
+```bash
+curl -sS -X POST http://127.0.0.1:8081/api/run \
+  -H "Content-Type: application/json" \
+  -d '{"query_type":"guns"}'
+```
+
+## Notes
+
+- `MSSQL_CONNECTION_STRING` must be a SQLAlchemy SQL Server URL (`pyodbc` driver).
+- Logs: `logs/app.log`
+- Request logs include method/path/status/response time.
+- Exports: `exports/`
+- Database: `data/picklist_history.db` (default, configurable via `RUN_HISTORY_DB_PATH`)

@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Picklist Settings</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <main class="page-shell">
+      <section class="hero card">
+        <p class="eyebrow">Configuration</p>
+        <h1>Runtime Settings</h1>
+        {% if settings_unlocked %}
+        <p class="hero-copy">
+          Save notification and connection settings in the app database. Saved values override matching
+          `.env` values.
+        </p>
+        {% else %}
+        <p class="hero-copy">
+          Enter the settings password to view or update runtime configuration.
+        </p>
+        {% endif %}
+        <section class="actions">
+          <a class="button secondary" href="{{ url_for('index') }}">Back to Dashboard</a>
+          {% if settings_unlocked %}
+          <form method="post" action="{{ url_for('settings') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+            <input type="hidden" name="action" value="logout" />
+            <button type="submit" class="button tertiary">Lock Settings</button>
+          </form>
+          {% endif %}
+        </section>
+      </section>
+
+      {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+      <section class="alerts">
+        {% for category, message in messages %}
+        <div class="flash {{ category }}">{{ message }}</div>
+        {% endfor %}
+      </section>
+      {% endif %}
+      {% endwith %}
+
+      <section class="card">
+        {% if not settings_unlocked %}
+        <form method="post" class="settings-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+          <input type="hidden" name="action" value="unlock" />
+          <h2>Unlock Settings</h2>
+          <label for="settings_password">Settings Password</label>
+          <input id="settings_password" name="settings_password" type="password" autocomplete="off" required autofocus />
+          <button type="submit">Unlock</button>
+        </form>
+        {% else %}
+        <form method="post" class="settings-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+          <input type="hidden" name="action" value="save" />
+
+          <h2>Database Connection</h2>
+          <p class="helper-text">Current source: <strong>{{ mssql_source }}</strong>. Current value: <code>{{ mssql_connection_string_masked }}</code></p>
+          <label for="mssql_connection_string">MSSQL Connection String</label>
+          <input id="mssql_connection_string" name="mssql_connection_string" type="password" autocomplete="off" placeholder="Enter only to set or replace" />
+
+          <h2>Telegram</h2>
+          <p class="helper-text">Bot token source: <strong>{{ telegram_bot_source }}</strong> (configured: {{ "yes" if telegram_bot_token_configured else "no" }})</p>
+          <label for="telegram_bot_token">Bot Token</label>
+          <input id="telegram_bot_token" name="telegram_bot_token" type="password" autocomplete="off" placeholder="Enter only to set or replace" />
+
+          <p class="helper-text">Chat ID source: <strong>{{ telegram_chat_source }}</strong></p>
+          <label for="telegram_chat_id">Chat ID</label>
+          <input id="telegram_chat_id" name="telegram_chat_id" type="text" value="{{ telegram_chat_id or '' }}" />
+
+          <h2>SMTP</h2>
+          <label for="smtp_host">SMTP Host</label>
+          <input id="smtp_host" name="smtp_host" type="text" value="{{ smtp_host or '' }}" />
+
+          <label for="smtp_port">SMTP Port</label>
+          <input id="smtp_port" name="smtp_port" type="text" value="{{ smtp_port or '' }}" />
+
+          <label for="smtp_user">SMTP User</label>
+          <input id="smtp_user" name="smtp_user" type="text" value="{{ smtp_user or '' }}" />
+
+          <p class="helper-text">Password source: <strong>{{ smtp_password_source }}</strong> (configured: {{ "yes" if smtp_password_configured else "no" }})</p>
+          <label for="smtp_password">SMTP Password</label>
+          <input id="smtp_password" name="smtp_password" type="password" autocomplete="off" placeholder="Enter only to set or replace" />
+
+          <label for="smtp_sender">SMTP Sender</label>
+          <input id="smtp_sender" name="smtp_sender" type="text" value="{{ smtp_sender or '' }}" />
+
+          <label for="smtp_recipient">SMTP Recipient(s)</label>
+          <input id="smtp_recipient" name="smtp_recipient" type="text" value="{{ smtp_recipient or '' }}" />
+
+          <label class="checkbox-row" for="smtp_use_tls">
+            <input id="smtp_use_tls" name="smtp_use_tls" type="checkbox" {% if smtp_use_tls %}checked{% endif %} />
+            Use STARTTLS
+          </label>
+
+          <button type="submit">Save Settings</button>
+        </form>
+        {% endif %}
+      </section>
+
+      <section class="card">
+        <div class="table-header">
+          <h2>Time Zone Check</h2>
+          <p>Scheduler visibility</p>
+        </div>
+        <dl class="time-grid">
+          <div>
+            <dt>Server Local Time ({{ time_diagnostics['server_timezone'] }})</dt>
+            <dd>{{ time_diagnostics['server_now'] }}</dd>
+          </div>
+          <div>
+            <dt>App Display Time ({{ time_diagnostics['display_timezone'] }})</dt>
+            <dd>{{ time_diagnostics['display_now'] }}</dd>
+          </div>
+          <div>
+            <dt>UTC Time</dt>
+            <dd>{{ time_diagnostics['utc_now'] }}</dd>
+          </div>
+          <div>
+            <dt>Schedule Config</dt>
+            <dd>{{ time_diagnostics['schedule_time'] }} in {{ time_diagnostics['schedule_timezone'] }}</dd>
+          </div>
+          <div>
+            <dt>Next Run (Schedule TZ)</dt>
+            <dd>{{ time_diagnostics['next_run_schedule'] or 'Scheduler not active' }}</dd>
+          </div>
+          <div>
+            <dt>Next Run (Server Local)</dt>
+            <dd>{{ time_diagnostics['next_run_server'] or 'Scheduler not active' }}</dd>
+          </div>
+          <div>
+            <dt>Next Run (UTC)</dt>
+            <dd>{{ time_diagnostics['next_run_utc'] or 'Scheduler not active' }}</dd>
+          </div>
+        </dl>
+        <p class="helper-text">
+          To run at 5:00 Mountain local time, set <code>SCHEDULE_TIME=05:00</code> and
+          <code>SCHEDULE_TIMEZONE=America/Denver</code>. For fixed year-round MST (UTC-7), use
+          <code>SCHEDULE_TIMEZONE=Etc/GMT+7</code>.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

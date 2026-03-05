@@ -12,20 +12,14 @@
         <p class="eyebrow">Operations Dashboard</p>
         <h1>Picklist Automation</h1>
         <p class="hero-copy">
-          Run the latest warehouse picklist, review run details, and export the newest sheet in one place.
+          Run and export Guns/Components independently to reduce operator mistakes.
         </p>
-
         <section class="actions">
-          <form method="post" action="{{ url_for('run_picklist') }}">
-            <label for="query_type">Picklist mode</label>
-            <select id="query_type" name="query_type">
-              {% for option in query_options %}
-              <option value="{{ option }}" {% if option == active_query_type %}selected{% endif %}>{{ option|capitalize }}</option>
-              {% endfor %}
-            </select>
-            <button type="submit">Run New Picklist</button>
+          <form class="run-form run-both-form" method="post" action="{{ url_for('run_both_picklists') }}" data-confirm-message="Run both Guns and Components now?">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+            <button type="submit">Run Both</button>
           </form>
-          <a class="button secondary" href="{{ url_for('export_latest', query_type=active_query_type) }}">Export Latest to Excel</a>
+          <a class="button tertiary" href="{{ url_for('settings') }}">Settings</a>
         </section>
       </section>
 
@@ -41,95 +35,160 @@
 
       <section class="status-grid">
         <article class="card status-card">
-          <h2>Run Status</h2>
-          {% if latest_run %}
-          <dl>
-            <div>
-              <dt>Latest Run ID</dt>
-              <dd>#{{ latest_run['id'] }}</dd>
-            </div>
-            <div>
-              <dt>Status</dt>
-              <dd class="pill {{ latest_run['status'] }}">{{ latest_run['status'] }}</dd>
-            </div>
-            <div>
-              <dt>Query Type</dt>
-              <dd>{{ latest_run['query_type']|capitalize }}</dd>
-            </div>
-            <div>
-              <dt>Rows</dt>
-              <dd>{{ latest_run['row_count'] }}</dd>
-            </div>
-            <div>
-              <dt>Run Time ({{ timezone_label }})</dt>
-              <dd>{{ latest_run['formatted_run_timestamp'] }}</dd>
-            </div>
-            {% if next_run %}
-            <div>
-              <dt>Next Scheduled Run</dt>
-              <dd>{{ next_run }}</dd>
-            </div>
-            {% endif %}
-            {% if latest_run['error_message'] %}
-            <div>
-              <dt>Error</dt>
-              <dd class="error-text">{{ latest_run['error_message'] }}</dd>
-            </div>
-            {% endif %}
-          </dl>
-          {% else %}
-          <p class="empty-state">No runs yet. Click <em>Run New Picklist</em> to begin.</p>
+          <h2>Automation Schedule</h2>
+          <p>
+            Runs daily at <strong>{{ schedule_time_display }}</strong>.
+            Configure via <code>SCHEDULE_TIME</code> and <code>SCHEDULE_TIMEZONE</code>.
+          </p>
+          {% if next_run %}
+          <p><strong>Next run:</strong> {{ next_run }}</p>
           {% endif %}
         </article>
 
         <article class="card status-card">
-          <h2>Automation Schedule</h2>
-          <p>
-            The scheduler runs daily at <strong>{{ schedule_time_display }}</strong>.
-            Configure it with <code>SCHEDULE_TIME</code> and <code>SCHEDULE_TIMEZONE</code>
-            (or <code>DISPLAY_TIMEZONE</code> for dashboard display).
-          </p>
-          <p>
-            Keep this page open for quick checks and one-click exports after each automated run.
-          </p>
+          <h2>Current Table View</h2>
+          <p class="helper-text">Choose which picklist table to display below.</p>
+          <section class="actions mode-actions">
+            {% for option in query_options %}
+            <a
+              class="button {% if option == active_query_type %}secondary{% else %}tertiary{% endif %}"
+              href="{{ url_for('index', query_type=option) }}"
+            >
+              {{ option|capitalize }}
+            </a>
+            {% endfor %}
+          </section>
         </article>
       </section>
 
       <section class="card">
         <div class="table-header">
-          <h2>Recent Runs</h2>
-          <p>Last {{ recent_runs|length }} {{ active_query_type }} runs</p>
+          <h2>Time Zone Check</h2>
+          <p>Confirm scheduler and server clocks</p>
         </div>
-        {% if recent_runs %}
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Run ID</th>
-                <th>Status</th>
-                <th>Type</th>
-                <th>Rows</th>
-                <th>Run Time ({{ timezone_label }})</th>
-                <th>Error</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for run in recent_runs %}
-              <tr>
-                <td>#{{ run['id'] }}</td>
-                <td><span class="pill {{ run['status'] }}">{{ run['status'] }}</span></td>
-                <td>{{ run['query_type']|capitalize }}</td>
-                <td>{{ run['row_count'] }}</td>
-                <td>{{ run['formatted_run_timestamp'] }}</td>
-                <td>{{ run['error_message'] or '-' }}</td>
-              </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
-        {% else %}
-        <p class="empty-state">No historical runs yet. Once runs complete, they will appear here.</p>
-        {% endif %}
+        <dl class="time-grid">
+          <div>
+            <dt>Server Local Time ({{ time_diagnostics['server_timezone'] }})</dt>
+            <dd>{{ time_diagnostics['server_now'] }}</dd>
+          </div>
+          <div>
+            <dt>App Display Time ({{ time_diagnostics['display_timezone'] }})</dt>
+            <dd>{{ time_diagnostics['display_now'] }}</dd>
+          </div>
+          <div>
+            <dt>UTC Time</dt>
+            <dd>{{ time_diagnostics['utc_now'] }}</dd>
+          </div>
+          <div>
+            <dt>Schedule Config</dt>
+            <dd>{{ time_diagnostics['schedule_time'] }} in {{ time_diagnostics['schedule_timezone'] }}</dd>
+          </div>
+          <div>
+            <dt>Next Run (Schedule TZ)</dt>
+            <dd>{{ time_diagnostics['next_run_schedule'] or 'Scheduler not active' }}</dd>
+          </div>
+          <div>
+            <dt>Next Run (Server Local)</dt>
+            <dd>{{ time_diagnostics['next_run_server'] or 'Scheduler not active' }}</dd>
+          </div>
+          <div>
+            <dt>Next Run (UTC)</dt>
+            <dd>{{ time_diagnostics['next_run_utc'] or 'Scheduler not active' }}</dd>
+          </div>
+        </dl>
+        <p class="helper-text">
+          For 5:00 in Denver local time, use <code>SCHEDULE_TIME=05:00</code> and
+          <code>SCHEDULE_TIMEZONE=America/Denver</code>. For fixed year-round MST (UTC-7), use
+          <code>SCHEDULE_TIMEZONE=Etc/GMT+7</code>.
+        </p>
+      </section>
+
+      <section class="mode-grid">
+        {% for option in query_options %}
+        {% set mode_latest = latest_runs_by_type[option] %}
+        <article class="card mode-card">
+          <div class="table-header">
+            <h2>{{ option|capitalize }} Picklist</h2>
+            <div class="status-badges">
+              {% if mode_latest %}
+              <span class="pill {{ mode_latest['status'] }}">{{ mode_latest['status'] }}</span>
+              {% endif %}
+              {% if latest_success_age_by_type[option] %}
+              <span class="age-badge">Last success {{ latest_success_age_by_type[option] }}</span>
+              {% endif %}
+            </div>
+          </div>
+
+          {% if mode_latest %}
+          <p class="helper-text">
+            Run #{{ mode_latest['id'] }} · {{ mode_latest['formatted_run_timestamp'] }} · {{ mode_latest['row_count'] }} rows
+          </p>
+          {% if mode_latest['error_message'] %}
+          <p class="error-text" title="{{ mode_latest['error_message'] }}">{{ mode_latest['error_message'] }}</p>
+          {% endif %}
+          {% else %}
+          <p class="empty-state">No runs yet for {{ option }}.</p>
+          {% endif %}
+
+          <section class="actions mode-actions">
+            <form class="run-form" method="post" action="{{ url_for('run_picklist') }}" data-confirm-message="Run {{ option|capitalize }} picklist now?">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+              <input type="hidden" name="query_type" value="{{ option }}" />
+              <button type="submit">Run {{ option|capitalize }}</button>
+            </form>
+            <a class="button secondary" data-busy-label="Preparing..." href="{{ url_for('export_latest', query_type=option) }}">Export Latest</a>
+            <a class="button tertiary" href="{{ url_for('index', query_type=option) }}">View Table</a>
+          </section>
+        </article>
+        {% endfor %}
+      </section>
+
+      <section class="mode-grid">
+        {% for option in query_options %}
+        {% set recent_runs = recent_runs_by_type[option] %}
+        <article class="card">
+          <div class="table-header">
+            <h2>{{ option|capitalize }} Recent Runs</h2>
+            <p>Last {{ recent_runs|length }}</p>
+          </div>
+          {% if recent_runs %}
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Run ID</th>
+                  <th>Status</th>
+                  <th>Rows</th>
+                  <th>Run Time ({{ timezone_label }})</th>
+                  <th>Export</th>
+                  <th>Error</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for run in recent_runs %}
+                <tr>
+                  <td>#{{ run['id'] }}</td>
+                  <td><span class="pill {{ run['status'] }}">{{ run['status'] }}</span></td>
+                  <td>{{ run['row_count'] }}</td>
+                  <td>{{ run['formatted_run_timestamp'] }}</td>
+                  <td>
+                    {% if run['status'] == 'success' and run['row_count'] > 0 %}
+                    <a class="button secondary table-button" data-busy-label="Preparing..." href="{{ url_for('export_run', run_id=run['id'], query_type=option) }}">Download</a>
+                    {% else %}
+                    -
+                    {% endif %}
+                  </td>
+                  <td class="error-cell" title="{{ run['error_message'] or '' }}">{{ run['error_message'] or '-' }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          {% else %}
+          <p class="empty-state">No historical runs yet for {{ option }}.</p>
+          {% endif %}
+        </article>
+        {% endfor %}
       </section>
 
       {% if rows %}
@@ -166,5 +225,34 @@
       </section>
       {% endif %}
     </main>
+    <script>
+      (function () {
+        document.querySelectorAll("form.run-form").forEach(function (form) {
+          form.addEventListener("submit", function (event) {
+            const confirmMessage = form.getAttribute("data-confirm-message");
+            if (confirmMessage && !window.confirm(confirmMessage)) {
+              event.preventDefault();
+              return;
+            }
+            const submitButton = form.querySelector("button[type='submit']");
+            if (!submitButton) return;
+            submitButton.disabled = true;
+            submitButton.textContent = "Running...";
+            form.classList.add("is-submitting");
+          });
+        });
+
+        document.querySelectorAll("a[data-busy-label]").forEach(function (link) {
+          link.addEventListener("click", function () {
+            const busyLabel = link.getAttribute("data-busy-label");
+            if (!busyLabel) return;
+            link.textContent = busyLabel;
+            link.classList.add("is-disabled");
+            link.setAttribute("aria-disabled", "true");
+            link.style.pointerEvents = "none";
+          });
+        });
+      })();
+    </script>
   </body>
 </html>
