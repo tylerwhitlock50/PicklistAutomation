@@ -43,7 +43,7 @@ Open `http://localhost:5000/settings` to set:
 
 The settings page is password-gated:
 - Env var: `SETTINGS_PASSWORD`
-- Default: `TylerW`
+- Example in `.env.example`: `InforSystem` (change this for your environment)
 
 Values saved in Settings are persisted in `picklist_history.db` and take precedence over matching `.env` values.
 

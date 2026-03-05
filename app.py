@@ -76,7 +76,8 @@ DISPLAY_TIMEZONE = os.getenv("DISPLAY_TIMEZONE")
 ACCESS_MODE = os.getenv("ACCESS_MODE", "private").lower()
 ACCESS_ALLOWED_CIDRS = os.getenv("ACCESS_ALLOWED_CIDRS", "")
 TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "false").lower() == "true"
-SETTINGS_PASSWORD = os.getenv("SETTINGS_PASSWORD", "TylerW")
+SETTINGS_PASSWORD = os.getenv("SETTINGS_PASSWORD", "")
+FLASK_DEBUG = os.getenv("FLASK_DEBUG", "false").lower() == "true"
 SETTINGS_SESSION_KEY = "_settings_access_granted"
 SCHEDULER_LOCK_PATH = BASE_DIR / ".scheduler.lock"
 
@@ -969,6 +970,10 @@ def settings():
         action = (request.form.get("action") or "save").strip().lower()
 
         if action == "unlock":
+            if not SETTINGS_PASSWORD:
+                logger.error("SETTINGS_PASSWORD is not configured.")
+                flash("SETTINGS_PASSWORD is not configured on this server.", "error")
+                return redirect(url_for("settings"))
             submitted_password = request.form.get("settings_password") or ""
             if secrets.compare_digest(submitted_password, SETTINGS_PASSWORD):
                 session[SETTINGS_SESSION_KEY] = True
@@ -1222,4 +1227,9 @@ def api_run_picklist():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=True, use_reloader=False)
+    app.run(
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "5000")),
+        debug=FLASK_DEBUG,
+        use_reloader=False,
+    )
