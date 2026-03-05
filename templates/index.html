@@ -9,17 +9,45 @@
   <body>
     <main class="page-shell">
       <section class="hero card">
-        <p class="eyebrow">Operations Dashboard</p>
-        <h1>Picklist Automation</h1>
+        <div class="hero-top">
+          <div>
+            <p class="eyebrow">Operations Dashboard</p>
+            <h1>Picklist Automation</h1>
+          </div>
+          <label class="operator-toggle" for="operator-mode-toggle">
+            <span id="operator-mode-label">Operator Mode</span>
+            <input
+              type="checkbox"
+              id="operator-mode-toggle"
+              role="switch"
+              aria-label="Toggle operator mode"
+            />
+          </label>
+        </div>
         <p class="hero-copy">
           Run and export Guns/Components independently to reduce operator mistakes.
         </p>
-        <section class="actions">
-          <form class="run-form run-both-form" method="post" action="{{ url_for('run_both_picklists') }}" data-confirm-message="Run both Guns and Components now?">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
-            <button type="submit">Run Both</button>
-          </form>
-          <a class="button tertiary" href="{{ url_for('settings') }}">Settings</a>
+        <section class="quick-actions">
+          {% for option in query_options %}
+          <section class="actions quick-action-row">
+            <form
+              class="run-form"
+              method="post"
+              action="{{ url_for('run_picklist') }}"
+              data-query-type="{{ option }}"
+            >
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+              <input type="hidden" name="query_type" value="{{ option }}" />
+              <button type="submit" data-run-submit>Run {{ option|capitalize }}</button>
+            </form>
+            <a class="button secondary" data-busy-label="Preparing..." href="{{ url_for('export_latest', query_type=option) }}">
+              Export Latest {{ option|capitalize }}
+            </a>
+          </section>
+          {% endfor %}
+          <section class="actions quick-action-row">
+            <a class="button tertiary" href="{{ url_for('settings') }}">Settings</a>
+          </section>
         </section>
       </section>
 
@@ -33,35 +61,49 @@
       {% endif %}
       {% endwith %}
 
-      <section class="status-grid">
-        <article class="card status-card">
-          <h2>Automation Schedule</h2>
-          <p>
-            Runs daily at <strong>{{ schedule_time_display }}</strong>.
-            Configure via <code>SCHEDULE_TIME</code> and <code>SCHEDULE_TIMEZONE</code>.
-          </p>
-          {% if next_run %}
-          <p><strong>Next run:</strong> {{ next_run }}</p>
-          {% endif %}
-        </article>
-
-        <article class="card status-card">
-          <h2>Current Table View</h2>
-          <p class="helper-text">Choose which picklist table to display below.</p>
-          <section class="actions mode-actions">
-            {% for option in query_options %}
-            <a
-              class="button {% if option == active_query_type %}secondary{% else %}tertiary{% endif %}"
-              href="{{ url_for('index', query_type=option) }}"
-            >
-              {{ option|capitalize }}
-            </a>
-            {% endfor %}
-          </section>
-        </article>
+      <section class="card run-control-card">
+        <div class="table-header">
+          <h2>Run Control</h2>
+          <p>Live status refreshes every {{ ui_refresh_interval_seconds }} seconds</p>
+        </div>
+        <div class="run-control-grid" id="run-control-grid">
+          {% for option in query_options %}
+          {% set run_state = run_state_by_type.get(option, {}) %}
+          {% set mode_latest = latest_runs_by_type[option] %}
+          <article class="run-control-item" data-run-card data-query-type="{{ option }}">
+            <h3>{{ option|capitalize }}</h3>
+            <p>
+              State:
+              <span
+                class="pill {% if run_state.get('running') %}running{% else %}idle{% endif %}"
+                data-run-state
+              >
+                {% if run_state.get('running') %}running{% else %}idle{% endif %}
+              </span>
+            </p>
+            <p class="helper-text" data-run-started-at data-advanced-inline>
+              Started: {{ run_state.get('started_at_display') or 'Not running' }}
+            </p>
+            <p class="helper-text" data-run-last-success data-advanced-inline>
+              Last success: {{ latest_success_age_by_type[option] or 'No successful run yet' }}
+            </p>
+            <p class="helper-text" data-run-last-rows data-advanced-inline>
+              Last rows:
+              {% if mode_latest %}
+              {{ mode_latest['row_count'] }}
+              {% else %}
+              No run yet
+              {% endif %}
+            </p>
+          </article>
+          {% endfor %}
+        </div>
+        <p class="helper-text run-control-next" data-next-run-row>
+          Next scheduled run: <strong data-next-run>{{ next_run or 'Scheduler not active' }}</strong>
+        </p>
       </section>
 
-      <section class="card">
+      <section class="card advanced-section" data-advanced-section>
         <div class="table-header">
           <h2>Time Zone Check</h2>
           <p>Confirm scheduler and server clocks</p>
@@ -103,107 +145,113 @@
         </p>
       </section>
 
-      <section class="mode-grid">
-        {% for option in query_options %}
-        {% set mode_latest = latest_runs_by_type[option] %}
-        <article class="card mode-card">
-          <div class="table-header">
-            <h2>{{ option|capitalize }} Picklist</h2>
-            <div class="status-badges">
-              {% if mode_latest %}
-              <span class="pill {{ mode_latest['status'] }}">{{ mode_latest['status'] }}</span>
-              {% endif %}
-              {% if latest_success_age_by_type[option] %}
-              <span class="age-badge">Last success {{ latest_success_age_by_type[option] }}</span>
-              {% endif %}
-            </div>
+      {% set ns = namespace(total_recent_runs=0) %}
+      {% for option in query_options %}
+      {% set ns.total_recent_runs = ns.total_recent_runs + (recent_runs_by_type[option]|length) %}
+      {% endfor %}
+      <section class="card advanced-section" data-advanced-section>
+        <div class="table-header">
+          <h2>Recent Runs</h2>
+          <p>Last {{ ns.total_recent_runs }}</p>
+        </div>
+        {% if ns.total_recent_runs > 0 %}
+        <div class="table-controls" data-table-controls data-table-id="recent-runs-table">
+          <label for="filter-recent-runs-table">Search rows</label>
+          <input id="filter-recent-runs-table" type="text" data-table-filter placeholder="Filter this table" />
+          <div class="density-toggle">
+            <button type="button" class="button tertiary" data-density-value="comfortable">Comfortable</button>
+            <button type="button" class="button tertiary" data-density-value="compact">Compact</button>
           </div>
-
-          {% if mode_latest %}
-          <p class="helper-text">
-            Run #{{ mode_latest['id'] }} · {{ mode_latest['formatted_run_timestamp'] }} · {{ mode_latest['row_count'] }} rows
-          </p>
-          {% if mode_latest['error_message'] %}
-          <p class="error-text" title="{{ mode_latest['error_message'] }}">{{ mode_latest['error_message'] }}</p>
-          {% endif %}
-          {% else %}
-          <p class="empty-state">No runs yet for {{ option }}.</p>
-          {% endif %}
-
-          <section class="actions mode-actions">
-            <form class="run-form" method="post" action="{{ url_for('run_picklist') }}" data-confirm-message="Run {{ option|capitalize }} picklist now?">
-              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
-              <input type="hidden" name="query_type" value="{{ option }}" />
-              <button type="submit">Run {{ option|capitalize }}</button>
-            </form>
-            <a class="button secondary" data-busy-label="Preparing..." href="{{ url_for('export_latest', query_type=option) }}">Export Latest</a>
-            <a class="button tertiary" href="{{ url_for('index', query_type=option) }}">View Table</a>
-          </section>
-        </article>
-        {% endfor %}
-      </section>
-
-      <section class="mode-grid">
-        {% for option in query_options %}
-        {% set recent_runs = recent_runs_by_type[option] %}
-        <article class="card">
-          <div class="table-header">
-            <h2>{{ option|capitalize }} Recent Runs</h2>
-            <p>Last {{ recent_runs|length }}</p>
-          </div>
-          {% if recent_runs %}
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Run ID</th>
-                  <th>Status</th>
-                  <th>Rows</th>
-                  <th>Run Time ({{ timezone_label }})</th>
-                  <th>Export</th>
-                  <th>Error</th>
-                </tr>
-              </thead>
-              <tbody>
-                {% for run in recent_runs %}
-                <tr>
-                  <td>#{{ run['id'] }}</td>
-                  <td><span class="pill {{ run['status'] }}">{{ run['status'] }}</span></td>
-                  <td>{{ run['row_count'] }}</td>
-                  <td>{{ run['formatted_run_timestamp'] }}</td>
-                  <td>
-                    {% if run['status'] == 'success' and run['row_count'] > 0 %}
-                    <a class="button secondary table-button" data-busy-label="Preparing..." href="{{ url_for('export_run', run_id=run['id'], query_type=option) }}">Download</a>
+        </div>
+        <div class="table-wrap">
+          <table id="recent-runs-table" data-filterable-table>
+            <thead>
+              <tr>
+                <th>Type</th>
+                <th>Run ID</th>
+                <th>Status</th>
+                <th>Rows</th>
+                <th>Run Time ({{ timezone_label }})</th>
+                <th>Export</th>
+                <th>Error</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for option in query_options %}
+              {% set recent_runs = recent_runs_by_type[option] %}
+              {% for run in recent_runs %}
+              <tr>
+                <td><span class="pill run-type {{ option }}">{{ option|capitalize }}</span></td>
+                <td>#{{ run['id'] }}</td>
+                <td><span class="pill {{ run['status'] }}">{{ run['status'] }}</span></td>
+                <td>{{ run['row_count'] }}</td>
+                <td>{{ run['formatted_run_timestamp'] }}</td>
+                <td>
+                  {% if run['status'] == 'success' and run['row_count'] > 0 %}
+                  <a class="button secondary table-button" data-busy-label="Preparing..." href="{{ url_for('export_run', run_id=run['id'], query_type=option) }}">Download</a>
+                  {% else %}
+                  -
+                  {% endif %}
+                </td>
+                <td class="error-cell">
+                  {% if run['error_message'] %}
+                    {% if run['error_message']|length > 96 %}
+                    <p class="error-preview">{{ run['error_message'][:96] }}...</p>
+                    <button type="button" class="button tertiary table-inline-button" data-error-toggle>Show</button>
+                    <pre class="error-full" hidden>{{ run['error_message'] }}</pre>
                     {% else %}
-                    -
+                    <span class="error-inline">{{ run['error_message'] }}</span>
                     {% endif %}
-                  </td>
-                  <td class="error-cell" title="{{ run['error_message'] or '' }}">{{ run['error_message'] or '-' }}</td>
-                </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          </div>
-          {% else %}
-          <p class="empty-state">No historical runs yet for {{ option }}.</p>
-          {% endif %}
-        </article>
-        {% endfor %}
+                  {% else %}
+                  -
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <p class="empty-state">No historical runs yet.</p>
+        {% endif %}
       </section>
 
       {% if rows %}
-      <section class="card table-card">
+      <section class="card table-card advanced-section" data-advanced-section>
         <div class="table-header">
-          <h2>Current Picklist</h2>
-          <p>{{ active_query_type|capitalize }} · {{ rows|length }} records{% if using_dummy_data %} (sample data){% endif %}</p>
+          <div>
+            <h2>Current Picklist</h2>
+            <p>{{ active_query_type|capitalize }} · {{ rows|length }} records{% if using_dummy_data %} (sample data){% endif %}</p>
+          </div>
+          <section class="actions mode-actions table-view-toggle">
+            {% for option in query_options %}
+            <a
+              class="button {% if option == active_query_type %}secondary{% else %}tertiary{% endif %}"
+              href="{{ url_for('index', query_type=option) }}"
+              data-mode-link
+              data-query-option="{{ option }}"
+            >
+              {{ option|capitalize }}
+            </a>
+            {% endfor %}
+          </section>
         </div>
         {% if using_dummy_data %}
         <p class="empty-state">
           No picklist data has been generated yet. Showing sample rows to preview the layout.
         </p>
         {% endif %}
+        <div class="table-controls" data-table-controls data-table-id="current-picklist-table">
+          <label for="filter-current-picklist-table">Search rows</label>
+          <input id="filter-current-picklist-table" type="text" data-table-filter placeholder="Filter this table" />
+          <div class="density-toggle">
+            <button type="button" class="button tertiary" data-density-value="comfortable">Comfortable</button>
+            <button type="button" class="button tertiary" data-density-value="compact">Compact</button>
+          </div>
+        </div>
         <div class="table-wrap">
-          <table>
+          <table id="current-picklist-table" data-filterable-table>
             <thead>
               <tr>
                 {% for col in columns %}
@@ -227,20 +275,52 @@
     </main>
     <script>
       (function () {
-        document.querySelectorAll("form.run-form").forEach(function (form) {
-          form.addEventListener("submit", function (event) {
-            const confirmMessage = form.getAttribute("data-confirm-message");
-            if (confirmMessage && !window.confirm(confirmMessage)) {
-              event.preventDefault();
-              return;
-            }
-            const submitButton = form.querySelector("button[type='submit']");
-            if (!submitButton) return;
-            submitButton.disabled = true;
-            submitButton.textContent = "Running...";
-            form.classList.add("is-submitting");
+        const storageKeys = {
+          activeQuery: "picklist.activeQueryType",
+          tableDensity: "picklist.tableDensity",
+          showAdvanced: "picklist.showAdvanced.v2",
+        };
+        const queryOptions = {{ query_options|tojson }};
+        const refreshIntervalSeconds = Number({{ ui_refresh_interval_seconds|tojson }}) || 15;
+        const initialStatus = {
+          active_runs: {{ run_state_by_type|tojson }},
+          latest_runs_by_type: {{ latest_runs_by_type|tojson }},
+          latest_success_age_by_type: {{ latest_success_age_by_type|tojson }},
+          next_run: {{ next_run|tojson }},
+        };
+
+        const operatorModeToggle = document.getElementById("operator-mode-toggle");
+        const operatorModeLabel = document.getElementById("operator-mode-label");
+        const advancedSections = document.querySelectorAll("[data-advanced-section]");
+        const advancedInlineDetails = document.querySelectorAll("[data-advanced-inline]");
+
+        function applyAdvancedMode(showAdvanced) {
+          const visible = Boolean(showAdvanced);
+          advancedSections.forEach(function (section) {
+            section.hidden = !visible;
           });
-        });
+          advancedInlineDetails.forEach(function (node) {
+            node.hidden = !visible;
+          });
+          if (operatorModeToggle) {
+            const operatorEnabled = !visible;
+            operatorModeToggle.checked = operatorEnabled;
+            operatorModeToggle.setAttribute("aria-checked", operatorEnabled ? "true" : "false");
+          }
+          if (operatorModeLabel) {
+            operatorModeLabel.textContent = visible ? "Operator Mode Off" : "Operator Mode On";
+          }
+          localStorage.setItem(storageKeys.showAdvanced, visible ? "1" : "0");
+        }
+
+        const showAdvancedDefault = localStorage.getItem(storageKeys.showAdvanced) === "1";
+        applyAdvancedMode(showAdvancedDefault);
+
+        if (operatorModeToggle) {
+          operatorModeToggle.addEventListener("change", function () {
+            applyAdvancedMode(!operatorModeToggle.checked);
+          });
+        }
 
         document.querySelectorAll("a[data-busy-label]").forEach(function (link) {
           link.addEventListener("click", function () {
@@ -252,6 +332,168 @@
             link.style.pointerEvents = "none";
           });
         });
+
+        document.querySelectorAll("form.run-form").forEach(function (form) {
+          form.addEventListener("submit", function () {
+            const submitButton = form.querySelector("button[type='submit']");
+            if (!submitButton) return;
+            submitButton.disabled = true;
+            if (!submitButton.dataset.keepLabel) {
+              submitButton.textContent = "Running...";
+            }
+            form.classList.add("is-submitting");
+          });
+        });
+
+        function setDensity(density) {
+          const normalized = density === "compact" ? "compact" : "comfortable";
+          document.body.classList.toggle("density-compact", normalized === "compact");
+          localStorage.setItem(storageKeys.tableDensity, normalized);
+          document.querySelectorAll("[data-density-value]").forEach(function (button) {
+            const selected = button.getAttribute("data-density-value") === normalized;
+            button.classList.toggle("secondary", selected);
+            button.classList.toggle("tertiary", !selected);
+          });
+        }
+
+        document.querySelectorAll("[data-density-value]").forEach(function (button) {
+          button.addEventListener("click", function () {
+            const value = button.getAttribute("data-density-value") || "comfortable";
+            setDensity(value);
+          });
+        });
+
+        setDensity(localStorage.getItem(storageKeys.tableDensity) || "comfortable");
+
+        document.querySelectorAll("[data-table-controls]").forEach(function (controls) {
+          const tableId = controls.getAttribute("data-table-id");
+          if (!tableId) return;
+          const table = document.getElementById(tableId);
+          if (!table) return;
+          const filterInput = controls.querySelector("[data-table-filter]");
+          if (!filterInput) return;
+
+          filterInput.addEventListener("input", function () {
+            const query = (filterInput.value || "").toLowerCase().trim();
+            table.querySelectorAll("tbody tr").forEach(function (row) {
+              const visible = !query || row.textContent.toLowerCase().includes(query);
+              row.hidden = !visible;
+            });
+          });
+        });
+
+        document.querySelectorAll("[data-error-toggle]").forEach(function (toggleButton) {
+          toggleButton.addEventListener("click", function () {
+            const cell = toggleButton.closest(".error-cell");
+            if (!cell) return;
+            const expanded = cell.classList.toggle("is-expanded");
+            const fullError = cell.querySelector(".error-full");
+            if (fullError) {
+              fullError.hidden = !expanded;
+            }
+            toggleButton.textContent = expanded ? "Hide" : "Show";
+          });
+        });
+
+        function applyRunStatus(statusPayload) {
+          const activeRuns = statusPayload && statusPayload.active_runs ? statusPayload.active_runs : {};
+          const latestRuns = statusPayload && statusPayload.latest_runs_by_type ? statusPayload.latest_runs_by_type : {};
+          const successAge = statusPayload && statusPayload.latest_success_age_by_type ? statusPayload.latest_success_age_by_type : {};
+
+          let hasAnyIdle = false;
+
+          document.querySelectorAll("[data-run-card]").forEach(function (card) {
+            const queryType = card.getAttribute("data-query-type");
+            const state = (queryType && activeRuns[queryType]) || {};
+            const latest = (queryType && latestRuns[queryType]) || null;
+            const isRunning = Boolean(state.running);
+            const queryForm = queryType
+              ? document.querySelector("form.run-form[data-query-type='" + queryType + "']")
+              : null;
+            const isSubmitting = Boolean(queryForm && queryForm.classList.contains("is-submitting"));
+            const visualState = isRunning ? "running" : isSubmitting ? "busy" : "idle";
+
+            if (!isRunning) {
+              hasAnyIdle = true;
+            }
+
+            const stateNode = card.querySelector("[data-run-state]");
+            if (stateNode) {
+              stateNode.textContent = visualState;
+              stateNode.classList.toggle("running", visualState === "running");
+              stateNode.classList.toggle("busy", visualState === "busy");
+              stateNode.classList.toggle("idle", visualState === "idle");
+            }
+
+            const startedNode = card.querySelector("[data-run-started-at]");
+            if (startedNode) {
+              startedNode.textContent = "Started: " + (state.started_at_display || "Not running");
+            }
+
+            const successNode = card.querySelector("[data-run-last-success]");
+            if (successNode) {
+              successNode.textContent = "Last success: " + (successAge[queryType] || "No successful run yet");
+            }
+
+            const rowsNode = card.querySelector("[data-run-last-rows]");
+            if (rowsNode) {
+              rowsNode.textContent = "Last rows: " + (latest ? latest.row_count : "No run yet");
+            }
+          });
+
+          document.querySelectorAll("form.run-form[data-query-type]").forEach(function (form) {
+            const queryType = form.getAttribute("data-query-type");
+            const submitButton = form.querySelector("button[type='submit']");
+            if (!submitButton) return;
+
+            const running = Boolean(queryType && activeRuns[queryType] && activeRuns[queryType].running);
+            const isSubmitting = form.classList.contains("is-submitting");
+            submitButton.disabled = running || isSubmitting;
+          });
+
+          const nextRunNode = document.querySelector("[data-next-run]");
+          const nextRunRow = document.querySelector("[data-next-run-row]");
+          if (nextRunNode) {
+            nextRunNode.textContent = statusPayload.next_run || "Scheduler not active";
+          }
+          if (nextRunRow) {
+            nextRunRow.hidden = !hasAnyIdle;
+          }
+        }
+
+        async function refreshStatus() {
+          try {
+            const response = await fetch("{{ url_for('api_status') }}", {
+              headers: { Accept: "application/json" },
+            });
+            if (!response.ok) return;
+            const payload = await response.json();
+            applyRunStatus(payload);
+          } catch (_error) {
+            // Keep current UI state if polling fails.
+          }
+        }
+
+        applyRunStatus(initialStatus);
+        window.setInterval(refreshStatus, refreshIntervalSeconds * 1000);
+
+        document.querySelectorAll("[data-mode-link]").forEach(function (modeLink) {
+          modeLink.addEventListener("click", function () {
+            const option = modeLink.getAttribute("data-query-option");
+            if (!option) return;
+            localStorage.setItem(storageKeys.activeQuery, option);
+          });
+        });
+
+        const url = new URL(window.location.href);
+        const currentQueryType = url.searchParams.get("query_type");
+        if (!currentQueryType) {
+          const savedQueryType = localStorage.getItem(storageKeys.activeQuery);
+          if (savedQueryType && queryOptions.includes(savedQueryType)) {
+            url.searchParams.set("query_type", savedQueryType);
+            window.location.replace(url.toString());
+          }
+        }
       })();
     </script>
   </body>

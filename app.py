@@ -5,8 +5,10 @@ import io
 import json
 import logging
 import os
+import re
 import secrets
 import sqlite3
+import threading
 import time
 from datetime import datetime, timezone
 from email.message import EmailMessage
@@ -73,6 +75,7 @@ SCHEDULE_TIME = os.getenv("SCHEDULE_TIME", "05:00")
 SCHEDULE_TIMEZONE = os.getenv("SCHEDULE_TIMEZONE", "UTC")
 ENABLE_SCHEDULER = os.getenv("ENABLE_SCHEDULER", "true").lower() == "true"
 DISPLAY_TIMEZONE = os.getenv("DISPLAY_TIMEZONE")
+UI_REFRESH_INTERVAL_SECONDS = int(os.getenv("UI_REFRESH_INTERVAL_SECONDS", "15"))
 ACCESS_MODE = os.getenv("ACCESS_MODE", "private").lower()
 ACCESS_ALLOWED_CIDRS = os.getenv("ACCESS_ALLOWED_CIDRS", "")
 TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "false").lower() == "true"
@@ -82,6 +85,11 @@ SETTINGS_SESSION_KEY = "_settings_access_granted"
 SCHEDULER_LOCK_PATH = BASE_DIR / ".scheduler.lock"
 
 SCHEDULER_LOCK_FILE = None
+RUN_STATE_LOCK = threading.Lock()
+RUN_STATE: dict[str, dict[str, Optional[datetime] | bool]] = {
+    query_type: {"running": False, "started_at": None}
+    for query_type in QUERY_FILES
+}
 
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -387,6 +395,54 @@ def get_query_type(value: Optional[str]) -> str:
     if value in QUERY_FILES:
         return value
     return DEFAULT_QUERY_TYPE
+
+
+def try_mark_run_started(query_type: str) -> bool:
+    started_at = datetime.now(timezone.utc)
+    with RUN_STATE_LOCK:
+        state = RUN_STATE.setdefault(query_type, {"running": False, "started_at": None})
+        if bool(state["running"]):
+            return False
+        state["running"] = True
+        state["started_at"] = started_at
+    return True
+
+
+def mark_run_finished(query_type: str) -> None:
+    with RUN_STATE_LOCK:
+        state = RUN_STATE.setdefault(query_type, {"running": False, "started_at": None})
+        state["running"] = False
+        state["started_at"] = None
+
+
+def is_run_active(query_type: str) -> bool:
+    with RUN_STATE_LOCK:
+        state = RUN_STATE.setdefault(query_type, {"running": False, "started_at": None})
+        return bool(state["running"])
+
+
+def any_run_active() -> bool:
+    with RUN_STATE_LOCK:
+        return any(bool(state["running"]) for state in RUN_STATE.values())
+
+
+def get_run_state_snapshot() -> dict[str, dict[str, Optional[str] | bool]]:
+    snapshot: dict[str, dict[str, Optional[str] | bool]] = {}
+    with RUN_STATE_LOCK:
+        for query_type in QUERY_FILES:
+            state = RUN_STATE.setdefault(query_type, {"running": False, "started_at": None})
+            started_at_value = state["started_at"]
+            started_at_iso = None
+            started_at_display = None
+            if isinstance(started_at_value, datetime):
+                started_at_iso = started_at_value.isoformat()
+                started_at_display = format_datetime_for_display(started_at_value)
+            snapshot[query_type] = {
+                "running": bool(state["running"]),
+                "started_at": started_at_iso,
+                "started_at_display": started_at_display,
+            }
+    return snapshot
 
 
 def load_query(query_type: str) -> str:
@@ -729,6 +785,13 @@ def execute_picklist_run(query_type: Optional[str] = None) -> Optional[Path]:
     started_at = time.perf_counter()
     run_timestamp = datetime.utcnow()
     normalized_query_type = get_query_type(query_type)
+    if not try_mark_run_started(normalized_query_type):
+        logger.info(
+            "Skipped picklist run for %s because another run is already active.",
+            normalized_query_type,
+        )
+        return None
+
     try:
         df = fetch_picklist_from_mssql(normalized_query_type)
         run_id = save_run(
@@ -792,6 +855,8 @@ def execute_picklist_run(query_type: Optional[str] = None) -> Optional[Path]:
         except Exception as notify_exc:  # noqa: BLE001
             logger.exception("Unexpected SMTP notification error: %s", notify_exc)
         return None
+    finally:
+        mark_run_finished(normalized_query_type)
 
 
 def parse_schedule_time(time_value: str) -> tuple[int, int]:
@@ -890,20 +955,12 @@ def settings_access_granted() -> bool:
     return bool(session.get(SETTINGS_SESSION_KEY, False))
 
 
-initialize_db()
-start_scheduler()
-
-
-@app.route("/")
-@require_trusted_client
-def index():
-    query_type = get_query_type(request.args.get("query_type"))
-    latest_run, rows = get_latest_run(query_type=query_type)
-    using_dummy_data = False
-    if not rows:
-        rows = get_dummy_picklist_rows()
-        using_dummy_data = True
-
+def build_dashboard_data(recent_limit: int = 5) -> tuple[
+    list[str],
+    dict[str, Optional[dict]],
+    dict[str, list[dict]],
+    dict[str, Optional[str]],
+]:
     query_types = list(QUERY_FILES.keys())
     latest_runs_by_type: dict[str, Optional[dict]] = {}
     recent_runs_by_type: dict[str, list[dict]] = {}
@@ -927,11 +984,108 @@ def index():
             latest_success_age_by_type[mode] = None
 
         formatted_recent = []
-        for run in get_recent_runs(query_type=mode, limit=5):
+        for run in get_recent_runs(query_type=mode, limit=recent_limit):
             formatted_run = dict(run)
             formatted_run["formatted_run_timestamp"] = format_run_timestamp(run["run_timestamp"])
             formatted_recent.append(formatted_run)
         recent_runs_by_type[mode] = formatted_recent
+
+    return query_types, latest_runs_by_type, recent_runs_by_type, latest_success_age_by_type
+
+
+def build_status_payload() -> dict:
+    query_types, latest_runs_by_type, _, latest_success_age_by_type = build_dashboard_data(
+        recent_limit=1
+    )
+    next_run = get_next_scheduled_run()
+
+    active_runs = get_run_state_snapshot()
+    for query_type in query_types:
+        active_runs.setdefault(
+            query_type,
+            {"running": False, "started_at": None, "started_at_display": None},
+        )
+
+    return {
+        "active_runs": active_runs,
+        "latest_runs_by_type": latest_runs_by_type,
+        "latest_success_age_by_type": latest_success_age_by_type,
+        "next_run": format_datetime_for_display(next_run) if next_run else None,
+        "refresh_interval_seconds": UI_REFRESH_INTERVAL_SECONDS,
+    }
+
+
+def send_telegram_notification_with_credentials(
+    bot_token: str, chat_id: str, message: str
+) -> tuple[bool, str]:
+    if not bot_token or not chat_id:
+        return False, "Bot token and chat ID are required."
+
+    try:
+        response = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            json={"chat_id": chat_id, "text": message},
+            timeout=10,
+        )
+        response.raise_for_status()
+        return True, "Telegram test message sent successfully."
+    except requests.RequestException as exc:
+        logger.exception("Telegram settings test failed: %s", exc)
+        return False, f"Telegram request failed: {exc}"
+
+
+def send_email_notification_with_config(
+    *,
+    smtp_host: str,
+    smtp_port: int,
+    smtp_user: str,
+    smtp_password: str,
+    smtp_sender: str,
+    smtp_recipients: list[str],
+    smtp_use_tls: bool,
+    subject: str,
+    body: str,
+) -> tuple[bool, str]:
+    if not all([smtp_host, smtp_user, smtp_password, smtp_sender, smtp_recipients]):
+        return False, "SMTP host/user/password/sender/recipient are required."
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = smtp_sender
+    msg["To"] = ", ".join(smtp_recipients)
+    msg.set_content(body)
+
+    try:
+        import smtplib
+
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=15) as server:
+            if smtp_use_tls:
+                server.starttls()
+            server.login(smtp_user, smtp_password)
+            server.send_message(msg)
+        return True, "SMTP test email sent successfully."
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("SMTP settings test failed: %s", exc)
+        return False, f"SMTP test failed: {exc}"
+
+
+initialize_db()
+start_scheduler()
+
+
+@app.route("/")
+@require_trusted_client
+def index():
+    query_type = get_query_type(request.args.get("query_type"))
+    latest_run, rows = get_latest_run(query_type=query_type)
+    using_dummy_data = False
+    if not rows:
+        rows = get_dummy_picklist_rows()
+        using_dummy_data = True
+
+    query_types, latest_runs_by_type, recent_runs_by_type, latest_success_age_by_type = (
+        build_dashboard_data(recent_limit=5)
+    )
 
     formatted_latest_run = None
     if latest_run:
@@ -944,6 +1098,7 @@ def index():
     next_run = get_next_scheduled_run()
     formatted_next_run = format_datetime_for_display(next_run) if next_run else None
     time_diagnostics = build_time_diagnostics(next_run)
+    run_state_by_type = get_run_state_snapshot()
     return render_template(
         "index.html",
         latest_run=formatted_latest_run,
@@ -959,6 +1114,8 @@ def index():
         schedule_time_display=format_schedule_time(SCHEDULE_TIME),
         timezone_label=get_timezone_label(),
         time_diagnostics=time_diagnostics,
+        run_state_by_type=run_state_by_type,
+        ui_refresh_interval_seconds=UI_REFRESH_INTERVAL_SECONDS,
     )
 
 
@@ -1094,6 +1251,10 @@ def settings():
 @require_csrf
 def run_picklist():
     query_type = get_query_type(request.form.get("query_type"))
+    if is_run_active(query_type):
+        flash(f"{query_type.capitalize()} run is already in progress.", "error")
+        return redirect(url_for("index", query_type=query_type))
+
     export_path = execute_picklist_run(query_type=query_type)
     if export_path:
         flash(
@@ -1101,7 +1262,10 @@ def run_picklist():
             "success",
         )
     else:
-        flash("Picklist run failed. Check logs for details.", "error")
+        flash(
+            f"Picklist run for {query_type} did not start or failed. Check logs for details.",
+            "error",
+        )
     return redirect(url_for("index", query_type=query_type))
 
 
@@ -1109,6 +1273,10 @@ def run_picklist():
 @require_trusted_client
 @require_csrf
 def run_both_picklists():
+    if any_run_active():
+        flash("Another run is already in progress. Wait before using Run Both.", "error")
+        return redirect(url_for("index", query_type=DEFAULT_QUERY_TYPE))
+
     results: list[str] = []
     all_succeeded = True
 
@@ -1205,11 +1373,130 @@ def health():
     return jsonify({"status": "ok"}), 200
 
 
+@app.get("/api/status")
+@require_trusted_client
+def api_status():
+    return jsonify(build_status_payload()), 200
+
+
+def parse_recipient_addresses(raw_value: str) -> list[str]:
+    return [item.strip() for item in raw_value.split(",") if item.strip()]
+
+
+def recipients_are_valid(recipients: list[str]) -> bool:
+    email_pattern = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    return all(email_pattern.match(address) for address in recipients)
+
+
+@app.post("/api/settings/test-telegram")
+@require_trusted_client
+@require_csrf
+def api_test_telegram_settings():
+    if not settings_access_granted():
+        return jsonify({"ok": False, "message": "Unlock settings before testing."}), 403
+
+    payload = request.get_json(silent=True) or {}
+    bot_token = (payload.get("bot_token") or "").strip()
+    chat_id = (payload.get("chat_id") or "").strip()
+    if not bot_token:
+        bot_token = get_config_value("telegram_bot_token", "TELEGRAM_BOT_TOKEN", "") or ""
+    if not chat_id:
+        chat_id = get_config_value("telegram_chat_id", "TELEGRAM_CHAT_ID", "") or ""
+
+    if not re.fullmatch(r"-?\d+", chat_id):
+        return jsonify({"ok": False, "message": "Chat ID must be numeric (optional leading -)."}), 400
+
+    ok, message = send_telegram_notification_with_credentials(
+        bot_token=bot_token,
+        chat_id=chat_id,
+        message="Picklist Automation settings test message.",
+    )
+    return jsonify({"ok": ok, "message": message}), 200 if ok else 400
+
+
+@app.post("/api/settings/test-smtp")
+@require_trusted_client
+@require_csrf
+def api_test_smtp_settings():
+    if not settings_access_granted():
+        return jsonify({"ok": False, "message": "Unlock settings before testing."}), 403
+
+    payload = request.get_json(silent=True) or {}
+
+    smtp_host = (payload.get("smtp_host") or "").strip() or (
+        get_config_value("smtp_host", "SMTP_HOST", "") or ""
+    )
+    smtp_user = (payload.get("smtp_user") or "").strip() or (
+        get_config_value("smtp_user", "SMTP_USER", "") or ""
+    )
+    smtp_password = (payload.get("smtp_password") or "").strip() or (
+        get_config_value("smtp_password", "SMTP_PASSWORD", "") or ""
+    )
+    smtp_sender = (payload.get("smtp_sender") or "").strip() or (
+        get_config_value("smtp_sender", "SMTP_SENDER", "") or ""
+    )
+
+    recipients_raw = (payload.get("smtp_recipient") or "").strip()
+    if not recipients_raw:
+        recipients_raw = get_config_value("smtp_recipient", "SMTP_RECIPIENT", "") or ""
+    smtp_recipients = parse_recipient_addresses(recipients_raw)
+    if smtp_recipients and not recipients_are_valid(smtp_recipients):
+        return jsonify({"ok": False, "message": "Recipient list contains an invalid email address."}), 400
+
+    smtp_port_raw = (
+        str(payload.get("smtp_port", "")).strip()
+        or (get_config_value("smtp_port", "SMTP_PORT", "587") or "587")
+    )
+    try:
+        smtp_port = int(smtp_port_raw)
+    except ValueError:
+        return jsonify({"ok": False, "message": "SMTP port must be numeric."}), 400
+    if smtp_port < 1 or smtp_port > 65535:
+        return jsonify({"ok": False, "message": "SMTP port must be between 1 and 65535."}), 400
+
+    smtp_use_tls = payload.get("smtp_use_tls")
+    if isinstance(smtp_use_tls, bool):
+        use_tls = smtp_use_tls
+    else:
+        use_tls = parse_bool(
+            get_config_value("smtp_use_tls", "SMTP_USE_TLS", default="true"),
+            default=True,
+        )
+
+    ok, message = send_email_notification_with_config(
+        smtp_host=smtp_host,
+        smtp_port=smtp_port,
+        smtp_user=smtp_user,
+        smtp_password=smtp_password,
+        smtp_sender=smtp_sender,
+        smtp_recipients=smtp_recipients,
+        smtp_use_tls=use_tls,
+        subject="Picklist Automation SMTP settings test",
+        body="This is a test email from Picklist Automation settings validation.",
+    )
+    return jsonify({"ok": ok, "message": message}), 200 if ok else 400
+
+
 @app.post("/api/run")
 @require_trusted_client
 def api_run_picklist():
     payload = request.get_json(silent=True) or {}
     query_type = get_query_type(payload.get("query_type"))
+    if is_run_active(query_type):
+        latest_run, _ = get_latest_run(query_type=query_type)
+        return (
+            jsonify(
+                {
+                    "status": "running",
+                    "query_type": query_type,
+                    "run_id": latest_run["id"] if latest_run else None,
+                    "export_file": None,
+                    "message": "A run is already active for this query type.",
+                }
+            ),
+            409,
+        )
+
     export_path = execute_picklist_run(query_type=query_type)
     latest_run, _ = get_latest_run(query_type=query_type)
 
