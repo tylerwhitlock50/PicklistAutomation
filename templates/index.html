@@ -98,7 +98,7 @@
           </section>
         </section>
         <p class="helper-text operator-help">
-          Need troubleshooting details? Turn Operator Mode Off to show diagnostics and run history.
+          Need troubleshooting details? Turn Operator Mode Off to show diagnostics.
         </p>
       </section>
 
@@ -200,7 +200,7 @@
       {% for option in query_options %}
       {% set ns.total_recent_runs = ns.total_recent_runs + (recent_runs_by_type[option]|length) %}
       {% endfor %}
-      <section class="card advanced-section" data-advanced-section>
+      <section class="card advanced-section">
         <div class="table-header">
           <h2>Recent Runs</h2>
           <p>Last {{ ns.total_recent_runs }}</p>
