@@ -77,7 +77,8 @@ If behind a reverse proxy, set `TRUST_PROXY_HEADERS=true`.
 - For 5:00 AM Denver local time, set:
   `SCHEDULE_TIME=05:00`
   `SCHEDULE_TIMEZONE=America/Denver`
-- For fixed MST year-round (UTC-7), use:
+- For fixed MST year-round (UTC-7), use either:
+  `SCHEDULE_TIMEZONE=UTC-7`
   `SCHEDULE_TIMEZONE=Etc/GMT+7`
 
 ## Docker

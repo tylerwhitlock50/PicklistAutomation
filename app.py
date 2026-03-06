@@ -64,6 +64,31 @@ def resolve_db_path() -> Path:
     return configured
 
 
+def _normalize_schedule_timezone(value: str) -> str:
+    """Convert UTC±N values to IANA Etc/GMT timezone names."""
+    if not value:
+        return "UTC"
+
+    normalized = value.strip()
+    if normalized.upper() == "UTC":
+        return "UTC"
+
+    match = re.match(r"^UTC([+-])(\d{1,2})$", normalized, re.IGNORECASE)
+    if not match:
+        return normalized
+
+    sign, hours_text = match.group(1), match.group(2)
+    hours = int(hours_text)
+    if hours == 0:
+        return "UTC"
+    if hours > 14:
+        return normalized
+
+    # IANA Etc/GMT uses opposite sign: Etc/GMT+7 means UTC-7.
+    etc_sign = "-" if sign == "+" else "+"
+    return f"Etc/GMT{etc_sign}{hours}"
+
+
 DB_PATH = resolve_db_path()
 EXPORT_DIR = BASE_DIR / "exports"
 LOG_DIR = BASE_DIR / "logs"
@@ -80,7 +105,8 @@ if DEFAULT_QUERY_TYPE not in QUERY_FILES:
     DEFAULT_QUERY_TYPE = "guns"
 MAX_RUNS = int(os.getenv("MAX_RUNS_TO_KEEP", "10"))
 SCHEDULE_TIME = os.getenv("SCHEDULE_TIME", "05:00")
-SCHEDULE_TIMEZONE = os.getenv("SCHEDULE_TIMEZONE", "UTC")
+RAW_SCHEDULE_TIMEZONE = os.getenv("SCHEDULE_TIMEZONE", "UTC")
+SCHEDULE_TIMEZONE = _normalize_schedule_timezone(RAW_SCHEDULE_TIMEZONE)
 ENABLE_SCHEDULER = os.getenv("ENABLE_SCHEDULER", "true").lower() == "true"
 DISPLAY_TIMEZONE = os.getenv("DISPLAY_TIMEZONE")
 UI_REFRESH_INTERVAL_SECONDS = int(os.getenv("UI_REFRESH_INTERVAL_SECONDS", "15"))
@@ -121,6 +147,12 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger("picklist-app")
+if RAW_SCHEDULE_TIMEZONE.strip() != SCHEDULE_TIMEZONE:
+    logger.info(
+        "Normalized SCHEDULE_TIMEZONE '%s' to '%s'.",
+        RAW_SCHEDULE_TIMEZONE,
+        SCHEDULE_TIMEZONE,
+    )
 
 app = Flask(__name__)
 flask_secret_key = os.getenv("FLASK_SECRET_KEY")
