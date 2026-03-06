@@ -25,30 +25,81 @@
           </label>
         </div>
         <p class="hero-copy">
-          Run and export Guns/Components independently to reduce operator mistakes.
+          Use this page in order: run a picklist, wait for it to finish, then export the file.
         </p>
+        <ol class="operator-checklist">
+          <li>Click <strong>1. Run</strong> for the list you need.</li>
+          <li>Wait until its status returns to <strong>idle</strong>.</li>
+          <li>Click <strong>2. Export</strong> when it shows as ready.</li>
+        </ol>
         <section class="quick-actions">
           {% for option in query_options %}
-          <section class="actions quick-action-row">
-            <form
-              class="run-form"
-              method="post"
-              action="{{ url_for('run_picklist') }}"
-              data-query-type="{{ option }}"
-            >
-              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
-              <input type="hidden" name="query_type" value="{{ option }}" />
-              <button type="submit" data-run-submit>Run {{ option|capitalize }}</button>
-            </form>
-            <a class="button secondary" data-busy-label="Preparing..." href="{{ url_for('export_latest', query_type=option) }}">
-              Export Latest {{ option|capitalize }}
-            </a>
+          {% set run_state = run_state_by_type.get(option, {}) %}
+          {% set latest_summary = latest_runs_by_type.get(option) %}
+          {% set can_export_latest = latest_summary and latest_summary['status'] == 'success' and (latest_summary.get('export_path') or latest_summary['row_count'] > 0) and not run_state.get('running') %}
+          <section class="quick-action-row card-lite">
+            <div class="quick-action-copy">
+              <h2>{{ option|capitalize }} Picklist</h2>
+              {% if run_state.get('running') %}
+              <p class="helper-text">Running now. Wait for idle before exporting.</p>
+              {% elif latest_summary and latest_summary['status'] == 'success' %}
+                {% if can_export_latest %}
+              <p class="helper-text">
+                Ready to export. Last successful run:
+                {{ latest_success_age_by_type[option] or 'just now' }}.
+              </p>
+                {% else %}
+              <p class="helper-text">
+                Last run completed, but export data is not available yet. Run again before exporting.
+              </p>
+                {% endif %}
+              {% elif latest_summary and latest_summary['status'] == 'failed' %}
+              <p class="helper-text">
+                Last run failed. Run {{ option|capitalize }} again before exporting.
+              </p>
+              {% else %}
+              <p class="helper-text">
+                No completed run yet. Start with 1. Run {{ option|capitalize }}.
+              </p>
+              {% endif %}
+            </div>
+            <section class="actions quick-action-buttons">
+              <form
+                class="run-form"
+                method="post"
+                action="{{ url_for('run_picklist') }}"
+                data-query-type="{{ option }}"
+              >
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                <input type="hidden" name="query_type" value="{{ option }}" />
+                <button type="submit" data-run-submit {% if run_state.get('running') %}disabled{% endif %}>
+                  {% if run_state.get('running') %}
+                  Running {{ option|capitalize }}...
+                  {% else %}
+                  1. Run {{ option|capitalize }}
+                  {% endif %}
+                </button>
+              </form>
+              {% if can_export_latest %}
+              <a class="button secondary" data-busy-label="Preparing..." href="{{ url_for('export_latest', query_type=option) }}">
+                2. Export {{ option|capitalize }}
+              </a>
+              {% else %}
+              <button type="button" class="button secondary is-disabled" disabled aria-disabled="true">
+                2. Export {{ option|capitalize }} (not ready)
+              </button>
+              {% endif %}
+            </section>
           </section>
           {% endfor %}
-          <section class="actions quick-action-row">
+          <section class="actions quick-action-row" data-advanced-section>
             <a class="button tertiary" href="{{ url_for('settings') }}">Settings</a>
+            <p class="helper-text">Admin only. Use this for connection and notification setup.</p>
           </section>
         </section>
+        <p class="helper-text operator-help">
+          Need troubleshooting details? Turn Operator Mode Off to show diagnostics and run history.
+        </p>
       </section>
 
       {% with messages = get_flashed_messages(with_categories=true) %}
@@ -63,8 +114,8 @@
 
       <section class="card run-control-card">
         <div class="table-header">
-          <h2>Run Control</h2>
-          <p>Live status refreshes every {{ ui_refresh_interval_seconds }} seconds</p>
+          <h2>Live Run Status</h2>
+          <p>Auto-refreshes every {{ ui_refresh_interval_seconds }} seconds</p>
         </div>
         <div class="run-control-grid" id="run-control-grid">
           {% for option in query_options %}
@@ -187,7 +238,7 @@
                 <td>{{ run['row_count'] }}</td>
                 <td>{{ run['formatted_run_timestamp'] }}</td>
                 <td>
-                  {% if run['status'] == 'success' and run['row_count'] > 0 %}
+                  {% if run['status'] == 'success' %}
                   <a class="button secondary table-button" data-busy-label="Preparing..." href="{{ url_for('export_run', run_id=run['id'], query_type=option) }}">Download</a>
                   {% else %}
                   -

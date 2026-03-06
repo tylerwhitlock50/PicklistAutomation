@@ -36,6 +36,14 @@ from flask import (
 )
 from sqlalchemy import create_engine
 
+try:
+    from cryptography.fernet import Fernet, InvalidToken
+except ModuleNotFoundError:
+    Fernet = None  # type: ignore[assignment]
+
+    class InvalidToken(Exception):
+        pass
+
 load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -80,9 +88,16 @@ ACCESS_MODE = os.getenv("ACCESS_MODE", "private").lower()
 ACCESS_ALLOWED_CIDRS = os.getenv("ACCESS_ALLOWED_CIDRS", "")
 TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "false").lower() == "true"
 SETTINGS_PASSWORD = os.getenv("SETTINGS_PASSWORD", "")
+SETTINGS_ENCRYPTION_KEY = os.getenv("SETTINGS_ENCRYPTION_KEY", "").strip()
 FLASK_DEBUG = os.getenv("FLASK_DEBUG", "false").lower() == "true"
 SETTINGS_SESSION_KEY = "_settings_access_granted"
 SCHEDULER_LOCK_PATH = BASE_DIR / ".scheduler.lock"
+ENCRYPTED_SETTING_PREFIX = "enc:v1:"
+SENSITIVE_SETTING_KEYS = {
+    "mssql_connection_string",
+    "telegram_bot_token",
+    "smtp_password",
+}
 
 SCHEDULER_LOCK_FILE = None
 RUN_STATE_LOCK = threading.Lock()
@@ -90,6 +105,8 @@ RUN_STATE: dict[str, dict[str, Optional[datetime] | bool]] = {
     query_type: {"running": False, "started_at": None}
     for query_type in QUERY_FILES
 }
+SETTINGS_CIPHER: Optional[object] = None
+SETTINGS_CIPHER_INITIALIZED = False
 
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -262,15 +279,84 @@ def initialize_db() -> None:
         )
 
 
+def get_settings_cipher() -> Optional[object]:
+    global SETTINGS_CIPHER_INITIALIZED, SETTINGS_CIPHER  # noqa: PLW0603
+    if SETTINGS_CIPHER_INITIALIZED:
+        return SETTINGS_CIPHER
+
+    SETTINGS_CIPHER_INITIALIZED = True
+    if not SETTINGS_ENCRYPTION_KEY:
+        return None
+
+    if Fernet is None:
+        logger.warning(
+            "cryptography is not installed; sensitive settings will remain plaintext."
+        )
+        return None
+
+    try:
+        SETTINGS_CIPHER = Fernet(SETTINGS_ENCRYPTION_KEY.encode("utf-8"))
+        return SETTINGS_CIPHER
+    except ValueError:
+        logger.error(
+            "Invalid SETTINGS_ENCRYPTION_KEY. Sensitive settings will remain plaintext."
+        )
+        SETTINGS_CIPHER = None
+        return None
+
+
+def encrypt_setting_value(key: str, value: str) -> str:
+    if key not in SENSITIVE_SETTING_KEYS or not value:
+        return value
+    if value.startswith(ENCRYPTED_SETTING_PREFIX):
+        return value
+
+    cipher = get_settings_cipher()
+    if not cipher:
+        logger.warning(
+            "Saving sensitive setting '%s' without encryption. Set SETTINGS_ENCRYPTION_KEY to encrypt at rest.",
+            key,
+        )
+        return value
+    encrypted = cipher.encrypt(value.encode("utf-8")).decode("utf-8")
+    return f"{ENCRYPTED_SETTING_PREFIX}{encrypted}"
+
+
+def decrypt_setting_value(key: str, value: str) -> str:
+    if key not in SENSITIVE_SETTING_KEYS or not value:
+        return value
+    if not value.startswith(ENCRYPTED_SETTING_PREFIX):
+        return value
+
+    cipher = get_settings_cipher()
+    if not cipher:
+        logger.error(
+            "Cannot decrypt sensitive setting '%s' because SETTINGS_ENCRYPTION_KEY is unavailable.",
+            key,
+        )
+        return ""
+
+    encrypted_value = value[len(ENCRYPTED_SETTING_PREFIX) :]
+    try:
+        return cipher.decrypt(encrypted_value.encode("utf-8")).decode("utf-8")
+    except InvalidToken:
+        logger.error(
+            "Failed to decrypt sensitive setting '%s'. Check SETTINGS_ENCRYPTION_KEY.",
+            key,
+        )
+        return ""
+
+
 def get_setting(key: str) -> Optional[str]:
     with get_sqlite_conn() as conn:
         row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
     if not row:
         return None
-    return row["value"]
+    return decrypt_setting_value(key, row["value"])
 
 
 def set_setting(key: str, value: str) -> None:
+    stored_value = encrypt_setting_value(key, value)
     with get_sqlite_conn() as conn:
         conn.execute(
             """
@@ -280,8 +366,34 @@ def set_setting(key: str, value: str) -> None:
                 value = excluded.value,
                 updated_at = excluded.updated_at
             """,
-            (key, value, datetime.utcnow().isoformat()),
+            (key, stored_value, datetime.utcnow().isoformat()),
         )
+
+
+def migrate_sensitive_settings_encryption() -> None:
+    cipher = get_settings_cipher()
+    if not cipher:
+        return
+
+    with get_sqlite_conn() as conn:
+        existing_rows = conn.execute(
+            "SELECT key, value FROM settings WHERE key IN (?, ?, ?)",
+            tuple(SENSITIVE_SETTING_KEYS),
+        ).fetchall()
+
+        for row in existing_rows:
+            key = row["key"]
+            value = row["value"] or ""
+            if not value or value.startswith(ENCRYPTED_SETTING_PREFIX):
+                continue
+            encrypted = encrypt_setting_value(key, value)
+            if encrypted == value:
+                continue
+            conn.execute(
+                "UPDATE settings SET value = ?, updated_at = ? WHERE key = ?",
+                (encrypted, datetime.utcnow().isoformat(), key),
+            )
+            logger.info("Encrypted existing sensitive setting '%s'.", key)
 
 
 def get_config_value(setting_key: str, env_key: str, default: Optional[str] = None) -> Optional[str]:
@@ -540,7 +652,7 @@ def generate_export(df: pd.DataFrame, run_id: int, query_type: str, run_timestam
     return export_path
 
 
-def send_telegram_notification(message: str) -> None:
+def send_telegram_notification(message: str, *, allow_fallback: bool = True) -> None:
     bot_token = get_config_value("telegram_bot_token", "TELEGRAM_BOT_TOKEN")
     chat_id = get_config_value("telegram_chat_id", "TELEGRAM_CHAT_ID")
 
@@ -557,9 +669,26 @@ def send_telegram_notification(message: str) -> None:
         response.raise_for_status()
     except requests.RequestException as exc:
         logger.exception("Failed to send Telegram notification: %s", exc)
+        if allow_fallback:
+            send_email_notification(
+                subject="Picklist alert: Telegram notification failed",
+                body=(
+                    "A Telegram notification could not be delivered.\n\n"
+                    f"Error: {exc}\n\n"
+                    "Original Telegram message:\n"
+                    f"{message}"
+                ),
+                allow_fallback=False,
+            )
 
 
-def send_email_notification(subject: str, body: str, attachment: Optional[Path] = None) -> None:
+def send_email_notification(
+    subject: str,
+    body: str,
+    attachment: Optional[Path] = None,
+    *,
+    allow_fallback: bool = True,
+) -> None:
     smtp_host = get_config_value("smtp_host", "SMTP_HOST")
     smtp_port_raw = get_config_value("smtp_port", "SMTP_PORT", default="587")
     smtp_user = get_config_value("smtp_user", "SMTP_USER")
@@ -609,6 +738,15 @@ def send_email_notification(subject: str, body: str, attachment: Optional[Path] 
             logger.info("Email sent to %s with subject '%s'.", msg["To"], subject)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to send SMTP email: %s", exc)
+        if allow_fallback:
+            send_telegram_notification(
+                (
+                    "Picklist alert: SMTP notification failed.\n"
+                    f"Error: {exc}\n"
+                    f"Intended subject: {subject}"
+                ),
+                allow_fallback=False,
+            )
 
 
 def get_latest_run(query_type: str):
@@ -1070,6 +1208,7 @@ def send_email_notification_with_config(
 
 
 initialize_db()
+migrate_sensitive_settings_encryption()
 start_scheduler()
 
 
@@ -1262,10 +1401,17 @@ def run_picklist():
             "success",
         )
     else:
-        flash(
-            f"Picklist run for {query_type} did not start or failed. Check logs for details.",
-            "error",
-        )
+        latest_summary = get_latest_run_summary(query_type)
+        if latest_summary and latest_summary["status"] == "failed":
+            flash(
+                f"{query_type.capitalize()} run failed. No export was created. Try again, and contact support if the failure continues.",
+                "error",
+            )
+        else:
+            flash(
+                f"{query_type.capitalize()} run could not be started. Wait for any active run to finish, then try again.",
+                "error",
+            )
     return redirect(url_for("index", query_type=query_type))
 
 
@@ -1296,9 +1442,42 @@ def run_both_picklists():
 @require_trusted_client
 def export_latest():
     query_type = get_query_type(request.args.get("query_type"))
-    latest_run, rows = get_latest_run(query_type=query_type)
-    if not latest_run or not rows:
-        flash("No picklist data available to export yet.", "error")
+    if is_run_active(query_type):
+        flash(
+            f"{query_type.capitalize()} is currently running. Wait for it to finish before exporting.",
+            "error",
+        )
+        return redirect(url_for("index", query_type=query_type))
+
+    latest_run = get_latest_run_summary(query_type=query_type)
+    if not latest_run:
+        flash(f"No {query_type} runs have completed yet. Run it first.", "error")
+        return redirect(url_for("index", query_type=query_type))
+
+    if latest_run["status"] != "success":
+        flash(
+            f"The latest {query_type} run did not succeed, so export is not ready. Run it again first.",
+            "error",
+        )
+        return redirect(url_for("index", query_type=query_type))
+
+    stored_export_path = latest_run["export_path"]
+    if stored_export_path:
+        stored_path = Path(stored_export_path)
+        if stored_path.exists():
+            return send_file(
+                stored_path,
+                as_attachment=True,
+                download_name=stored_path.name,
+                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+    rows = get_run_rows(run_id=latest_run["id"])
+    if not rows:
+        flash(
+            f"Latest {query_type} run completed, but its export file is unavailable. Please run it again.",
+            "error",
+        )
         return redirect(url_for("index", query_type=query_type))
 
     df = pd.DataFrame(rows)
@@ -1329,8 +1508,8 @@ def export_run(run_id: int):
         flash(f"Run #{run_id} was not found for {query_type}.", "error")
         return redirect(url_for("index", query_type=query_type))
 
-    if run["status"] != "success" or run["row_count"] <= 0:
-        flash(f"Run #{run_id} does not have exportable rows.", "error")
+    if run["status"] != "success":
+        flash(f"Run #{run_id} is not successful and cannot be exported.", "error")
         return redirect(url_for("index", query_type=query_type))
 
     stored_export_path = run["export_path"]
@@ -1346,7 +1525,10 @@ def export_run(run_id: int):
 
     rows = get_run_rows(run_id=run_id)
     if not rows:
-        flash(f"Run #{run_id} has no stored row data to export.", "error")
+        flash(
+            f"Run #{run_id} completed, but no stored export file or row data was found.",
+            "error",
+        )
         return redirect(url_for("index", query_type=query_type))
 
     df = pd.DataFrame(rows)
@@ -1377,6 +1559,12 @@ def health():
 @require_trusted_client
 def api_status():
     return jsonify(build_status_payload()), 200
+
+
+@app.get("/api/csrf")
+@require_trusted_client
+def api_csrf():
+    return jsonify({"csrf_token": get_csrf_token()}), 200
 
 
 def parse_recipient_addresses(raw_value: str) -> list[str]:
@@ -1479,6 +1667,7 @@ def api_test_smtp_settings():
 
 @app.post("/api/run")
 @require_trusted_client
+@require_csrf
 def api_run_picklist():
     payload = request.get_json(silent=True) or {}
     query_type = get_query_type(payload.get("query_type"))

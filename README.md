@@ -8,6 +8,7 @@ Simple Python app that:
 - Exports latest picklist to Excel
 - Exports prior successful runs from the Recent Runs table
 - Sends Telegram + SMTP notifications for success/failure
+- Uses cross-channel fallback alerts if Telegram/SMTP delivery fails
 - Supports UI-managed runtime settings (stored in SQLite, override `.env`)
 - Runs automatically on a daily scheduler
 
@@ -46,6 +47,13 @@ The settings page is password-gated:
 - Example in `.env.example`: `InforSystem` (change this for your environment)
 
 Values saved in Settings are persisted in `picklist_history.db` and take precedence over matching `.env` values.
+
+For sensitive saved values (`MSSQL_CONNECTION_STRING`, Telegram bot token, SMTP password), set
+`SETTINGS_ENCRYPTION_KEY` to enable encryption-at-rest in SQLite:
+
+```bash
+python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
 
 ## Access Control
 
@@ -104,11 +112,19 @@ Health check:
 curl -sS http://127.0.0.1:8081/health
 ```
 
-Trigger a run (no CSRF needed for API endpoint):
+Fetch a CSRF token (stores a session cookie in `cookies.txt`):
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8081/api/run \
+curl -sS -c cookies.txt http://127.0.0.1:8081/api/csrf
+```
+
+Trigger a run (CSRF required on API endpoint):
+
+```bash
+CSRF_TOKEN=$(curl -sS -c cookies.txt http://127.0.0.1:8081/api/csrf | python3 -c 'import json,sys; print(json.load(sys.stdin)["csrf_token"])')
+curl -sS -b cookies.txt -X POST http://127.0.0.1:8081/api/run \
   -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: ${CSRF_TOKEN}" \
   -d '{"query_type":"guns"}'
 ```
 
