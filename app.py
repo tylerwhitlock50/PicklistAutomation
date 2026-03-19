@@ -408,6 +408,11 @@ def set_setting(key: str, value: str) -> None:
         )
 
 
+def delete_setting(key: str) -> None:
+    with get_sqlite_conn() as conn:
+        conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+
+
 def migrate_sensitive_settings_encryption() -> None:
     cipher = get_settings_cipher()
     if not cipher:
@@ -939,6 +944,28 @@ def get_latest_run(query_type: str):
         return run, parsed_rows
 
 
+def get_latest_successful_run(query_type: str):
+    with get_sqlite_conn() as conn:
+        run = conn.execute(
+            """
+            SELECT *
+            FROM runs
+            WHERE query_type = ? AND status = 'success'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (query_type,),
+        ).fetchone()
+        if not run:
+            return None, []
+
+        rows = conn.execute(
+            "SELECT row_json FROM run_rows WHERE run_id = ? ORDER BY id", (run["id"],)
+        ).fetchall()
+        parsed_rows = [json.loads(row["row_json"]) for row in rows]
+        return run, parsed_rows
+
+
 def get_latest_run_summary(query_type: str) -> Optional[sqlite3.Row]:
     with get_sqlite_conn() as conn:
         return conn.execute(
@@ -1092,41 +1119,34 @@ def get_dummy_picklist_rows() -> list[dict[str, str]]:
     ]
 
 
-def execute_picklist_run(
-    query_type: Optional[str] = None,
+def _execute_picklist_run_core(
+    query_type: str,
     query_options: Optional[dict[str, Any]] = None,
 ) -> Optional[Path]:
     started_at = time.perf_counter()
     run_timestamp = datetime.utcnow()
-    normalized_query_type = get_query_type(query_type)
-    if not try_mark_run_started(normalized_query_type):
-        logger.info(
-            "Skipped picklist run for %s because another run is already active.",
-            normalized_query_type,
-        )
-        return None
 
     try:
         df = fetch_picklist_from_mssql(
-            normalized_query_type,
+            query_type,
             query_options=query_options,
         )
         run_id = save_run(
             df=df,
             status="success",
-            query_type=normalized_query_type,
+            query_type=query_type,
             run_timestamp=run_timestamp,
         )
         export_path = generate_export(
             df=df,
             run_id=run_id,
-            query_type=normalized_query_type,
+            query_type=query_type,
             run_timestamp=run_timestamp,
         )
         elapsed_seconds = time.perf_counter() - started_at
 
         message = (
-            f"✅ Picklist run {run_id} ({normalized_query_type}) succeeded with {len(df.index)} rows "
+            f"✅ Picklist run {run_id} ({query_type}) succeeded with {len(df.index)} rows "
             f"in {elapsed_seconds:.2f}s."
         )
         logger.info(message)
@@ -1149,12 +1169,12 @@ def execute_picklist_run(
         run_id = save_run(
             pd.DataFrame(),
             status="failed",
-            query_type=normalized_query_type,
+            query_type=query_type,
             run_timestamp=run_timestamp,
             error_message=str(exc),
         )
         message = (
-            f"❌ Picklist run {run_id} ({normalized_query_type}) failed "
+            f"❌ Picklist run {run_id} ({query_type}) failed "
             f"after {elapsed_seconds:.2f}s: {exc}"
         )
         try:
@@ -1172,8 +1192,59 @@ def execute_picklist_run(
         except Exception as notify_exc:  # noqa: BLE001
             logger.exception("Unexpected SMTP notification error: %s", notify_exc)
         return None
+
+
+def execute_picklist_run(
+    query_type: Optional[str] = None,
+    query_options: Optional[dict[str, Any]] = None,
+) -> Optional[Path]:
+    normalized_query_type = get_query_type(query_type)
+    if not try_mark_run_started(normalized_query_type):
+        logger.info(
+            "Skipped picklist run for %s because another run is already active.",
+            normalized_query_type,
+        )
+        return None
+
+    try:
+        return _execute_picklist_run_core(
+            normalized_query_type,
+            query_options=query_options,
+        )
     finally:
         mark_run_finished(normalized_query_type)
+
+
+def start_picklist_run_async(
+    query_type: Optional[str] = None,
+    query_options: Optional[dict[str, Any]] = None,
+) -> bool:
+    normalized_query_type = get_query_type(query_type)
+    if not try_mark_run_started(normalized_query_type):
+        logger.info(
+            "Skipped background picklist run for %s because another run is already active.",
+            normalized_query_type,
+        )
+        return False
+
+    background_query_options = dict(query_options or {})
+
+    def run_in_background() -> None:
+        try:
+            _execute_picklist_run_core(
+                normalized_query_type,
+                query_options=background_query_options,
+            )
+        finally:
+            mark_run_finished(normalized_query_type)
+
+    thread = threading.Thread(
+        target=run_in_background,
+        name=f"picklist-run-{normalized_query_type}",
+        daemon=True,
+    )
+    thread.start()
+    return True
 
 
 def parse_schedule_time(time_value: str) -> tuple[int, int]:
@@ -1270,6 +1341,44 @@ def get_config_source(setting_key: str, env_key: str) -> str:
 
 def settings_access_granted() -> bool:
     return bool(session.get(SETTINGS_SESSION_KEY, False))
+
+
+def validate_optional_chat_id(chat_id: str) -> Optional[str]:
+    if chat_id and not re.fullmatch(r"-?\d+", chat_id):
+        return "Chat ID must be numeric (optional leading -)."
+    return None
+
+
+def validate_optional_port(port_value: str) -> Optional[str]:
+    if not port_value:
+        return None
+    if not re.fullmatch(r"\d+", port_value):
+        return "SMTP port must be a number between 1 and 65535."
+    port = int(port_value)
+    if port < 1 or port > 65535:
+        return "SMTP port must be a number between 1 and 65535."
+    return None
+
+
+def email_address_is_valid(address: str) -> bool:
+    return bool(re.fullmatch(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", address))
+
+
+def validate_optional_email(address: str, label: str) -> Optional[str]:
+    if address and not email_address_is_valid(address):
+        return f"{label} must be a valid email address."
+    return None
+
+
+def validate_optional_recipient_list(recipients_raw: str) -> Optional[str]:
+    recipients = parse_recipient_addresses(recipients_raw)
+    if recipients and not recipients_are_valid(recipients):
+        invalid_recipient = next(
+            (address for address in recipients if not email_address_is_valid(address)),
+            recipients[0],
+        )
+        return f"Invalid email address: {invalid_recipient}"
+    return None
 
 
 def build_dashboard_data(recent_limit: int = 5) -> tuple[
@@ -1395,11 +1504,21 @@ start_scheduler()
 @require_trusted_client
 def index():
     query_type = get_query_type(request.args.get("query_type"))
-    latest_run, rows = get_latest_run(query_type=query_type)
+    latest_run, latest_rows = get_latest_run(query_type=query_type)
+    current_picklist_run = latest_run
+    rows = latest_rows
     using_dummy_data = False
-    if not rows:
+    showing_last_successful_run = False
+
+    if not latest_run:
         rows = get_dummy_picklist_rows()
         using_dummy_data = True
+        current_picklist_run = None
+    elif latest_run["status"] != "success":
+        current_picklist_run, rows = get_latest_successful_run(query_type=query_type)
+        showing_last_successful_run = current_picklist_run is not None
+    elif latest_run["row_count"] == 0:
+        rows = []
 
     query_types, latest_runs_by_type, recent_runs_by_type, latest_success_age_by_type = (
         build_dashboard_data(recent_limit=5)
@@ -1412,6 +1531,13 @@ def index():
             latest_run["run_timestamp"]
         )
 
+    formatted_current_picklist_run = None
+    if current_picklist_run:
+        formatted_current_picklist_run = dict(current_picklist_run)
+        formatted_current_picklist_run["formatted_run_timestamp"] = format_run_timestamp(
+            current_picklist_run["run_timestamp"]
+        )
+
     columns = list(rows[0].keys()) if rows else []
     next_run = get_next_scheduled_run()
     formatted_next_run = format_datetime_for_display(next_run) if next_run else None
@@ -1421,6 +1547,7 @@ def index():
     return render_template(
         "index.html",
         latest_run=formatted_latest_run,
+        current_picklist_run=formatted_current_picklist_run,
         rows=rows,
         columns=columns,
         next_run=formatted_next_run,
@@ -1428,6 +1555,7 @@ def index():
         latest_success_age_by_type=latest_success_age_by_type,
         recent_runs_by_type=recent_runs_by_type,
         using_dummy_data=using_dummy_data,
+        showing_last_successful_run=showing_last_successful_run,
         active_query_type=query_type,
         query_options=query_types,
         schedule_time_display=format_schedule_time(SCHEDULE_TIME),
@@ -1475,41 +1603,70 @@ def settings():
             flash("Unlock settings before saving changes.", "error")
             return redirect(url_for("settings"))
 
+        telegram_chat_id = (request.form.get("telegram_chat_id") or "").strip()
+        smtp_port = (request.form.get("smtp_port") or "").strip()
+        smtp_sender = (request.form.get("smtp_sender") or "").strip()
+        smtp_recipient = (request.form.get("smtp_recipient") or "").strip()
+
+        validation_error = (
+            validate_optional_chat_id(telegram_chat_id)
+            or validate_optional_port(smtp_port)
+            or validate_optional_email(smtp_sender, "SMTP sender")
+            or validate_optional_recipient_list(smtp_recipient)
+        )
+        if validation_error:
+            flash(validation_error, "error")
+            return redirect(url_for("settings"))
+
         mssql_connection_string = (request.form.get("mssql_connection_string") or "").strip()
-        if mssql_connection_string:
+        if request.form.get("clear_mssql_connection_string"):
+            delete_setting("mssql_connection_string")
+        elif mssql_connection_string:
             set_setting("mssql_connection_string", mssql_connection_string)
 
         telegram_bot_token = (request.form.get("telegram_bot_token") or "").strip()
-        if telegram_bot_token:
+        if request.form.get("clear_telegram_bot_token"):
+            delete_setting("telegram_bot_token")
+        elif telegram_bot_token:
             set_setting("telegram_bot_token", telegram_bot_token)
 
-        telegram_chat_id = (request.form.get("telegram_chat_id") or "").strip()
         if telegram_chat_id:
             set_setting("telegram_chat_id", telegram_chat_id)
+        else:
+            delete_setting("telegram_chat_id")
 
         smtp_host = (request.form.get("smtp_host") or "").strip()
         if smtp_host:
             set_setting("smtp_host", smtp_host)
+        else:
+            delete_setting("smtp_host")
 
-        smtp_port = (request.form.get("smtp_port") or "").strip()
         if smtp_port:
             set_setting("smtp_port", smtp_port)
+        else:
+            delete_setting("smtp_port")
 
         smtp_user = (request.form.get("smtp_user") or "").strip()
         if smtp_user:
             set_setting("smtp_user", smtp_user)
+        else:
+            delete_setting("smtp_user")
 
         smtp_password = (request.form.get("smtp_password") or "").strip()
-        if smtp_password:
+        if request.form.get("clear_smtp_password"):
+            delete_setting("smtp_password")
+        elif smtp_password:
             set_setting("smtp_password", smtp_password)
 
-        smtp_sender = (request.form.get("smtp_sender") or "").strip()
         if smtp_sender:
             set_setting("smtp_sender", smtp_sender)
+        else:
+            delete_setting("smtp_sender")
 
-        smtp_recipient = (request.form.get("smtp_recipient") or "").strip()
         if smtp_recipient:
             set_setting("smtp_recipient", smtp_recipient)
+        else:
+            delete_setting("smtp_recipient")
 
         set_setting("smtp_use_tls", "true" if request.form.get("smtp_use_tls") else "false")
         logger.info("Settings updated by client %s.", request.remote_addr)
@@ -1571,34 +1728,22 @@ def settings():
 @require_csrf
 def run_picklist():
     query_type = get_query_type(request.form.get("query_type"))
-    if is_run_active(query_type):
-        flash(f"{query_type.capitalize()} run is already in progress.", "error")
-        return redirect(url_for("index", query_type=query_type))
-
     try:
         query_options = parse_query_run_options(query_type, request.form)
     except ValueError as exc:
         flash(str(exc), "error")
         return redirect(url_for("index", query_type=query_type))
 
-    export_path = execute_picklist_run(query_type=query_type, query_options=query_options)
-    if export_path:
+    if start_picklist_run_async(query_type=query_type, query_options=query_options):
         flash(
-            f"Picklist run complete for {query_type}. Export created at {export_path.name}",
+            f"{query_type.capitalize()} run started. Watch the live status card and export it when the run is ready.",
             "success",
         )
     else:
-        latest_summary = get_latest_run_summary(query_type)
-        if latest_summary and latest_summary["status"] == "failed":
-            flash(
-                f"{query_type.capitalize()} run failed. No export was created. Try again, and contact support if the failure continues.",
-                "error",
-            )
-        else:
-            flash(
-                f"{query_type.capitalize()} run could not be started. Wait for any active run to finish, then try again.",
-                "error",
-            )
+        flash(
+            f"{query_type.capitalize()} run is already in progress. Wait for it to finish, then try again.",
+            "error",
+        )
     return redirect(url_for("index", query_type=query_type))
 
 
@@ -1759,8 +1904,7 @@ def parse_recipient_addresses(raw_value: str) -> list[str]:
 
 
 def recipients_are_valid(recipients: list[str]) -> bool:
-    email_pattern = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-    return all(email_pattern.match(address) for address in recipients)
+    return all(email_address_is_valid(address) for address in recipients)
 
 
 @app.post("/api/settings/test-telegram")
@@ -1873,7 +2017,7 @@ def api_run_picklist():
             ),
             400,
         )
-    if is_run_active(query_type):
+    if not start_picklist_run_async(query_type=query_type, query_options=query_options):
         latest_run, _ = get_latest_run(query_type=query_type)
         return (
             jsonify(
@@ -1888,19 +2032,17 @@ def api_run_picklist():
             409,
         )
 
-    export_path = execute_picklist_run(query_type=query_type, query_options=query_options)
-    latest_run, _ = get_latest_run(query_type=query_type)
-
     return (
         jsonify(
             {
-                "status": "success" if export_path else "failed",
+                "status": "started",
                 "query_type": query_type,
-                "run_id": latest_run["id"] if latest_run else None,
-                "export_file": export_path.name if export_path else None,
+                "run_id": None,
+                "export_file": None,
+                "message": "Picklist run started.",
             }
         ),
-        200 if export_path else 500,
+        202,
     )
 
 

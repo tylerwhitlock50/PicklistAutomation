@@ -57,6 +57,10 @@
         <form method="post" class="settings-form" id="settings-form">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
           <input type="hidden" name="action" value="save" />
+          <p class="helper-text">
+            Clear a visible field and save to remove its database override. Password-style fields keep
+            their current saved value unless you check the matching clear option.
+          </p>
 
           <section class="settings-section">
             <div class="settings-section-header">
@@ -74,6 +78,12 @@
               autocomplete="off"
               placeholder="Enter only to set or replace"
             />
+            {% if mssql_source == 'database' %}
+            <label class="checkbox-row" for="clear_mssql_connection_string">
+              <input id="clear_mssql_connection_string" name="clear_mssql_connection_string" type="checkbox" />
+              Clear saved database connection string
+            </label>
+            {% endif %}
           </section>
 
           <section class="settings-section">
@@ -94,6 +104,12 @@
               autocomplete="off"
               placeholder="Enter only to set or replace"
             />
+            {% if telegram_bot_source == 'database' and telegram_bot_token_configured %}
+            <label class="checkbox-row" for="clear_telegram_bot_token">
+              <input id="clear_telegram_bot_token" name="clear_telegram_bot_token" type="checkbox" />
+              Clear saved Telegram bot token
+            </label>
+            {% endif %}
 
             <p class="helper-text">Chat ID source: <strong>{{ telegram_chat_source }}</strong></p>
             <label for="telegram_chat_id">
@@ -127,6 +143,12 @@
 
             <label for="smtp_password">SMTP Password <span class="required-indicator">(required)</span></label>
             <input id="smtp_password" name="smtp_password" type="password" autocomplete="off" placeholder="Enter only to set or replace" />
+            {% if smtp_password_source == 'database' and smtp_password_configured %}
+            <label class="checkbox-row" for="clear_smtp_password">
+              <input id="clear_smtp_password" name="clear_smtp_password" type="checkbox" />
+              Clear saved SMTP password
+            </label>
+            {% endif %}
 
             <label for="smtp_sender">SMTP Sender <span class="required-indicator">(email)</span></label>
             <input id="smtp_sender" name="smtp_sender" type="text" value="{{ smtp_sender or '' }}" />
@@ -214,6 +236,11 @@
         const csrfToken = form.querySelector("input[name='csrf_token']")
           ? form.querySelector("input[name='csrf_token']").value
           : "";
+        const clearOnInputPairs = [
+          ["#mssql_connection_string", "#clear_mssql_connection_string"],
+          ["#telegram_bot_token", "#clear_telegram_bot_token"],
+          ["#smtp_password", "#clear_smtp_password"],
+        ];
 
         function getFormSnapshot() {
           const fields = form.querySelectorAll("input, textarea, select");
@@ -300,6 +327,18 @@
 
         form.addEventListener("input", updateDirtyState);
         form.addEventListener("change", updateDirtyState);
+
+        clearOnInputPairs.forEach(function (pair) {
+          const valueField = form.querySelector(pair[0]);
+          const clearField = form.querySelector(pair[1]);
+          if (!valueField || !clearField) return;
+          valueField.addEventListener("input", function () {
+            if ((valueField.value || "").trim()) {
+              clearField.checked = false;
+              updateDirtyState();
+            }
+          });
+        });
 
         if (discardButton) {
           discardButton.addEventListener("click", function () {

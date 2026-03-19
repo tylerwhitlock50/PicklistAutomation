@@ -25,7 +25,7 @@
           </label>
         </div>
         <p class="hero-copy">
-          Use this page in order: run a picklist, wait for it to finish, then export the file.
+          Start a picklist, watch its status here, then export the file when the run is ready.
         </p>
         <ol class="operator-checklist">
           <li>Click <strong>1. Run</strong> for the list you need.</li>
@@ -37,31 +37,36 @@
           {% set run_state = run_state_by_type.get(option, {}) %}
           {% set latest_summary = latest_runs_by_type.get(option) %}
           {% set can_export_latest = latest_summary and latest_summary['status'] == 'success' and (latest_summary.get('export_path') or latest_summary['row_count'] > 0) and not run_state.get('running') %}
-          <section class="quick-action-row card-lite">
+          <section class="quick-action-row card-lite" data-quick-action data-query-type="{{ option }}">
             <div class="quick-action-copy">
               <h2>{{ option|capitalize }} Picklist</h2>
+              <p class="helper-text" data-quick-action-message>
+                <span class="inline-spinner" data-quick-action-spinner {% if not run_state.get('running') %}hidden{% endif %} aria-hidden="true"></span>
+                <span data-quick-action-message-text>
               {% if run_state.get('running') %}
-              <p class="helper-text">Running now. Wait for idle before exporting.</p>
+              Running now. Wait for idle before exporting.
               {% elif latest_summary and latest_summary['status'] == 'success' %}
                 {% if can_export_latest %}
-              <p class="helper-text">
+              
                 Ready to export. Last successful run:
                 {{ latest_success_age_by_type[option] or 'just now' }}.
-              </p>
+              
                 {% else %}
-              <p class="helper-text">
+              
                 Last run completed, but export data is not available yet. Run again before exporting.
-              </p>
+              
                 {% endif %}
               {% elif latest_summary and latest_summary['status'] == 'failed' %}
-              <p class="helper-text">
+              
                 Last run failed. Run {{ option|capitalize }} again before exporting.
-              </p>
+              
               {% else %}
-              <p class="helper-text">
+              
                 No completed run yet. Start with 1. Run {{ option|capitalize }}.
-              </p>
+              
               {% endif %}
+                </span>
+              </p>
             </div>
             <section class="actions quick-action-buttons">
               <form
@@ -94,15 +99,25 @@
                   {% endif %}
                 </button>
               </form>
-              {% if can_export_latest %}
-              <a class="button secondary" data-busy-label="Preparing..." href="{{ url_for('export_latest', query_type=option) }}">
+              <a
+                class="button secondary"
+                data-busy-label="Preparing..."
+                data-export-link
+                href="{{ url_for('export_latest', query_type=option) }}"
+                {% if not can_export_latest %}hidden aria-hidden="true"{% endif %}
+              >
                 2. Export {{ option|capitalize }}
               </a>
-              {% else %}
-              <button type="button" class="button secondary is-disabled" disabled aria-disabled="true">
+              <button
+                type="button"
+                class="button secondary is-disabled"
+                data-export-disabled
+                disabled
+                aria-disabled="true"
+                {% if can_export_latest %}hidden{% endif %}
+              >
                 2. Export {{ option|capitalize }} (not ready)
               </button>
-              {% endif %}
             </section>
           </section>
           {% endfor %}
@@ -195,7 +210,8 @@
                 class="pill {% if run_state.get('running') %}running{% else %}idle{% endif %}"
                 data-run-state
               >
-                {% if run_state.get('running') %}running{% else %}idle{% endif %}
+                <span class="inline-spinner pill-spinner" data-run-state-spinner {% if not run_state.get('running') %}hidden{% endif %} aria-hidden="true"></span>
+                <span data-run-state-label>{% if run_state.get('running') %}running{% else %}idle{% endif %}</span>
               </span>
             </p>
             <p class="helper-text" data-run-started-at data-advanced-inline>
@@ -334,12 +350,17 @@
         {% endif %}
       </section>
 
-      {% if rows %}
       <section class="card table-card advanced-section" data-advanced-section>
         <div class="table-header">
           <div>
             <h2>Current Picklist</h2>
-            <p>{{ active_query_type|capitalize }} · {{ rows|length }} records{% if using_dummy_data %} (sample data){% endif %}</p>
+            <p>
+              {{ active_query_type|capitalize }} · {{ rows|length }} records
+              {% if current_picklist_run %}
+              · Run #{{ current_picklist_run['id'] }}
+              {% endif %}
+              {% if using_dummy_data %} (sample data){% endif %}
+            </p>
           </div>
           <section class="actions mode-actions table-view-toggle">
             {% for option in query_options %}
@@ -358,7 +379,19 @@
         <p class="empty-state">
           No picklist data has been generated yet. Showing sample rows to preview the layout.
         </p>
+        {% elif showing_last_successful_run and current_picklist_run %}
+        <p class="empty-state">
+          Latest {{ active_query_type }} run failed. Showing the most recent successful picklist from
+          {{ current_picklist_run['formatted_run_timestamp'] }}.
+        </p>
+        {% elif latest_run and latest_run['status'] == 'success' and rows|length == 0 %}
+        <p class="empty-state">
+          Latest {{ active_query_type }} run completed successfully with 0 records.
+        </p>
+        {% elif not current_picklist_run %}
+        <p class="empty-state">No successful picklist data is available yet.</p>
         {% endif %}
+        {% if columns %}
         <div class="table-controls" data-table-controls data-table-id="current-picklist-table">
           <label for="filter-current-picklist-table">Search rows</label>
           <input id="filter-current-picklist-table" type="text" data-table-filter placeholder="Filter this table" />
@@ -387,8 +420,8 @@
             </tbody>
           </table>
         </div>
+        {% endif %}
       </section>
-      {% endif %}
     </main>
     <script>
       (function () {
@@ -425,6 +458,10 @@
         const gunsHiddenCustomerInputs = document.querySelectorAll("[data-guns-hidden-customers]");
         const gunsDefaultLookaheadDays = Number(gunsQueryDefaults.lookahead_days) || 30;
         const maxAdditionalCustomers = 10;
+
+        function capitalizeQueryType(value) {
+          return value ? value.charAt(0).toUpperCase() + value.slice(1) : "";
+        }
 
         function normalizeCustomerTerm(value) {
           return (value || "").replace(/\s+/g, " ").trim().toUpperCase();
@@ -811,10 +848,17 @@
 
             const stateNode = card.querySelector("[data-run-state]");
             if (stateNode) {
-              stateNode.textContent = visualState;
               stateNode.classList.toggle("running", visualState === "running");
               stateNode.classList.toggle("busy", visualState === "busy");
               stateNode.classList.toggle("idle", visualState === "idle");
+              const stateLabel = stateNode.querySelector("[data-run-state-label]");
+              const stateSpinner = stateNode.querySelector("[data-run-state-spinner]");
+              if (stateLabel) {
+                stateLabel.textContent = visualState;
+              }
+              if (stateSpinner) {
+                stateSpinner.hidden = visualState !== "running";
+              }
             }
 
             const startedNode = card.querySelector("[data-run-started-at]");
@@ -841,6 +885,69 @@
             const running = Boolean(queryType && activeRuns[queryType] && activeRuns[queryType].running);
             const isSubmitting = form.classList.contains("is-submitting");
             submitButton.disabled = running || isSubmitting;
+            if (running) {
+              submitButton.textContent = "Running " + capitalizeQueryType(queryType) + "...";
+            } else if (isSubmitting) {
+              submitButton.textContent = "Starting...";
+            } else {
+              submitButton.textContent = "1. Run " + capitalizeQueryType(queryType);
+            }
+          });
+
+          document.querySelectorAll("[data-quick-action]").forEach(function (card) {
+            const queryType = card.getAttribute("data-query-type");
+            if (!queryType) return;
+            const latest = latestRuns[queryType] || null;
+            const running = Boolean(activeRuns[queryType] && activeRuns[queryType].running);
+            const canExportLatest = Boolean(
+              latest &&
+              latest.status === "success" &&
+              (latest.export_path || Number(latest.row_count) > 0) &&
+              !running
+            );
+            const messageNode = card.querySelector("[data-quick-action-message]");
+            const messageTextNode = card.querySelector("[data-quick-action-message-text]");
+            const messageSpinner = card.querySelector("[data-quick-action-spinner]");
+            const exportLink = card.querySelector("[data-export-link]");
+            const exportDisabled = card.querySelector("[data-export-disabled]");
+            const label = capitalizeQueryType(queryType);
+
+            if (messageTextNode) {
+              if (running) {
+                messageTextNode.textContent = "Running now. Wait for idle before exporting.";
+              } else if (latest && latest.status === "success" && canExportLatest) {
+                messageTextNode.textContent =
+                  "Ready to export. Last successful run: " + (successAge[queryType] || "just now") + ".";
+              } else if (latest && latest.status === "success") {
+                messageTextNode.textContent =
+                  "Last run completed, but export data is not available yet. Run again before exporting.";
+              } else if (latest && latest.status === "failed") {
+                messageTextNode.textContent = "Last run failed. Run " + label + " again before exporting.";
+              } else {
+                messageTextNode.textContent = "No completed run yet. Start with 1. Run " + label + ".";
+              }
+            }
+            if (messageSpinner) {
+              messageSpinner.hidden = !running;
+            }
+            if (messageNode) {
+              messageNode.classList.toggle("is-running", running);
+            }
+
+            if (exportLink) {
+              exportLink.hidden = !canExportLatest;
+              exportLink.setAttribute("aria-hidden", canExportLatest ? "false" : "true");
+              if (canExportLatest) {
+                exportLink.classList.remove("is-disabled");
+                exportLink.style.pointerEvents = "";
+                exportLink.textContent = "2. Export " + label;
+              }
+            }
+
+            if (exportDisabled) {
+              exportDisabled.hidden = canExportLatest;
+              exportDisabled.textContent = "2. Export " + label + " (not ready)";
+            }
           });
 
           const nextRunNode = document.querySelector("[data-next-run]");
