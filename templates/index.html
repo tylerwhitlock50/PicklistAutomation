@@ -72,6 +72,20 @@
               >
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
                 <input type="hidden" name="query_type" value="{{ option }}" />
+                {% if option == 'guns' %}
+                <input
+                  type="hidden"
+                  name="guns_lookahead_days"
+                  value="{{ guns_query_defaults['lookahead_days'] }}"
+                  data-guns-hidden-days
+                />
+                <input
+                  type="hidden"
+                  name="guns_excluded_customers_json"
+                  value="[]"
+                  data-guns-hidden-customers
+                />
+                {% endif %}
                 <button type="submit" data-run-submit {% if run_state.get('running') %}disabled{% endif %}>
                   {% if run_state.get('running') %}
                   Running {{ option|capitalize }}...
@@ -101,6 +115,58 @@
           Need troubleshooting details? Turn Operator Mode Off to show diagnostics.
         </p>
       </section>
+
+      {% if 'guns' in query_options %}
+      <section class="card override-card" data-guns-overrides>
+        <div class="table-header override-header">
+          <div>
+            <h2>Guns Query Overrides</h2>
+            <p>Manual Guns runs from this browser only. Scheduled runs keep the default rules.</p>
+          </div>
+          <button type="button" class="button tertiary" data-guns-reset>Reset to defaults</button>
+        </div>
+        <div class="override-banner" data-guns-override-banner hidden>
+          <strong>Overrides are active.</strong> Manual Guns runs will use a custom lookahead window or extra excluded customers until you reset them.
+        </div>
+        <div class="override-grid">
+          <section class="override-field">
+            <label for="guns-lookahead-days">Lookahead days</label>
+            <input
+              id="guns-lookahead-days"
+              type="number"
+              min="1"
+              max="365"
+              step="1"
+              value="{{ guns_query_defaults['lookahead_days'] }}"
+              data-guns-days-input
+            />
+            <p class="helper-text">
+              Default is {{ guns_query_defaults['lookahead_days'] }} days. Increase it to 30, 60, or any whole number up to 365.
+            </p>
+          </section>
+          <section class="override-field">
+            <label for="guns-customer-input">Additional excluded customers</label>
+            <div class="customer-entry-row">
+              <input
+                id="guns-customer-input"
+                type="text"
+                placeholder="Type a customer and click Add"
+                data-guns-customer-input
+              />
+              <button type="button" class="button secondary" data-guns-add-customer>
+                Add customer
+              </button>
+            </div>
+            <p class="helper-text">
+              <strong>CA MARK</strong> stays excluded by default. Add temporary extra matches here for manual Guns runs.
+            </p>
+          </section>
+        </div>
+        <div class="customer-chip-list" data-guns-customer-list></div>
+        <p class="helper-text override-summary" data-guns-summary></p>
+        <p class="field-error" data-guns-error hidden></p>
+      </section>
+      {% endif %}
 
       {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
@@ -330,8 +396,11 @@
           activeQuery: "picklist.activeQueryType",
           tableDensity: "picklist.tableDensity",
           showAdvanced: "picklist.showAdvanced.v2",
+          gunsLookaheadDays: "picklist.guns.lookaheadDays.v1",
+          gunsExcludedCustomers: "picklist.guns.excludedCustomers.v1",
         };
         const queryOptions = {{ query_options|tojson }};
+        const gunsQueryDefaults = {{ guns_query_defaults|tojson }};
         const refreshIntervalSeconds = Number({{ ui_refresh_interval_seconds|tojson }}) || 15;
         const initialStatus = {
           active_runs: {{ run_state_by_type|tojson }},
@@ -344,6 +413,236 @@
         const operatorModeLabel = document.getElementById("operator-mode-label");
         const advancedSections = document.querySelectorAll("[data-advanced-section]");
         const advancedInlineDetails = document.querySelectorAll("[data-advanced-inline]");
+        const gunsDaysInput = document.querySelector("[data-guns-days-input]");
+        const gunsCustomerInput = document.querySelector("[data-guns-customer-input]");
+        const gunsCustomerList = document.querySelector("[data-guns-customer-list]");
+        const gunsSummary = document.querySelector("[data-guns-summary]");
+        const gunsBanner = document.querySelector("[data-guns-override-banner]");
+        const gunsError = document.querySelector("[data-guns-error]");
+        const gunsResetButton = document.querySelector("[data-guns-reset]");
+        const gunsAddCustomerButton = document.querySelector("[data-guns-add-customer]");
+        const gunsHiddenDaysInputs = document.querySelectorAll("[data-guns-hidden-days]");
+        const gunsHiddenCustomerInputs = document.querySelectorAll("[data-guns-hidden-customers]");
+        const gunsDefaultLookaheadDays = Number(gunsQueryDefaults.lookahead_days) || 30;
+        const maxAdditionalCustomers = 10;
+
+        function normalizeCustomerTerm(value) {
+          return (value || "").replace(/\s+/g, " ").trim().toUpperCase();
+        }
+
+        function escapeHtml(value) {
+          return (value || "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#39;");
+        }
+
+        const gunsBaseExcludedCustomers = Array.isArray(gunsQueryDefaults.base_excluded_customers)
+          ? gunsQueryDefaults.base_excluded_customers.map(normalizeCustomerTerm)
+          : [];
+        let gunsOverrideState = {
+          lookaheadDays: gunsDefaultLookaheadDays,
+          additionalExcludedCustomers: [],
+        };
+
+        function setGunsError(message) {
+          if (!gunsError) return;
+          gunsError.hidden = !message;
+          gunsError.textContent = message || "";
+        }
+
+        function readStoredCustomerTerms() {
+          const rawValue = localStorage.getItem(storageKeys.gunsExcludedCustomers);
+          if (!rawValue) return [];
+          try {
+            const parsed = JSON.parse(rawValue);
+            if (!Array.isArray(parsed)) return [];
+            return parsed
+              .map(function (item) {
+                return typeof item === "string" ? normalizeCustomerTerm(item) : "";
+              })
+              .filter(Boolean);
+          } catch (_error) {
+            return [];
+          }
+        }
+
+        function writeStoredGunsOverrides() {
+          localStorage.setItem(storageKeys.gunsLookaheadDays, String(gunsOverrideState.lookaheadDays));
+          localStorage.setItem(
+            storageKeys.gunsExcludedCustomers,
+            JSON.stringify(gunsOverrideState.additionalExcludedCustomers)
+          );
+        }
+
+        function syncGunsHiddenInputs() {
+          gunsHiddenDaysInputs.forEach(function (input) {
+            input.value = String(gunsOverrideState.lookaheadDays);
+          });
+          gunsHiddenCustomerInputs.forEach(function (input) {
+            input.value = JSON.stringify(gunsOverrideState.additionalExcludedCustomers);
+          });
+        }
+
+        function gunsOverridesAreActive() {
+          return (
+            gunsOverrideState.lookaheadDays !== gunsDefaultLookaheadDays ||
+            gunsOverrideState.additionalExcludedCustomers.length > 0
+          );
+        }
+
+        function renderGunsCustomerChips() {
+          if (!gunsCustomerList) return;
+
+          const fragments = gunsBaseExcludedCustomers
+            .map(function (customer) {
+              return (
+                '<span class="customer-chip default">' +
+                escapeHtml(customer) +
+                '<span class="customer-chip-meta">Default</span>' +
+                "</span>"
+              );
+            })
+            .concat(
+              gunsOverrideState.additionalExcludedCustomers.map(function (customer) {
+                const safeCustomer = escapeHtml(customer);
+                return (
+                  '<span class="customer-chip">' +
+                  '<span class="customer-chip-text">' +
+                  safeCustomer +
+                  "</span>" +
+                  '<button type="button" class="customer-chip-remove" data-remove-customer="' +
+                  safeCustomer +
+                  '" aria-label="Remove ' +
+                  safeCustomer +
+                  '">' +
+                  "Remove" +
+                  "</button>" +
+                  "</span>"
+                );
+              })
+            );
+
+          gunsCustomerList.innerHTML = fragments.join("");
+        }
+
+        function renderGunsOverrideState() {
+          if (gunsDaysInput) {
+            gunsDaysInput.value = String(gunsOverrideState.lookaheadDays);
+          }
+
+          syncGunsHiddenInputs();
+          renderGunsCustomerChips();
+
+          const active = gunsOverridesAreActive();
+          if (gunsBanner) {
+            gunsBanner.hidden = !active;
+          }
+          if (gunsSummary) {
+            const allExcludedCustomers = gunsBaseExcludedCustomers.concat(
+              gunsOverrideState.additionalExcludedCustomers
+            );
+            const exclusionsText = allExcludedCustomers.join(", ");
+            gunsSummary.textContent = active
+              ? "Manual Guns runs will look ahead " +
+                gunsOverrideState.lookaheadDays +
+                " days and exclude: " +
+                exclusionsText +
+                "."
+              : "Using default Guns query settings: " +
+                gunsDefaultLookaheadDays +
+                " days with " +
+                gunsBaseExcludedCustomers.join(", ") +
+                " excluded.";
+          }
+        }
+
+        function applyStoredGunsOverrides() {
+          const storedLookahead = Number.parseInt(
+            localStorage.getItem(storageKeys.gunsLookaheadDays) || "",
+            10
+          );
+          if (Number.isInteger(storedLookahead) && storedLookahead >= 1 && storedLookahead <= 365) {
+            gunsOverrideState.lookaheadDays = storedLookahead;
+          }
+
+          const dedupedCustomers = [];
+          readStoredCustomerTerms().forEach(function (customer) {
+            if (
+              !customer ||
+              gunsBaseExcludedCustomers.includes(customer) ||
+              dedupedCustomers.includes(customer)
+            ) {
+              return;
+            }
+            dedupedCustomers.push(customer);
+          });
+          gunsOverrideState.additionalExcludedCustomers = dedupedCustomers.slice(0, maxAdditionalCustomers);
+          renderGunsOverrideState();
+        }
+
+        function commitGunsLookaheadDays() {
+          if (!gunsDaysInput) return true;
+          const parsedValue = Number.parseInt((gunsDaysInput.value || "").trim(), 10);
+          if (!Number.isInteger(parsedValue) || parsedValue < 1 || parsedValue > 365) {
+            setGunsError("Lookahead days must be a whole number between 1 and 365.");
+            gunsDaysInput.value = String(gunsOverrideState.lookaheadDays);
+            return false;
+          }
+
+          gunsOverrideState.lookaheadDays = parsedValue;
+          writeStoredGunsOverrides();
+          setGunsError("");
+          renderGunsOverrideState();
+          return true;
+        }
+
+        function addGunsCustomerOverride() {
+          if (!gunsCustomerInput) return;
+          const nextCustomer = normalizeCustomerTerm(gunsCustomerInput.value);
+          if (!nextCustomer) {
+            setGunsError("Enter a customer name before adding an exclusion.");
+            gunsCustomerInput.focus();
+            return;
+          }
+          if (gunsBaseExcludedCustomers.includes(nextCustomer)) {
+            setGunsError(nextCustomer + " is already excluded by default.");
+            gunsCustomerInput.value = "";
+            return;
+          }
+          if (gunsOverrideState.additionalExcludedCustomers.includes(nextCustomer)) {
+            setGunsError(nextCustomer + " is already in the exclusion list.");
+            gunsCustomerInput.value = "";
+            return;
+          }
+          if (gunsOverrideState.additionalExcludedCustomers.length >= maxAdditionalCustomers) {
+            setGunsError("You can exclude up to " + maxAdditionalCustomers + " additional customers.");
+            return;
+          }
+
+          gunsOverrideState.additionalExcludedCustomers.push(nextCustomer);
+          gunsCustomerInput.value = "";
+          writeStoredGunsOverrides();
+          setGunsError("");
+          renderGunsOverrideState();
+          gunsCustomerInput.focus();
+        }
+
+        function resetGunsOverrides() {
+          gunsOverrideState = {
+            lookaheadDays: gunsDefaultLookaheadDays,
+            additionalExcludedCustomers: [],
+          };
+          localStorage.removeItem(storageKeys.gunsLookaheadDays);
+          localStorage.removeItem(storageKeys.gunsExcludedCustomers);
+          setGunsError("");
+          renderGunsOverrideState();
+          if (gunsCustomerInput) {
+            gunsCustomerInput.value = "";
+          }
+        }
 
         function applyAdvancedMode(showAdvanced) {
           const visible = Boolean(showAdvanced);
@@ -373,6 +672,44 @@
           });
         }
 
+        applyStoredGunsOverrides();
+
+        if (gunsDaysInput) {
+          gunsDaysInput.addEventListener("change", commitGunsLookaheadDays);
+        }
+
+        if (gunsCustomerInput) {
+          gunsCustomerInput.addEventListener("keydown", function (event) {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              addGunsCustomerOverride();
+            }
+          });
+        }
+
+        if (gunsAddCustomerButton) {
+          gunsAddCustomerButton.addEventListener("click", addGunsCustomerOverride);
+        }
+
+        if (gunsResetButton) {
+          gunsResetButton.addEventListener("click", resetGunsOverrides);
+        }
+
+        if (gunsCustomerList) {
+          gunsCustomerList.addEventListener("click", function (event) {
+            const button = event.target.closest("[data-remove-customer]");
+            if (!button) return;
+            const customer = normalizeCustomerTerm(button.getAttribute("data-remove-customer"));
+            gunsOverrideState.additionalExcludedCustomers =
+              gunsOverrideState.additionalExcludedCustomers.filter(function (item) {
+                return item !== customer;
+              });
+            writeStoredGunsOverrides();
+            setGunsError("");
+            renderGunsOverrideState();
+          });
+        }
+
         document.querySelectorAll("a[data-busy-label]").forEach(function (link) {
           link.addEventListener("click", function () {
             const busyLabel = link.getAttribute("data-busy-label");
@@ -385,7 +722,11 @@
         });
 
         document.querySelectorAll("form.run-form").forEach(function (form) {
-          form.addEventListener("submit", function () {
+          form.addEventListener("submit", function (event) {
+            if (form.getAttribute("data-query-type") === "guns" && !commitGunsLookaheadDays()) {
+              event.preventDefault();
+              return;
+            }
             const submitButton = form.querySelector("button[type='submit']");
             if (!submitButton) return;
             submitButton.disabled = true;

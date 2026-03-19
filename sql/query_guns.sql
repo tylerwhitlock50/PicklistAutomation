@@ -2,7 +2,11 @@ WITH
 Params AS (
     SELECT
         CAST(GETDATE() AS date) AS TODAY,
-        DATEADD(day, 30, CAST(GETDATE() AS date)) AS THROUGH_DATE
+        DATEADD(day, __GUNS_LOOKAHEAD_DAYS__, CAST(GETDATE() AS date)) AS THROUGH_DATE
+),
+
+ExcludedCustomers AS (
+    __GUNS_EXCLUDED_CUSTOMERS__
 ),
 
 -- DETERMINE SUPPLY: SHIPPING warehouse, Racks R01-R09 only, exclude Stage/International, Rack10 and Rack11
@@ -43,7 +47,11 @@ DemandBase AS (
        AND ce.CREDIT_STATUS = 'A'
     WHERE co.STATUS = 'R'
       AND col.LINE_STATUS = 'A'
-      AND (ce.CUSTOMER_ID IS NULL OR ce.CUSTOMER_ID NOT LIKE '%CA MARK%')
+      AND NOT EXISTS (
+          SELECT 1
+          FROM ExcludedCustomers ec
+          WHERE UPPER(COALESCE(c.ID, '')) LIKE '%' + ec.CUSTOMER_TERM + '%'
+      )
       AND (co.SALESREP_ID IS NULL OR co.SALESREP_ID <> 'RMA')
       AND (co.CUSTOMER_PO_REF IS NULL OR co.CUSTOMER_PO_REF NOT LIKE '%RMA%')
       AND (c.DISCOUNT_CODE IS NULL OR c.DISCOUNT_CODE NOT LIKE '%International%')
@@ -51,7 +59,7 @@ DemandBase AS (
       AND (col.ORDER_QTY - col.TOTAL_SHIPPED_QTY) > 0
 ),
 
--- Determine Demand horizon: customer want date is either past due OR due within next 30 days
+-- Determine Demand horizon: customer want date is either past due OR due within next N days
 -- NULL promise dates are included by treating them as TODAY
 Demand AS (
     SELECT

@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from email.message import EmailMessage
 from functools import wraps
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pandas as pd
@@ -100,6 +100,12 @@ QUERY_FILES = {
         os.getenv("COMPONENTS_QUERY_FILE", "sql/query_components.sql")
     ),
 }
+GUNS_DEFAULT_LOOKAHEAD_DAYS = 30
+GUNS_MAX_LOOKAHEAD_DAYS = 365
+GUNS_BASE_EXCLUDED_CUSTOMERS = ("CA MARK",)
+GUNS_MAX_ADDITIONAL_CUSTOMERS = 10
+GUNS_LOOKAHEAD_TOKEN = "__GUNS_LOOKAHEAD_DAYS__"
+GUNS_EXCLUDED_CUSTOMERS_TOKEN = "__GUNS_EXCLUDED_CUSTOMERS__"
 DEFAULT_QUERY_TYPE = os.getenv("DEFAULT_QUERY_TYPE", "guns").lower()
 if DEFAULT_QUERY_TYPE not in QUERY_FILES:
     DEFAULT_QUERY_TYPE = "guns"
@@ -541,6 +547,104 @@ def get_query_type(value: Optional[str]) -> str:
     return DEFAULT_QUERY_TYPE
 
 
+def normalize_customer_term(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip()).upper()
+
+
+def get_default_guns_query_options() -> dict[str, Any]:
+    return {
+        "lookahead_days": GUNS_DEFAULT_LOOKAHEAD_DAYS,
+        "base_excluded_customers": list(GUNS_BASE_EXCLUDED_CUSTOMERS),
+        "additional_excluded_customers": [],
+        "excluded_customers": list(GUNS_BASE_EXCLUDED_CUSTOMERS),
+        "has_overrides": False,
+    }
+
+
+def parse_guns_lookahead_days(raw_value: Any) -> int:
+    if raw_value is None or raw_value == "":
+        return GUNS_DEFAULT_LOOKAHEAD_DAYS
+
+    try:
+        lookahead_days = int(str(raw_value).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Lookahead days must be a whole number.") from exc
+
+    if lookahead_days < 1 or lookahead_days > GUNS_MAX_LOOKAHEAD_DAYS:
+        raise ValueError(
+            f"Lookahead days must be between 1 and {GUNS_MAX_LOOKAHEAD_DAYS}."
+        )
+    return lookahead_days
+
+
+def parse_additional_excluded_customers(raw_value: Any) -> list[str]:
+    if raw_value is None or raw_value == "" or raw_value == []:
+        return []
+
+    parsed_value = raw_value
+    if isinstance(raw_value, str):
+        try:
+            parsed_value = json.loads(raw_value)
+        except json.JSONDecodeError:
+            parsed_value = [item.strip() for item in raw_value.split(",")]
+
+    if not isinstance(parsed_value, list):
+        raise ValueError("Excluded customers must be provided as a list.")
+
+    base_terms = {normalize_customer_term(value) for value in GUNS_BASE_EXCLUDED_CUSTOMERS}
+    normalized_terms: list[str] = []
+    seen_terms: set[str] = set()
+
+    for item in parsed_value:
+        if not isinstance(item, str):
+            raise ValueError("Excluded customers must be text values.")
+        normalized = normalize_customer_term(item)
+        if not normalized or normalized in base_terms or normalized in seen_terms:
+            continue
+        normalized_terms.append(normalized)
+        seen_terms.add(normalized)
+
+    if len(normalized_terms) > GUNS_MAX_ADDITIONAL_CUSTOMERS:
+        raise ValueError(
+            f"You can exclude up to {GUNS_MAX_ADDITIONAL_CUSTOMERS} additional customers."
+        )
+
+    return normalized_terms
+
+
+def build_guns_query_options(
+    raw_lookahead_days: Any = None,
+    raw_additional_customers: Any = None,
+) -> dict[str, Any]:
+    lookahead_days = parse_guns_lookahead_days(raw_lookahead_days)
+    additional_customers = parse_additional_excluded_customers(raw_additional_customers)
+    excluded_customers = [*GUNS_BASE_EXCLUDED_CUSTOMERS, *additional_customers]
+    return {
+        "lookahead_days": lookahead_days,
+        "base_excluded_customers": list(GUNS_BASE_EXCLUDED_CUSTOMERS),
+        "additional_excluded_customers": additional_customers,
+        "excluded_customers": excluded_customers,
+        "has_overrides": (
+            lookahead_days != GUNS_DEFAULT_LOOKAHEAD_DAYS
+            or bool(additional_customers)
+        ),
+    }
+
+
+def parse_query_run_options(query_type: str, payload: Any) -> dict[str, Any]:
+    if query_type != "guns":
+        return {}
+
+    raw_additional_customers = payload.get("guns_excluded_customers")
+    if raw_additional_customers is None or raw_additional_customers == "":
+        raw_additional_customers = payload.get("guns_excluded_customers_json")
+
+    return build_guns_query_options(
+        raw_lookahead_days=payload.get("guns_lookahead_days"),
+        raw_additional_customers=raw_additional_customers,
+    )
+
+
 def try_mark_run_started(query_type: str) -> bool:
     started_at = datetime.now(timezone.utc)
     with RUN_STATE_LOCK:
@@ -589,15 +693,43 @@ def get_run_state_snapshot() -> dict[str, dict[str, Optional[str] | bool]]:
     return snapshot
 
 
-def load_query(query_type: str) -> str:
+def sql_quote_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def render_guns_query(
+    query_template: str,
+    query_options: Optional[dict[str, Any]] = None,
+) -> str:
+    resolved_options = get_default_guns_query_options()
+    if query_options:
+        resolved_options = {**resolved_options, **query_options}
+
+    excluded_customer_rows = "\n    UNION ALL\n    ".join(
+        f"SELECT {sql_quote_literal(customer)} AS CUSTOMER_TERM"
+        for customer in resolved_options["excluded_customers"]
+    )
+    return (
+        query_template.replace(GUNS_LOOKAHEAD_TOKEN, str(resolved_options["lookahead_days"]))
+        .replace(GUNS_EXCLUDED_CUSTOMERS_TOKEN, excluded_customer_rows)
+    )
+
+
+def load_query(query_type: str, query_options: Optional[dict[str, Any]] = None) -> str:
     query_file = QUERY_FILES[query_type]
     if not query_file.exists():
         raise FileNotFoundError(f"Query file not found at: {query_file}")
-    return query_file.read_text(encoding="utf-8")
+    query_template = query_file.read_text(encoding="utf-8")
+    if query_type == "guns":
+        return render_guns_query(query_template, query_options=query_options)
+    return query_template
 
 
-def fetch_picklist_from_mssql(query_type: str) -> pd.DataFrame:
-    query = load_query(query_type)
+def fetch_picklist_from_mssql(
+    query_type: str,
+    query_options: Optional[dict[str, Any]] = None,
+) -> pd.DataFrame:
+    query = load_query(query_type, query_options=query_options)
     mssql_conn_string = get_config_value(
         setting_key="mssql_connection_string",
         env_key="MSSQL_CONNECTION_STRING",
@@ -611,6 +743,15 @@ def fetch_picklist_from_mssql(query_type: str) -> pd.DataFrame:
         "Connecting to SQL Server using %s",
         mask_connection_string(mssql_conn_string),
     )
+    if query_type == "guns":
+        applied_options = get_default_guns_query_options()
+        if query_options:
+            applied_options = {**applied_options, **query_options}
+        logger.info(
+            "Using guns query options: lookahead_days=%s excluded_customers=%s",
+            applied_options["lookahead_days"],
+            ",".join(applied_options["excluded_customers"]),
+        )
     engine = create_engine(mssql_conn_string)
     with engine.connect() as connection:
         df = pd.read_sql_query(query, connection)
@@ -951,7 +1092,10 @@ def get_dummy_picklist_rows() -> list[dict[str, str]]:
     ]
 
 
-def execute_picklist_run(query_type: Optional[str] = None) -> Optional[Path]:
+def execute_picklist_run(
+    query_type: Optional[str] = None,
+    query_options: Optional[dict[str, Any]] = None,
+) -> Optional[Path]:
     started_at = time.perf_counter()
     run_timestamp = datetime.utcnow()
     normalized_query_type = get_query_type(query_type)
@@ -963,7 +1107,10 @@ def execute_picklist_run(query_type: Optional[str] = None) -> Optional[Path]:
         return None
 
     try:
-        df = fetch_picklist_from_mssql(normalized_query_type)
+        df = fetch_picklist_from_mssql(
+            normalized_query_type,
+            query_options=query_options,
+        )
         run_id = save_run(
             df=df,
             status="success",
@@ -1270,6 +1417,7 @@ def index():
     formatted_next_run = format_datetime_for_display(next_run) if next_run else None
     time_diagnostics = build_time_diagnostics(next_run)
     run_state_by_type = get_run_state_snapshot()
+    guns_query_defaults = get_default_guns_query_options()
     return render_template(
         "index.html",
         latest_run=formatted_latest_run,
@@ -1287,6 +1435,7 @@ def index():
         time_diagnostics=time_diagnostics,
         run_state_by_type=run_state_by_type,
         ui_refresh_interval_seconds=UI_REFRESH_INTERVAL_SECONDS,
+        guns_query_defaults=guns_query_defaults,
     )
 
 
@@ -1426,7 +1575,13 @@ def run_picklist():
         flash(f"{query_type.capitalize()} run is already in progress.", "error")
         return redirect(url_for("index", query_type=query_type))
 
-    export_path = execute_picklist_run(query_type=query_type)
+    try:
+        query_options = parse_query_run_options(query_type, request.form)
+    except ValueError as exc:
+        flash(str(exc), "error")
+        return redirect(url_for("index", query_type=query_type))
+
+    export_path = execute_picklist_run(query_type=query_type, query_options=query_options)
     if export_path:
         flash(
             f"Picklist run complete for {query_type}. Export created at {export_path.name}",
@@ -1703,6 +1858,21 @@ def api_test_smtp_settings():
 def api_run_picklist():
     payload = request.get_json(silent=True) or {}
     query_type = get_query_type(payload.get("query_type"))
+    try:
+        query_options = parse_query_run_options(query_type, payload)
+    except ValueError as exc:
+        return (
+            jsonify(
+                {
+                    "status": "invalid",
+                    "query_type": query_type,
+                    "run_id": None,
+                    "export_file": None,
+                    "message": str(exc),
+                }
+            ),
+            400,
+        )
     if is_run_active(query_type):
         latest_run, _ = get_latest_run(query_type=query_type)
         return (
@@ -1718,7 +1888,7 @@ def api_run_picklist():
             409,
         )
 
-    export_path = execute_picklist_run(query_type=query_type)
+    export_path = execute_picklist_run(query_type=query_type, query_options=query_options)
     latest_run, _ = get_latest_run(query_type=query_type)
 
     return (

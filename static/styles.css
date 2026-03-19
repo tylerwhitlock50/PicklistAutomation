@@ -170,6 +170,91 @@ body {
   white-space: nowrap;
 }
 
+.override-card {
+  display: grid;
+  gap: 14px;
+}
+
+.override-header {
+  gap: 12px;
+}
+
+.override-banner {
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid #e0a29c;
+  background: #fff1ef;
+  color: #8a2f26;
+  font-weight: 700;
+}
+
+.override-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.override-field {
+  display: grid;
+  gap: 8px;
+}
+
+.customer-entry-row {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.customer-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.customer-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 999px;
+  background: #eef3f8;
+  border: 1px solid #d2dbe4;
+  color: #2a3f53;
+  font-weight: 700;
+}
+
+.customer-chip.default {
+  background: #f7efe0;
+  border-color: #e2cfaa;
+  color: #7a5320;
+}
+
+.customer-chip-meta {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.9);
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.customer-chip-remove {
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #dce5ef;
+  color: #2a3f53;
+  font-size: 0.78rem;
+}
+
+.customer-chip-remove:hover {
+  background: #ccd8e5;
+}
+
+.override-summary {
+  min-height: 1.2rem;
+}
+
 .operator-help {
   margin-top: 12px;
 }
@@ -192,7 +277,8 @@ select {
 }
 
 input[type="text"],
-input[type="password"] {
+input[type="password"],
+input[type="number"] {
   border: 1px solid var(--line);
   background: #fff;
   border-radius: 8px;
@@ -635,6 +721,10 @@ body.density-compact td {
   .quick-action-row .button {
     width: 100%;
     text-align: center;
+  }
+
+  .customer-entry-row {
+    grid-template-columns: 1fr;
   }
 
   .table-view-toggle {
