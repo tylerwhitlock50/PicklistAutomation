@@ -588,6 +588,32 @@ body.density-compact td {
   max-width: 900px;
 }
 
+.reporting-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.reporting-stat {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px;
+  background: #fffaf2;
+}
+
+.reporting-label {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.reporting-value {
+  margin: 6px 0;
+  font-size: 2rem;
+  font-weight: 800;
+  color: #7c4b00;
+}
+
 .settings-form h2 {
   margin: 14px 0 0;
 }

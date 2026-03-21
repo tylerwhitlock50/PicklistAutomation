@@ -44,6 +44,38 @@
       {% endwith %}
 
       <section class="card">
+        <div class="table-header">
+          <h2>Automation Value</h2>
+          <p>Distinct successful generations only</p>
+        </div>
+        <div class="reporting-grid">
+          <article class="reporting-stat">
+            <p class="reporting-label">Counted runs today</p>
+            <p class="reporting-value">{{ reporting_metrics['today_runs_count'] }}</p>
+            <p class="helper-text">
+              Estimated time saved today: <strong>{{ reporting_metrics['today_minutes_saved'] }} minutes</strong>
+            </p>
+          </article>
+          <article class="reporting-stat">
+            <p class="reporting-label">Total counted runs</p>
+            <p class="reporting-value">{{ reporting_metrics['total_runs_count'] }}</p>
+            <p class="helper-text">
+              Estimated total time saved: <strong>{{ reporting_metrics['total_minutes_saved'] }} minutes</strong>
+            </p>
+          </article>
+        </div>
+        <p class="helper-text">
+          This counts successful picklist generations only when they occur at least
+          {{ reporting_metrics['distinct_window_minutes'] }} minutes apart. Each counted run is valued at
+          {{ reporting_metrics['estimated_minutes_per_run'] }} minutes saved.
+        </p>
+        <p class="helper-text">
+          Latest counted run:
+          <strong>{{ reporting_metrics['latest_event_display'] or 'No counted runs yet' }}</strong>
+        </p>
+      </section>
+
+      <section class="card">
         {% if not settings_unlocked %}
         <form method="post" class="settings-form">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />

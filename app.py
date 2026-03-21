@@ -139,6 +139,8 @@ RUN_STATE: dict[str, dict[str, Optional[datetime] | bool]] = {
 }
 SETTINGS_CIPHER: Optional[object] = None
 SETTINGS_CIPHER_INITIALIZED = False
+REPORTING_MIN_DISTINCT_RUN_MINUTES = 5
+ESTIMATED_MINUTES_SAVED_PER_RUN = 5
 
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -312,6 +314,16 @@ def initialize_db() -> None:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reporting_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_timestamp TEXT NOT NULL,
+                source_run_id INTEGER NOT NULL,
+                query_type TEXT NOT NULL
             )
             """
         )
@@ -803,6 +815,90 @@ def save_run(
         return run_id
 
 
+def record_reporting_event(
+    source_run_id: int,
+    query_type: str,
+    event_timestamp: datetime,
+) -> bool:
+    threshold_seconds = REPORTING_MIN_DISTINCT_RUN_MINUTES * 60
+    event_timestamp_iso = event_timestamp.isoformat()
+
+    with get_sqlite_conn() as conn:
+        latest_event = conn.execute(
+            """
+            SELECT event_timestamp
+            FROM reporting_events
+            ORDER BY event_timestamp DESC, id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+
+        if latest_event:
+            latest_timestamp = parse_run_timestamp(latest_event["event_timestamp"])
+            elapsed_seconds = (event_timestamp - latest_timestamp).total_seconds()
+            if elapsed_seconds < threshold_seconds:
+                return False
+
+        conn.execute(
+            """
+            INSERT INTO reporting_events (event_timestamp, source_run_id, query_type)
+            VALUES (?, ?, ?)
+            """,
+            (event_timestamp_iso, source_run_id, query_type),
+        )
+        return True
+
+
+def get_reporting_metrics() -> dict[str, Any]:
+    now_utc = datetime.now(timezone.utc)
+    display_timezone = resolve_timezone()
+    start_of_today_display = now_utc.astimezone(display_timezone).replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    start_of_today_utc = start_of_today_display.astimezone(timezone.utc)
+    start_of_today_utc_iso = start_of_today_utc.replace(tzinfo=None).isoformat()
+
+    with get_sqlite_conn() as conn:
+        total_runs_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM reporting_events"
+        ).fetchone()["count"]
+        today_runs_count = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM reporting_events
+            WHERE event_timestamp >= ?
+            """,
+            (start_of_today_utc_iso,),
+        ).fetchone()["count"]
+        latest_event = conn.execute(
+            """
+            SELECT event_timestamp
+            FROM reporting_events
+            ORDER BY event_timestamp DESC, id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+
+    total_minutes_saved = total_runs_count * ESTIMATED_MINUTES_SAVED_PER_RUN
+    today_minutes_saved = today_runs_count * ESTIMATED_MINUTES_SAVED_PER_RUN
+    latest_event_display = None
+    if latest_event:
+        latest_event_display = format_run_timestamp(latest_event["event_timestamp"])
+
+    return {
+        "total_runs_count": total_runs_count,
+        "today_runs_count": today_runs_count,
+        "total_minutes_saved": total_minutes_saved,
+        "today_minutes_saved": today_minutes_saved,
+        "estimated_minutes_per_run": ESTIMATED_MINUTES_SAVED_PER_RUN,
+        "distinct_window_minutes": REPORTING_MIN_DISTINCT_RUN_MINUTES,
+        "latest_event_display": latest_event_display,
+    }
+
+
 def format_run_timestamp_for_filename(run_timestamp: datetime) -> str:
     return run_timestamp.strftime("%Y-%m-%d_%H%M")
 
@@ -1143,12 +1239,22 @@ def _execute_picklist_run_core(
             query_type=query_type,
             run_timestamp=run_timestamp,
         )
+        reporting_event_counted = record_reporting_event(
+            source_run_id=run_id,
+            query_type=query_type,
+            event_timestamp=run_timestamp,
+        )
         elapsed_seconds = time.perf_counter() - started_at
 
         message = (
             f"✅ Picklist run {run_id} ({query_type}) succeeded with {len(df.index)} rows "
             f"in {elapsed_seconds:.2f}s."
         )
+        if reporting_event_counted:
+            message += (
+                f" Counted toward reporting metrics "
+                f"({ESTIMATED_MINUTES_SAVED_PER_RUN} minutes saved estimated)."
+            )
         logger.info(message)
         try:
             send_telegram_notification(message)
@@ -1570,6 +1676,8 @@ def index():
 @app.route("/settings", methods=["GET", "POST"])
 @require_trusted_client
 def settings():
+    reporting_metrics = get_reporting_metrics()
+
     if request.method == "POST":
         validate_csrf()
         action = (request.form.get("action") or "save").strip().lower()
@@ -1683,6 +1791,7 @@ def settings():
             settings_unlocked=False,
             time_diagnostics=time_diagnostics,
             schedule_time_display=schedule_time_display,
+            reporting_metrics=reporting_metrics,
         )
 
     mssql_value = get_config_value("mssql_connection_string", "MSSQL_CONNECTION_STRING")
@@ -1702,6 +1811,7 @@ def settings():
         settings_unlocked=True,
         time_diagnostics=time_diagnostics,
         schedule_time_display=schedule_time_display,
+        reporting_metrics=reporting_metrics,
         mssql_connection_string_masked=mask_connection_string(mssql_value)
         if mssql_value
         else "Not configured",
