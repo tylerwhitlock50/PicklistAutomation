@@ -115,7 +115,8 @@ RAW_SCHEDULE_TIMEZONE = os.getenv("SCHEDULE_TIMEZONE", "UTC")
 SCHEDULE_TIMEZONE = _normalize_schedule_timezone(RAW_SCHEDULE_TIMEZONE)
 ENABLE_SCHEDULER = os.getenv("ENABLE_SCHEDULER", "true").lower() == "true"
 DISPLAY_TIMEZONE = os.getenv("DISPLAY_TIMEZONE")
-UI_REFRESH_INTERVAL_SECONDS = int(os.getenv("UI_REFRESH_INTERVAL_SECONDS", "15"))
+# Dashboard status polling when no run is active (browser polls faster while a run is running).
+UI_REFRESH_INTERVAL_SECONDS = int(os.getenv("UI_REFRESH_INTERVAL_SECONDS", "5"))
 ACCESS_MODE = os.getenv("ACCESS_MODE", "private").lower()
 ACCESS_ALLOWED_CIDRS = os.getenv("ACCESS_ALLOWED_CIDRS", "")
 TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "false").lower() == "true"

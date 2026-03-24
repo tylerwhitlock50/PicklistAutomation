@@ -16,6 +16,12 @@
   box-sizing: border-box;
 }
 
+/* UA `[hidden]` uses display:none, but author rules like `.inline-spinner { display: inline-block }`
+   have equal specificity and win the cascade — spinners then stay visible while "hidden". */
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   font-family: "Avenir Next", "Segoe UI", Arial, sans-serif;
