@@ -44,7 +44,9 @@ DemandBase AS (
         col.LINE_NO,
         col.PART_ID,
         CAST((col.ORDER_QTY - col.TOTAL_SHIPPED_QTY) AS int) AS OPEN_QTY,
-        CAST(co.PROMISE_DEL_DATE AS date) AS PROMISE_DEL_DATE
+        CAST(co.DESIRED_SHIP_DATE AS date) AS DESIRED_SHIP_DATE,
+        CAST(co.PROMISE_SHIP_DATE AS date) AS PROMISE_SHIP_DATE,
+        CAST(co.PROMISE_DEL_DATE  AS date) AS PROMISE_DEL_DATE
     FROM dbo.CUST_ORDER_LINE col
     JOIN dbo.CUSTOMER_ORDER co
         ON col.CUST_ORDER_ID = co.ID
@@ -63,17 +65,18 @@ DemandBase AS (
       AND co.SHIPTO_ID IS NOT NULL
 ),
 
-/* 3) Demand filtered to parts with supply + horizon (<= today+10, includes past due; NULL treated as today) */
+/* 3) Demand filtered to parts with supply + horizon (<= today+10 by desired ship date, includes past due; NULL treated as today)
+   DESIRED_SHIP_DATE drives MRP, so the picklist plans against the same date. */
 Demand AS (
     SELECT
         d.*,
-        COALESCE(d.PROMISE_DEL_DATE, p.TODAY) AS PROMISE_DATE_NORM,
+        COALESCE(d.DESIRED_SHIP_DATE, p.TODAY) AS DESIRED_SHIP_DATE_NORM,
         p.TODAY,
         p.THROUGH_DATE
     FROM DemandBase d
     CROSS JOIN Params p
     WHERE EXISTS (SELECT 1 FROM Supply s WHERE s.PART_ID = d.PART_ID)
-      AND COALESCE(d.PROMISE_DEL_DATE, p.TODAY) <= p.THROUGH_DATE
+      AND COALESCE(d.DESIRED_SHIP_DATE, p.TODAY) <= p.THROUGH_DATE
 ),
 
 /* 4) Supply cumulative ranges */
@@ -102,7 +105,7 @@ SupplyRanges AS (
     FROM Supply s
 ),
 
-/* 5) Demand FIFO cumulative ranges (Promise date FIFO; overdue first) */
+/* 5) Demand FIFO cumulative ranges (Desired Ship Date FIFO; overdue first) */
 DemandRanges AS (
     SELECT
         d.ORDER_DATE,
@@ -113,13 +116,15 @@ DemandRanges AS (
         d.LINE_NO,
         d.PART_ID,
         d.OPEN_QTY,
-        d.PROMISE_DATE_NORM AS PROMISE_DEL_DATE,
+        d.DESIRED_SHIP_DATE_NORM AS DESIRED_SHIP_DATE,
+        d.PROMISE_SHIP_DATE,
+        d.PROMISE_DEL_DATE,
 
         SUM(d.OPEN_QTY) OVER (
             PARTITION BY d.PART_ID
             ORDER BY
-                CASE WHEN d.PROMISE_DATE_NORM < d.TODAY THEN 0 ELSE 1 END,
-                d.PROMISE_DATE_NORM,
+                CASE WHEN d.DESIRED_SHIP_DATE_NORM < d.TODAY THEN 0 ELSE 1 END,
+                d.DESIRED_SHIP_DATE_NORM,
                 d.ORDER_DATE,
                 d.CUST_ORDER_ID,
                 d.LINE_NO
@@ -129,8 +134,8 @@ DemandRanges AS (
         SUM(d.OPEN_QTY) OVER (
             PARTITION BY d.PART_ID
             ORDER BY
-                CASE WHEN d.PROMISE_DATE_NORM < d.TODAY THEN 0 ELSE 1 END,
-                d.PROMISE_DATE_NORM,
+                CASE WHEN d.DESIRED_SHIP_DATE_NORM < d.TODAY THEN 0 ELSE 1 END,
+                d.DESIRED_SHIP_DATE_NORM,
                 d.ORDER_DATE,
                 d.CUST_ORDER_ID,
                 d.LINE_NO
@@ -150,6 +155,8 @@ Allocations AS (
         dr.SHIP_VIA,
         dr.CUSTOMER_ID,
         dr.LINE_NO,
+        dr.DESIRED_SHIP_DATE,
+        dr.PROMISE_SHIP_DATE,
         dr.PROMISE_DEL_DATE,
         dr.ORDER_DATE,
 
@@ -165,21 +172,24 @@ Allocations AS (
 
 /* 7) Final output */
 SELECT
-    p.PRODUCT_CODE  AS [Product code],
-    a.PART_ID       AS [Part Id],
-    a.LOCATION_ID   AS [Location],
-    a.WAREHOUSE_ID  AS [Warehouse],
-    a.CUST_ORDER_ID AS [Cust Order ID],
-    a.CUSTOMER_ID   AS [Customer ID],
-    a.SHIPTO_ID     AS [Ship To ID],
-    a.SHIP_VIA      AS [Ship Via],
-    a.ALLOC_QTY     AS [SO Qty]
+    p.PRODUCT_CODE     AS [Product code],
+    a.PART_ID          AS [Part Id],
+    a.LOCATION_ID      AS [Location],
+    a.WAREHOUSE_ID     AS [Warehouse],
+    a.CUST_ORDER_ID    AS [Cust Order ID],
+    a.CUSTOMER_ID      AS [Customer ID],
+    a.SHIPTO_ID        AS [Ship To ID],
+    a.SHIP_VIA         AS [Ship Via],
+    a.ALLOC_QTY        AS [SO Qty],
+    a.DESIRED_SHIP_DATE AS [Desired Ship Date],
+    a.PROMISE_SHIP_DATE AS [Promise Ship Date],
+    a.PROMISE_DEL_DATE  AS [Promise Delivery Date]
 FROM Allocations a
 JOIN dbo.PART p
   ON p.ID = a.PART_ID
 WHERE a.ALLOC_QTY > 0
 ORDER BY
-    a.PROMISE_DEL_DATE,
+    a.DESIRED_SHIP_DATE,
     a.ORDER_DATE,
     a.CUST_ORDER_ID,
     a.LINE_NO,

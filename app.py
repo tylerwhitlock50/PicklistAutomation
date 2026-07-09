@@ -36,6 +36,8 @@ from flask import (
 )
 from sqlalchemy import create_engine
 
+import audit_store
+
 try:
     from cryptography.fernet import Fernet, InvalidToken
 except ModuleNotFoundError:
@@ -100,7 +102,11 @@ QUERY_FILES = {
         os.getenv("COMPONENTS_QUERY_FILE", "sql/query_components.sql")
     ),
 }
-GUNS_DEFAULT_LOOKAHEAD_DAYS = 30
+AUDIT_QUERY_FILE = resolve_path_setting(
+    os.getenv("AUDIT_QUERY_FILE", "sql/audit_serialized_inventory.sql")
+)
+AUDIT_SCOPE_FILTER_TOKEN = "__AUDIT_SCOPE_FILTER__"
+GUNS_DEFAULT_LOOKAHEAD_DAYS = 10
 GUNS_MAX_LOOKAHEAD_DAYS = 365
 GUNS_BASE_EXCLUDED_CUSTOMERS = ("CA MARK",)
 GUNS_MAX_ADDITIONAL_CUSTOMERS = 10
@@ -774,6 +780,48 @@ def fetch_picklist_from_mssql(
     with engine.connect() as connection:
         df = pd.read_sql_query(query, connection)
         logger.info("Picklist query returned %d rows.", len(df.index))
+        return df
+
+
+def render_audit_query(scope: Optional[str]) -> str:
+    """Load the serialized-audit SQL and substitute the scope filter token.
+
+    scope=None renders the full audit (all scopes). A scope is validated against
+    the known audit scopes before being injected as a quoted literal.
+    """
+    if not AUDIT_QUERY_FILE.exists():
+        raise FileNotFoundError(f"Audit query file not found at: {AUDIT_QUERY_FILE}")
+    query_template = AUDIT_QUERY_FILE.read_text(encoding="utf-8")
+
+    if scope is None:
+        scope_filter = ""
+    else:
+        if scope not in audit_store.VALID_SCOPES:
+            raise ValueError(f"Unknown audit scope: {scope}")
+        scope_filter = f"AND c.SCOPE = {sql_quote_literal(scope)}"
+    return query_template.replace(AUDIT_SCOPE_FILTER_TOKEN, scope_filter)
+
+
+def fetch_audit_expected(scope: Optional[str]) -> pd.DataFrame:
+    """Run the serialized-audit expected-inventory query against SQL Server."""
+    query = render_audit_query(scope)
+    mssql_conn_string = get_config_value(
+        setting_key="mssql_connection_string",
+        env_key="MSSQL_CONNECTION_STRING",
+    )
+    if not mssql_conn_string:
+        raise ValueError(
+            "MSSQL_CONNECTION_STRING is not set. Configure it in Settings or in your .env file."
+        )
+    logger.info(
+        "Running serialized audit expected query (scope=%s) via %s",
+        scope or "ALL",
+        mask_connection_string(mssql_conn_string),
+    )
+    engine = create_engine(mssql_conn_string)
+    with engine.connect() as connection:
+        df = pd.read_sql_query(query, connection)
+        logger.info("Audit expected query returned %d rows.", len(df.index))
         return df
 
 
@@ -1604,6 +1652,7 @@ def send_email_notification_with_config(
 
 initialize_db()
 migrate_sensitive_settings_encryption()
+audit_store.initialize()
 start_scheduler()
 
 
@@ -2008,6 +2057,276 @@ def api_status():
 @require_trusted_client
 def api_csrf():
     return jsonify({"csrf_token": get_csrf_token()}), 200
+
+
+# ---------------------------------------------------------------------------
+# Serialized inventory audit
+# ---------------------------------------------------------------------------
+def _audit_dt_display(value) -> Optional[str]:
+    if not value:
+        return None
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return value
+    try:
+        return format_datetime_for_display(value)
+    except (ValueError, TypeError):
+        return str(value)
+
+
+def _audit_unavailable_response():
+    """Consistent handling when the Postgres audit store is not configured."""
+    if request.accept_mimetypes.best == "application/json" or request.path.startswith("/api/"):
+        return jsonify({"error": "audit_unavailable", "message": AUDIT_UNAVAILABLE_MESSAGE}), 503
+    flash(AUDIT_UNAVAILABLE_MESSAGE, "error")
+    return render_template(
+        "audit.html",
+        audit_available=False,
+        scopes=[],
+        recent_sessions=[],
+        due_scopes=[],
+    )
+
+
+AUDIT_UNAVAILABLE_MESSAGE = (
+    "The serialized audit feature is unavailable because the Postgres store "
+    "(DATABASE_URL) is not configured or could not be reached."
+)
+
+
+@app.get("/audit")
+@require_trusted_client
+def audit_dashboard():
+    if not audit_store.is_available():
+        return _audit_unavailable_response()
+
+    scopes = audit_store.list_scope_status()
+    for scope in scopes:
+        scope["last_inventoried_display"] = _audit_dt_display(scope.get("last_inventoried"))
+
+    recent = audit_store.recent_sessions(limit=10)
+    for row in recent:
+        row["started_display"] = _audit_dt_display(row.get("started_at"))
+        row["completed_display"] = _audit_dt_display(row.get("completed_at"))
+
+    due_scopes = [scope for scope in scopes if scope.get("due")]
+    return render_template(
+        "audit.html",
+        audit_available=True,
+        scopes=scopes,
+        recent_sessions=recent,
+        due_scopes=due_scopes,
+    )
+
+
+@app.post("/audit/session/start")
+@require_trusted_client
+@require_csrf
+def audit_session_start():
+    if not audit_store.is_available():
+        flash(AUDIT_UNAVAILABLE_MESSAGE, "error")
+        return redirect(url_for("audit_dashboard"))
+
+    raw_scope = (request.form.get("scope") or "").strip()
+    scope = None if raw_scope in ("", "all", "ALL") else raw_scope
+    if scope is not None and scope not in audit_store.VALID_SCOPES:
+        flash(f"Unknown audit location: {raw_scope}", "error")
+        return redirect(url_for("audit_dashboard"))
+
+    operator = (request.form.get("operator") or "").strip() or None
+
+    try:
+        df = fetch_audit_expected(scope)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to load audit expected list: %s", exc)
+        flash(f"Could not load the expected serial list: {exc}", "error")
+        return redirect(url_for("audit_dashboard"))
+
+    expected_rows = df.to_dict(orient="records") if not df.empty else []
+    try:
+        session_id = audit_store.start_session(scope, expected_rows, operator)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to start audit session: %s", exc)
+        flash(f"Could not start the audit session: {exc}", "error")
+        return redirect(url_for("audit_dashboard"))
+
+    logger.info(
+        "Started audit session #%s (scope=%s, %d expected serials).",
+        session_id,
+        scope or "ALL",
+        len(expected_rows),
+    )
+    return redirect(url_for("audit_session_page", session_id=session_id))
+
+
+def _audit_scope_label(scope: Optional[str]) -> str:
+    if scope is None:
+        return "All serialized locations"
+    for entry in audit_store.AUDIT_SCOPES:
+        if entry["scope"] == scope:
+            return entry["label"]
+    return scope
+
+
+@app.get("/audit/session/<int:session_id>")
+@require_trusted_client
+def audit_session_page(session_id: int):
+    if not audit_store.is_available():
+        return _audit_unavailable_response()
+
+    session_row = audit_store.get_session(session_id)
+    if not session_row:
+        flash(f"Audit session #{session_id} was not found.", "error")
+        return redirect(url_for("audit_dashboard"))
+
+    items = audit_store.get_expected_items(session_id)
+    for item in items:
+        item["scanned_at_display"] = _audit_dt_display(item.get("scanned_at"))
+    unexpected = audit_store.get_unexpected_scans(session_id)
+    for row in unexpected:
+        row["first_scanned_display"] = _audit_dt_display(row.get("first_scanned_at"))
+    counts = audit_store.compute_counts(session_id)
+
+    return render_template(
+        "audit_session.html",
+        session=session_row,
+        session_scope_label=_audit_scope_label(session_row.get("scope")),
+        started_display=_audit_dt_display(session_row.get("started_at")),
+        completed_display=_audit_dt_display(session_row.get("completed_at")),
+        items=items,
+        unexpected=unexpected,
+        counts=counts,
+        ui_refresh_interval_seconds=UI_REFRESH_INTERVAL_SECONDS,
+    )
+
+
+@app.post("/api/audit/session/<int:session_id>/scan")
+@require_trusted_client
+@require_csrf
+def api_audit_scan(session_id: int):
+    if not audit_store.is_available():
+        return jsonify({"error": "audit_unavailable", "message": AUDIT_UNAVAILABLE_MESSAGE}), 503
+
+    session_row = audit_store.get_session(session_id)
+    if not session_row:
+        return jsonify({"error": "not_found", "message": "Audit session not found."}), 404
+    if session_row.get("status") == "completed":
+        return jsonify({"error": "completed", "message": "This audit session is already completed."}), 409
+
+    payload = request.get_json(silent=True) or {}
+    serial = (payload.get("serial") or "").strip()
+    location = (payload.get("location") or "").strip()
+    operator = (payload.get("operator") or "").strip() or None
+    if not serial:
+        return jsonify({"error": "invalid", "message": "A serial number is required."}), 400
+
+    try:
+        result = audit_store.record_scan(session_id, serial, location, operator)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to record audit scan: %s", exc)
+        return jsonify({"error": "scan_failed", "message": str(exc)}), 500
+
+    return jsonify(
+        {
+            "result": result["result"],
+            "is_duplicate": result["is_duplicate"],
+            "item": result["item"],
+            "counts": result["counts"],
+            "serial": serial,
+            "location": location,
+        }
+    ), 200
+
+
+@app.post("/api/audit/session/<int:session_id>/complete")
+@require_trusted_client
+@require_csrf
+def api_audit_complete(session_id: int):
+    if not audit_store.is_available():
+        return jsonify({"error": "audit_unavailable", "message": AUDIT_UNAVAILABLE_MESSAGE}), 503
+
+    session_row = audit_store.get_session(session_id)
+    if not session_row:
+        return jsonify({"error": "not_found", "message": "Audit session not found."}), 404
+
+    try:
+        completed = audit_store.complete_session(session_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to complete audit session: %s", exc)
+        return jsonify({"error": "complete_failed", "message": str(exc)}), 500
+
+    logger.info("Completed audit session #%s.", session_id)
+    return jsonify(
+        {
+            "status": "completed",
+            "session": {
+                "id": completed["id"],
+                "accuracy_pct": float(completed["accuracy_pct"]) if completed.get("accuracy_pct") is not None else None,
+                "expected_count": completed["expected_count"],
+                "verified_count": completed["verified_count"],
+                "misplaced_count": completed["misplaced_count"],
+                "missing_count": completed["missing_count"],
+                "unexpected_count": completed["unexpected_count"],
+            },
+            "redirect": url_for("audit_session_page", session_id=session_id),
+        }
+    ), 200
+
+
+@app.get("/api/audit/session/<int:session_id>/state")
+@require_trusted_client
+def api_audit_state(session_id: int):
+    if not audit_store.is_available():
+        return jsonify({"error": "audit_unavailable", "message": AUDIT_UNAVAILABLE_MESSAGE}), 503
+
+    session_row = audit_store.get_session(session_id)
+    if not session_row:
+        return jsonify({"error": "not_found", "message": "Audit session not found."}), 404
+
+    return jsonify(
+        {
+            "status": session_row.get("status"),
+            "counts": audit_store.compute_counts(session_id),
+        }
+    ), 200
+
+
+@app.get("/audit/session/<int:session_id>/export")
+@require_trusted_client
+def audit_session_export(session_id: int):
+    if not audit_store.is_available():
+        flash(AUDIT_UNAVAILABLE_MESSAGE, "error")
+        return redirect(url_for("audit_dashboard"))
+
+    session_row = audit_store.get_session(session_id)
+    if not session_row:
+        flash(f"Audit session #{session_id} was not found.", "error")
+        return redirect(url_for("audit_dashboard"))
+
+    items = audit_store.get_expected_items(session_id)
+    unexpected = audit_store.get_unexpected_scans(session_id)
+
+    expected_df = pd.DataFrame(items)
+    unexpected_df = pd.DataFrame(unexpected)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output) as writer:
+        (expected_df if not expected_df.empty else pd.DataFrame(columns=["serial"])).to_excel(
+            writer, index=False, sheet_name="Expected"
+        )
+        (unexpected_df if not unexpected_df.empty else pd.DataFrame(columns=["scanned_serial"])).to_excel(
+            writer, index=False, sheet_name="Unexpected"
+        )
+    output.seek(0)
+    scope_label = (session_row.get("scope") or "ALL").replace("/", "-")
+    filename = f"audit_{scope_label}_session{session_id}.xlsx"
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=filename,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
 def parse_recipient_addresses(raw_value: str) -> list[str]:

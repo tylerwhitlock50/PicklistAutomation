@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Serialized Inventory Audit</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <main class="page-shell">
+      <section class="hero card">
+        <div class="hero-top">
+          <div>
+            <p class="eyebrow">Shipping</p>
+            <h1>Serialized Inventory Audit</h1>
+          </div>
+          <a class="button tertiary" href="{{ url_for('index') }}">&larr; Dashboard</a>
+        </div>
+        <p class="hero-copy">
+          Pick a location, then scan the location barcode and each firearm serial. The app confirms
+          every serial is where the system expects it &mdash; flagging misplaced, missing, and
+          unexpected guns &mdash; so the weekly manual count becomes a quick daily scan.
+        </p>
+        <label class="audit-operator">
+          <span>Operator (optional)</span>
+          <input type="text" id="operator-name" placeholder="Your name or initials" autocomplete="off" />
+        </label>
+      </section>
+
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <section class="alerts">
+          {% for category, message in messages %}
+          <p class="flash {{ category }}">{{ message }}</p>
+          {% endfor %}
+        </section>
+        {% endif %}
+      {% endwith %}
+
+      {% if not audit_available %}
+      <section class="card">
+        <h2>Audit store not configured</h2>
+        <p class="helper-text">
+          The serialized audit needs its Postgres store. Set <code>DATABASE_URL</code> in the
+          environment and restart the app. The picklist features are unaffected.
+        </p>
+      </section>
+      {% else %}
+
+      {% if due_scopes %}
+      <section class="card audit-due-banner">
+        <h2>Due for audit</h2>
+        <p class="helper-text">These locations have not been audited within their cadence:</p>
+        <div class="audit-chip-row">
+          {% for scope in due_scopes %}
+          <span class="pill running">{{ scope.label }}{% if scope.days_since is not none %} &middot; {{ scope.days_since }}d ago{% else %} &middot; never{% endif %}</span>
+          {% endfor %}
+        </div>
+      </section>
+      {% endif %}
+
+      <section class="card">
+        <h2>Locations</h2>
+        <p class="helper-text">Start an audit for a single location, or run a full audit of everything.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Location</th>
+                <th>Warehouse</th>
+                <th>Last inventoried</th>
+                <th>Days ago</th>
+                <th>Cadence</th>
+                <th>Status</th>
+                <th>Last accuracy</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for scope in scopes %}
+              <tr>
+                <td>{{ scope.label }}</td>
+                <td>{{ scope.warehouse_id or '&mdash;'|safe }}</td>
+                <td>{{ scope.last_inventoried_display or 'Never' }}</td>
+                <td>{{ scope.days_since if scope.days_since is not none else '&mdash;'|safe }}</td>
+                <td>{{ scope.cadence_days }}d</td>
+                <td>
+                  {% if scope.due %}
+                  <span class="pill failed">Due</span>
+                  {% else %}
+                  <span class="pill success">OK</span>
+                  {% endif %}
+                </td>
+                <td>{{ '%.0f%%'|format(scope.last_accuracy) if scope.last_accuracy is not none else '&mdash;'|safe }}</td>
+                <td>
+                  <form method="post" action="{{ url_for('audit_session_start') }}" class="audit-start-form">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                    <input type="hidden" name="scope" value="{{ scope.scope }}" />
+                    <input type="hidden" name="operator" value="" data-operator-field />
+                    <button type="submit" class="button table-button">Start audit</button>
+                  </form>
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <div class="actions">
+          <form method="post" action="{{ url_for('audit_session_start') }}" class="audit-start-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+            <input type="hidden" name="scope" value="all" />
+            <input type="hidden" name="operator" value="" data-operator-field />
+            <button type="submit" class="button secondary">Start full audit (all locations)</button>
+          </form>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Recent audits</h2>
+        {% if recent_sessions %}
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Location</th>
+                <th>Status</th>
+                <th>Started</th>
+                <th>Completed</th>
+                <th>Expected</th>
+                <th>Verified</th>
+                <th>Misplaced</th>
+                <th>Missing</th>
+                <th>Unexpected</th>
+                <th>Accuracy</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in recent_sessions %}
+              <tr>
+                <td>{{ row.id }}</td>
+                <td>{{ row.scope or 'ALL' }}</td>
+                <td>
+                  {% if row.status == 'completed' %}
+                  <span class="pill success">completed</span>
+                  {% else %}
+                  <span class="pill running">{{ row.status }}</span>
+                  {% endif %}
+                </td>
+                <td>{{ row.started_display or '&mdash;'|safe }}</td>
+                <td>{{ row.completed_display or '&mdash;'|safe }}</td>
+                <td>{{ row.expected_count }}</td>
+                <td>{{ row.verified_count }}</td>
+                <td>{{ row.misplaced_count }}</td>
+                <td>{{ row.missing_count }}</td>
+                <td>{{ row.unexpected_count }}</td>
+                <td>{{ '%.0f%%'|format(row.accuracy_pct) if row.accuracy_pct is not none else '&mdash;'|safe }}</td>
+                <td><a class="button tertiary table-button" href="{{ url_for('audit_session_page', session_id=row.id) }}">Open</a></td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <p class="empty-state">No audits have been run yet.</p>
+        {% endif %}
+      </section>
+      {% endif %}
+    </main>
+
+    <script>
+      (function () {
+        var STORAGE_KEY = "audit_operator_name";
+        var input = document.getElementById("operator-name");
+        if (input) {
+          try { input.value = localStorage.getItem(STORAGE_KEY) || ""; } catch (e) {}
+          input.addEventListener("input", function () {
+            try { localStorage.setItem(STORAGE_KEY, input.value.trim()); } catch (e) {}
+          });
+        }
+        // Inject the operator name into each start form on submit.
+        document.querySelectorAll(".audit-start-form").forEach(function (form) {
+          form.addEventListener("submit", function () {
+            var field = form.querySelector("[data-operator-field]");
+            if (field && input) field.value = input.value.trim();
+          });
+        });
+      })();
+    </script>
+  </body>
+</html>

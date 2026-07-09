@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Audit session #{{ session.id }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <main class="page-shell">
+      <section class="hero card">
+        <div class="hero-top">
+          <div>
+            <p class="eyebrow">Serialized Audit &middot; Session #{{ session.id }}</p>
+            <h1>{{ session_scope_label }}</h1>
+          </div>
+          <a class="button tertiary" href="{{ url_for('audit_dashboard') }}">&larr; All locations</a>
+        </div>
+        <p class="hero-copy">
+          {% if session.status == 'completed' %}
+          This audit is complete. Review the results below.
+          {% else %}
+          Scan the <strong>location barcode</strong> first, then scan each firearm serial at that
+          location. Keep scanning serials; change the location when you move to a new shelf.
+          {% endif %}
+          <span class="helper-text">Started {{ started_display }}{% if completed_display %} &middot; Completed {{ completed_display }}{% endif %}.</span>
+        </p>
+      </section>
+
+      <section class="card audit-tiles" data-tiles>
+        <div class="audit-tile"><span class="audit-tile-num" data-tile="expected">{{ counts.expected or 0 }}</span><span class="audit-tile-label">Expected</span></div>
+        <div class="audit-tile tile-verified"><span class="audit-tile-num" data-tile="verified">{{ counts.verified or 0 }}</span><span class="audit-tile-label">Verified</span></div>
+        <div class="audit-tile tile-misplaced"><span class="audit-tile-num" data-tile="misplaced">{{ counts.misplaced or 0 }}</span><span class="audit-tile-label">Misplaced</span></div>
+        <div class="audit-tile tile-pending"><span class="audit-tile-num" data-tile="pending">{{ counts.pending or 0 }}</span><span class="audit-tile-label" data-pending-label>{% if session.status == 'completed' %}Missing{% else %}Remaining{% endif %}</span></div>
+        <div class="audit-tile tile-missing"><span class="audit-tile-num" data-tile="missing">{{ counts.missing or 0 }}</span><span class="audit-tile-label">Missing</span></div>
+        <div class="audit-tile tile-unexpected"><span class="audit-tile-num" data-tile="unexpected">{{ counts.unexpected or 0 }}</span><span class="audit-tile-label">Unexpected</span></div>
+      </section>
+
+      {% if session.status != 'completed' %}
+      <section class="card">
+        <h2>Scan</h2>
+        <div class="audit-scan-grid">
+          <label class="audit-field">
+            <span>Current location</span>
+            <input type="text" id="location-input" placeholder="Scan location barcode" autocomplete="off" autocapitalize="characters" />
+          </label>
+          <label class="audit-field">
+            <span>Serial number</span>
+            <input type="text" id="serial-input" placeholder="Scan firearm serial" autocomplete="off" autocapitalize="characters" disabled />
+          </label>
+        </div>
+        <p class="helper-text" id="scan-hint">Scan the location barcode to begin.</p>
+        <div id="scan-result" class="audit-scan-result" hidden></div>
+        <div class="actions">
+          <button type="button" class="button tertiary" id="change-location">Change location</button>
+          <button type="button" class="button secondary" id="complete-audit">Complete audit</button>
+          <a class="button tertiary" href="{{ url_for('audit_session_export', session_id=session.id) }}">Export</a>
+        </div>
+        <div class="audit-log" id="scan-log" aria-live="polite"></div>
+      </section>
+      {% else %}
+      <section class="card">
+        <div class="actions">
+          <a class="button secondary" href="{{ url_for('audit_session_export', session_id=session.id) }}">Export results</a>
+        </div>
+      </section>
+      {% endif %}
+
+      <section class="card">
+        <div class="table-controls">
+          <h2>Expected serials</h2>
+          <input type="search" data-table-filter placeholder="Filter serials..." aria-label="Filter expected serials" />
+        </div>
+        <div class="table-wrap">
+          <table data-filterable-table>
+            <thead>
+              <tr>
+                <th>Serial</th>
+                <th>Part</th>
+                <th>Description</th>
+                <th>Location scope</th>
+                <th>Expected location</th>
+                <th>Tied WO</th>
+                <th>Status</th>
+                <th>Scanned at</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for item in items %}
+              <tr data-serial="{{ item.serial|upper }}">
+                <td>{{ item.serial }}</td>
+                <td>{{ item.part_id or '' }}</td>
+                <td>{{ item.part_description or '' }}</td>
+                <td>{{ item.scope or '' }}</td>
+                <td>{{ item.expected_location or 'Unassigned' }}</td>
+                <td>{{ 'Yes' if item.tied_wo else '' }}{% if item.tied_wo and item.cust_order_id %} ({{ item.cust_order_id }}){% endif %}</td>
+                <td data-status-cell>
+                  <span class="pill audit-status status-{{ item.status }}">{{ item.status }}</span>
+                </td>
+                <td data-scanned-cell>{{ item.scanned_location or '' }}{% if item.scanned_at_display %} &middot; {{ item.scanned_at_display }}{% endif %}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card" id="unexpected-card" {% if not unexpected %}hidden{% endif %}>
+        <h2>Unexpected scans</h2>
+        <p class="helper-text">Serials scanned that were not expected in this audit &mdash; need review.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Serial</th><th>Scanned location</th><th>First scanned</th><th>Times</th></tr>
+            </thead>
+            <tbody id="unexpected-body">
+              {% for row in unexpected %}
+              <tr data-serial="{{ row.scanned_serial|upper }}">
+                <td>{{ row.scanned_serial }}</td>
+                <td>{{ row.scanned_location or '' }}</td>
+                <td>{{ row.first_scanned_display or '' }}</td>
+                <td>{{ row.scan_count }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const AUDIT = {
+        sessionId: {{ session.id }},
+        csrfToken: {{ csrf_token()|tojson }},
+        scanUrl: {{ url_for('api_audit_scan', session_id=session.id)|tojson }},
+        completeUrl: {{ url_for('api_audit_complete', session_id=session.id)|tojson }},
+        completed: {{ (session.status == 'completed')|tojson }},
+        operator: null,
+      };
+      try { AUDIT.operator = localStorage.getItem("audit_operator_name") || null; } catch (e) {}
+
+      // ---- audio feedback -------------------------------------------------
+      let audioCtx = null;
+      function beep(kind) {
+        try {
+          audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          osc.connect(gain); gain.connect(audioCtx.destination);
+          const now = audioCtx.currentTime;
+          if (kind === "verified") { osc.frequency.value = 880; }
+          else if (kind === "misplaced") { osc.frequency.value = 440; }
+          else { osc.frequency.value = 200; }
+          gain.gain.setValueAtTime(0.001, now);
+          gain.gain.exponentialRampToValueAtTime(0.25, now + 0.01);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+          osc.start(now); osc.stop(now + 0.24);
+        } catch (e) {}
+      }
+
+      // ---- table filter (mirrors dashboard behaviour) ---------------------
+      document.querySelectorAll("[data-table-filter]").forEach(function (input) {
+        input.addEventListener("input", function () {
+          const term = input.value.trim().toLowerCase();
+          const table = input.closest("section").querySelector("[data-filterable-table]");
+          if (!table) return;
+          table.querySelectorAll("tbody tr").forEach(function (tr) {
+            tr.hidden = term && tr.textContent.toLowerCase().indexOf(term) === -1;
+          });
+        });
+      });
+
+      if (!AUDIT.completed) {
+        const locationInput = document.getElementById("location-input");
+        const serialInput = document.getElementById("serial-input");
+        const scanHint = document.getElementById("scan-hint");
+        const scanResult = document.getElementById("scan-result");
+        const scanLog = document.getElementById("scan-log");
+        let currentLocation = "";
+
+        function setLocation(value) {
+          currentLocation = value.trim();
+          if (!currentLocation) return;
+          locationInput.value = currentLocation.toUpperCase();
+          serialInput.disabled = false;
+          scanHint.textContent = "Location set to " + currentLocation.toUpperCase() + ". Now scan serials.";
+          serialInput.focus();
+        }
+
+        locationInput.addEventListener("keydown", function (e) {
+          if (e.key === "Enter") { e.preventDefault(); setLocation(locationInput.value); }
+        });
+        document.getElementById("change-location").addEventListener("click", function () {
+          serialInput.disabled = true;
+          locationInput.value = "";
+          locationInput.focus();
+          scanHint.textContent = "Scan the location barcode to continue.";
+        });
+
+        function showResult(kind, message) {
+          scanResult.hidden = false;
+          scanResult.className = "audit-scan-result result-" + kind;
+          scanResult.textContent = message;
+          const entry = document.createElement("div");
+          entry.className = "audit-log-entry result-" + kind;
+          entry.textContent = message;
+          scanLog.prepend(entry);
+          while (scanLog.children.length > 25) scanLog.removeChild(scanLog.lastChild);
+        }
+
+        function applyCounts(counts) {
+          if (!counts) return;
+          document.querySelectorAll("[data-tile]").forEach(function (el) {
+            const key = el.getAttribute("data-tile");
+            if (counts[key] !== undefined) el.textContent = counts[key];
+          });
+        }
+
+        function updateRow(serial, status, scannedLocation) {
+          const row = document.querySelector('[data-filterable-table] tr[data-serial="' + serial.toUpperCase().replace(/"/g, '') + '"]');
+          if (!row) return;
+          const cell = row.querySelector("[data-status-cell]");
+          if (cell) cell.innerHTML = '<span class="pill audit-status status-' + status + '">' + status + '</span>';
+          const scanned = row.querySelector("[data-scanned-cell]");
+          if (scanned) scanned.textContent = scannedLocation || "";
+        }
+
+        function addUnexpectedRow(serial, location) {
+          const body = document.getElementById("unexpected-body");
+          document.getElementById("unexpected-card").hidden = false;
+          const existing = body.querySelector('tr[data-serial="' + serial.toUpperCase().replace(/"/g, '') + '"]');
+          if (existing) return;
+          const tr = document.createElement("tr");
+          tr.setAttribute("data-serial", serial.toUpperCase());
+          tr.innerHTML = "<td>" + serial + "</td><td>" + (location || "") + "</td><td>just now</td><td>1</td>";
+          body.prepend(tr);
+        }
+
+        let scanning = false;
+        async function submitScan(serial) {
+          if (scanning) return;
+          scanning = true;
+          try {
+            const resp = await fetch(AUDIT.scanUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "X-CSRF-Token": AUDIT.csrfToken },
+              body: JSON.stringify({ serial: serial, location: currentLocation, operator: AUDIT.operator }),
+            });
+            const data = await resp.json();
+            if (!resp.ok) {
+              showResult("unexpected", "Error: " + (data.message || resp.status));
+              beep("unexpected");
+              return;
+            }
+            const dup = data.is_duplicate ? " (already scanned)" : "";
+            if (data.result === "verified") {
+              showResult("verified", "✔ VERIFIED " + serial + dup);
+              beep("verified");
+            } else if (data.result === "misplaced") {
+              const expLoc = data.item && data.item.expected_location ? data.item.expected_location : "another location";
+              showResult("misplaced", "⚠ MISPLACED " + serial + " — belongs in " + expLoc + dup);
+              beep("misplaced");
+            } else {
+              showResult("unexpected", "✖ UNEXPECTED " + serial + " — not in this audit, review" + dup);
+              beep("unexpected");
+              addUnexpectedRow(serial, currentLocation);
+            }
+            if (data.item && data.result !== "unexpected") {
+              updateRow(serial, data.result, currentLocation);
+            }
+            applyCounts(data.counts);
+          } catch (err) {
+            showResult("unexpected", "Network error scanning " + serial);
+            beep("unexpected");
+          } finally {
+            scanning = false;
+          }
+        }
+
+        serialInput.addEventListener("keydown", function (e) {
+          if (e.key !== "Enter") return;
+          e.preventDefault();
+          const serial = serialInput.value.trim();
+          serialInput.value = "";
+          if (!serial) return;
+          if (!currentLocation) { scanHint.textContent = "Scan a location first."; locationInput.focus(); return; }
+          submitScan(serial);
+        });
+
+        document.getElementById("complete-audit").addEventListener("click", async function () {
+          if (!confirm("Complete this audit? Unscanned serials will be marked missing.")) return;
+          try {
+            const resp = await fetch(AUDIT.completeUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "X-CSRF-Token": AUDIT.csrfToken },
+              body: JSON.stringify({}),
+            });
+            const data = await resp.json();
+            if (resp.ok && data.redirect) { window.location.href = data.redirect; }
+            else { alert(data.message || "Could not complete the audit."); }
+          } catch (err) { alert("Network error completing the audit."); }
+        });
+
+        locationInput.focus();
+      }
+    </script>
+  </body>
+</html>

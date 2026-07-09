@@ -121,6 +121,10 @@
             </section>
           </section>
           {% endfor %}
+          <section class="actions quick-action-row">
+            <a class="button" href="{{ url_for('audit_dashboard') }}">Serialized Inventory Audit</a>
+            <p class="helper-text">Scan-based daily firearm audit for Shipping (cage &amp; racks).</p>
+          </section>
           <section class="actions quick-action-row" data-advanced-section>
             <a class="button tertiary" href="{{ url_for('settings') }}">Settings</a>
             <p class="helper-text">Admin only. Use this for connection and notification setup.</p>
@@ -156,7 +160,7 @@
               data-guns-days-input
             />
             <p class="helper-text">
-              Default is {{ guns_query_defaults['lookahead_days'] }} days. Increase it to 30, 60, or any whole number up to 365.
+              Default is {{ guns_query_defaults['lookahead_days'] }} days, matching the 10-day shipping window. Increase it (e.g. 30, 60, up to 365) to look further out by Desired Ship Date.
             </p>
           </section>
           <section class="override-field">

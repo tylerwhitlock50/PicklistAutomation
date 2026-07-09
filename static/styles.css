@@ -812,3 +812,139 @@ body.density-compact td {
     align-items: flex-start;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Serialized inventory audit
+--------------------------------------------------------------------------- */
+.audit-operator {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 14px;
+  font-size: 0.86rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.audit-operator input,
+.audit-field input {
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  font-size: 1rem;
+  background: #fff;
+  color: var(--ink);
+}
+
+.audit-due-banner {
+  border-color: #f3c9a3;
+  background: #fff6ec;
+}
+
+.audit-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.audit-tiles {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 12px;
+}
+
+.audit-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 14px 8px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.audit-tile-num {
+  font-size: 1.8rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.audit-tile-label {
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.tile-verified { background: #dff2e7; border-color: #b8ddc8; }
+.tile-misplaced { background: #fbe9d2; border-color: #f0c99a; }
+.tile-pending { background: #eef2f7; border-color: #d6e0ea; }
+.tile-missing { background: #fde4df; border-color: #f3b7ab; }
+.tile-unexpected { background: #f3e0f5; border-color: #ddb8e3; }
+
+.audit-scan-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.audit-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-weight: 700;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+#serial-input {
+  font-size: 1.3rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.audit-scan-result {
+  margin-top: 14px;
+  padding: 16px;
+  border-radius: 12px;
+  font-size: 1.25rem;
+  font-weight: 800;
+  border: 2px solid transparent;
+}
+
+.result-verified { background: var(--success-bg); color: #1d5b3f; border-color: #7fc7a0; }
+.result-misplaced { background: #fbe9d2; color: #8a5314; border-color: #e5954e; }
+.result-unexpected { background: var(--error-bg); color: #983a2f; border-color: #e78b7c; }
+
+.audit-log {
+  margin-top: 14px;
+  display: grid;
+  gap: 4px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.audit-log-entry {
+  padding: 7px 10px;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  border-left: 4px solid transparent;
+}
+
+.audit-log-entry.result-verified { background: #f0f9f4; border-left-color: #2f6f52; }
+.audit-log-entry.result-misplaced { background: #fdf3e6; border-left-color: #e5954e; }
+.audit-log-entry.result-unexpected { background: #fdeeeb; border-left-color: #c0392b; }
+
+.pill.audit-status.status-verified { background: #d7ecdf; color: #1d5b3f; }
+.pill.audit-status.status-misplaced { background: #fbe0c4; color: #8a5314; }
+.pill.audit-status.status-missing { background: #f7d8d1; color: #983a2f; }
+.pill.audit-status.status-pending { background: #e6edf5; color: #2c465a; }
+
+@media (max-width: 720px) {
+  .audit-tiles { grid-template-columns: repeat(3, 1fr); }
+  .audit-scan-grid { grid-template-columns: 1fr; }
+}
