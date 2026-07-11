@@ -8,6 +8,8 @@
   </head>
   <body>
     <main class="page-shell">
+      {% set active_nav = 'scan' %}
+      {% include '_topnav.html' %}
       <section class="hero card">
         <div class="hero-top">
           <div>
@@ -19,6 +21,10 @@
         <p class="hero-copy">
           {% if session.status == 'completed' %}
           This audit is complete. Review the results below.
+          {% elif session.scope == 'TIED-WO' %}
+          Tied units are staged by sales order. Scan the <strong>sales order barcode</strong>
+          (e.g. SO-130311) first, then scan each firearm serial allocated to it. Change the
+          order when you move to the next one.
           {% else %}
           Scan the <strong>location barcode</strong> first, then scan each firearm serial at that
           location. Keep scanning serials; change the location when you move to a new shelf.
@@ -36,23 +42,29 @@
         <div class="audit-tile tile-unexpected"><span class="audit-tile-num" data-tile="unexpected">{{ counts.unexpected or 0 }}</span><span class="audit-tile-label">Unexpected</span></div>
       </section>
 
+      {% set loc_term = 'sales order' if session.scope == 'TIED-WO' else 'location' %}
       {% if session.status != 'completed' %}
       <section class="card">
         <h2>Scan</h2>
         <div class="audit-scan-grid">
           <label class="audit-field">
-            <span>Current location</span>
-            <input type="text" id="location-input" placeholder="Scan location barcode" autocomplete="off" autocapitalize="characters" />
+            <span>Current {{ loc_term }}</span>
+            <input type="text" id="location-input" placeholder="Scan {{ loc_term }} barcode" autocomplete="off" autocapitalize="characters" />
           </label>
           <label class="audit-field">
-            <span>Serial number</span>
-            <input type="text" id="serial-input" placeholder="Scan firearm serial" autocomplete="off" autocapitalize="characters" disabled />
+            <span>Scans</span>
+            <textarea id="scan-batch" rows="6" placeholder="Scan the {{ loc_term }} barcode, then every serial — they collect here one per line." autocomplete="off" autocapitalize="characters" spellcheck="false"></textarea>
           </label>
         </div>
-        <p class="helper-text" id="scan-hint">Scan the location barcode to begin.</p>
+        <p class="helper-text" id="scan-hint">
+          Just keep scanning &mdash; {{ loc_term }} barcode first, then each serial. Scanner Tab/Enter is captured
+          automatically. Scanning another {{ loc_term }} barcode mid-batch switches the {{ loc_term }}. Press
+          <strong>Verify</strong> when the shelf is done.
+        </p>
         <div id="scan-result" class="audit-scan-result" hidden></div>
         <div class="actions">
-          <button type="button" class="button tertiary" id="change-location">Change location</button>
+          <button type="button" class="button" id="verify-batch" disabled>Verify scans</button>
+          <button type="button" class="button tertiary" id="change-location">Change {{ loc_term }}</button>
           <button type="button" class="button secondary" id="complete-audit">Complete audit</button>
           <a class="button tertiary" href="{{ url_for('audit_session_export', session_id=session.id) }}">Export</a>
         </div>
@@ -88,7 +100,7 @@
             <tbody>
               {% for item in items %}
               <tr data-serial="{{ item.serial|upper }}">
-                <td>{{ item.serial }}</td>
+                <td class="mono">{{ item.serial }}{% if not item.in_scope %} <span class="pill idle">elsewhere</span>{% endif %}</td>
                 <td>{{ item.part_id or '' }}</td>
                 <td>{{ item.part_description or '' }}</td>
                 <td>{{ item.scope or '' }}</td>
@@ -135,6 +147,7 @@
         scanUrl: {{ url_for('api_audit_scan', session_id=session.id)|tojson }},
         completeUrl: {{ url_for('api_audit_complete', session_id=session.id)|tojson }},
         completed: {{ (session.status == 'completed')|tojson }},
+        locTerm: {{ loc_term|tojson }},
         operator: null,
       };
       try { AUDIT.operator = localStorage.getItem("audit_operator_name") || null; } catch (e) {}
@@ -171,30 +184,79 @@
       });
 
       if (!AUDIT.completed) {
+        // Tokens in the scan stream that match one of these are treated as a
+        // location switch, everything else is a serial. Union of every active
+        // auditable bin (so scanning an empty bin's barcode still switches the
+        // location instead of being recorded as a serial) and this session's
+        // snapshot locations (covers tied-WO sales-order barcodes).
+        const KNOWN_LOCATIONS = new Set(
+          {{ known_location_ids|tojson }}
+            .concat({{ items|map(attribute='expected_location')|select|unique|list|tojson }})
+            .map(function (v) { return String(v).toUpperCase(); })
+        );
+
         const locationInput = document.getElementById("location-input");
-        const serialInput = document.getElementById("serial-input");
+        const batchInput = document.getElementById("scan-batch");
+        const verifyButton = document.getElementById("verify-batch");
         const scanHint = document.getElementById("scan-hint");
         const scanResult = document.getElementById("scan-result");
         const scanLog = document.getElementById("scan-log");
         let currentLocation = "";
+        let verifying = false;
 
         function setLocation(value) {
-          currentLocation = value.trim();
+          currentLocation = value.trim().toUpperCase();
           if (!currentLocation) return;
-          locationInput.value = currentLocation.toUpperCase();
-          serialInput.disabled = false;
-          scanHint.textContent = "Location set to " + currentLocation.toUpperCase() + ". Now scan serials.";
-          serialInput.focus();
+          locationInput.value = currentLocation;
+          scanHint.textContent = AUDIT.locTerm.charAt(0).toUpperCase() + AUDIT.locTerm.slice(1)
+            + " set to " + currentLocation + ". Scan serials, then press Verify.";
+          batchInput.focus();
+          updateVerifyButton();
         }
 
+        // Parse the scan stream: known-location tokens switch the location in
+        // effect for the serials that follow them.
+        function parseBatch() {
+          const tokens = batchInput.value.split(/\s+/).filter(Boolean);
+          let loc = currentLocation;
+          const queue = [];
+          tokens.forEach(function (token) {
+            const up = token.toUpperCase();
+            if (KNOWN_LOCATIONS.has(up)) { loc = up; }
+            else { queue.push({ serial: up, location: loc }); }
+          });
+          return { queue: queue, lastLocation: loc };
+        }
+
+        function updateVerifyButton() {
+          const count = parseBatch().queue.length;
+          verifyButton.textContent = count ? "Verify " + count + " scan" + (count === 1 ? "" : "s") : "Verify scans";
+          verifyButton.disabled = verifying || count === 0;
+        }
+
+        // Scanners terminate reads with Tab (or Enter): capture both inside
+        // the batch box and turn them into line breaks instead of losing focus.
+        batchInput.addEventListener("keydown", function (e) {
+          if (e.key === "Tab" || e.key === "Enter") {
+            e.preventDefault();
+            const start = batchInput.selectionStart;
+            const end = batchInput.selectionEnd;
+            batchInput.value = batchInput.value.slice(0, start) + "\n" + batchInput.value.slice(end);
+            batchInput.selectionStart = batchInput.selectionEnd = start + 1;
+            updateVerifyButton();
+          }
+        });
+        batchInput.addEventListener("input", updateVerifyButton);
+
         locationInput.addEventListener("keydown", function (e) {
-          if (e.key === "Enter") { e.preventDefault(); setLocation(locationInput.value); }
+          if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); setLocation(locationInput.value); }
         });
         document.getElementById("change-location").addEventListener("click", function () {
-          serialInput.disabled = true;
+          currentLocation = "";
           locationInput.value = "";
           locationInput.focus();
-          scanHint.textContent = "Scan the location barcode to continue.";
+          scanHint.textContent = "Scan the " + AUDIT.locTerm + " barcode to continue.";
+          updateVerifyButton();
         });
 
         function showResult(kind, message) {
@@ -236,58 +298,102 @@
           body.prepend(tr);
         }
 
-        let scanning = false;
-        async function submitScan(serial) {
-          if (scanning) return;
-          scanning = true;
-          try {
-            const resp = await fetch(AUDIT.scanUrl, {
-              method: "POST",
-              headers: { "Content-Type": "application/json", "X-CSRF-Token": AUDIT.csrfToken },
-              body: JSON.stringify({ serial: serial, location: currentLocation, operator: AUDIT.operator }),
-            });
-            const data = await resp.json();
-            if (!resp.ok) {
-              showResult("unexpected", "Error: " + (data.message || resp.status));
-              beep("unexpected");
-              return;
-            }
-            const dup = data.is_duplicate ? " (already scanned)" : "";
-            if (data.result === "verified") {
-              showResult("verified", "✔ VERIFIED " + serial + dup);
-              beep("verified");
-            } else if (data.result === "misplaced") {
-              const expLoc = data.item && data.item.expected_location ? data.item.expected_location : "another location";
-              showResult("misplaced", "⚠ MISPLACED " + serial + " — belongs in " + expLoc + dup);
-              beep("misplaced");
-            } else {
-              showResult("unexpected", "✖ UNEXPECTED " + serial + " — not in this audit, review" + dup);
-              beep("unexpected");
-              addUnexpectedRow(serial, currentLocation);
-            }
-            if (data.item && data.result !== "unexpected") {
-              updateRow(serial, data.result, currentLocation);
-            }
-            applyCounts(data.counts);
-          } catch (err) {
-            showResult("unexpected", "Network error scanning " + serial);
-            beep("unexpected");
-          } finally {
-            scanning = false;
+        async function submitScan(scan) {
+          const resp = await fetch(AUDIT.scanUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-CSRF-Token": AUDIT.csrfToken },
+            body: JSON.stringify({ serial: scan.serial, location: scan.location, operator: AUDIT.operator }),
+          });
+          const data = await resp.json();
+          if (!resp.ok) {
+            showResult("unexpected", "Error: " + (data.message || resp.status));
+            return "error";
           }
+          const dup = data.is_duplicate ? " (already scanned)" : "";
+          if (data.result === "verified") {
+            showResult("verified", "✔ VERIFIED " + scan.serial + " @ " + scan.location + dup);
+          } else if (data.result === "misplaced") {
+            const expLoc = data.item && data.item.expected_location ? data.item.expected_location : "another location";
+            showResult("misplaced", "⚠ MISPLACED " + scan.serial + " — belongs in " + expLoc + dup);
+          } else {
+            showResult("unexpected", "✖ UNEXPECTED " + scan.serial + " — not in this audit, review" + dup);
+            addUnexpectedRow(scan.serial, scan.location);
+          }
+          if (data.item && data.result !== "unexpected") {
+            updateRow(scan.serial, data.result, scan.location);
+          }
+          applyCounts(data.counts);
+          return data.result;
         }
 
-        serialInput.addEventListener("keydown", function (e) {
-          if (e.key !== "Enter") return;
-          e.preventDefault();
-          const serial = serialInput.value.trim();
-          serialInput.value = "";
-          if (!serial) return;
-          if (!currentLocation) { scanHint.textContent = "Scan a location first."; locationInput.focus(); return; }
-          submitScan(serial);
-        });
+        async function verifyBatch() {
+          if (verifying) return;
+          const submittedText = batchInput.value;
+          const parsed = parseBatch();
+          if (!parsed.queue.length) return;
+          const missing = parsed.queue.filter(function (q) { return !q.location; });
+          if (missing.length) {
+            showResult("unexpected", "Scan the " + AUDIT.locTerm + " barcode first — no " + AUDIT.locTerm
+              + " set for " + missing.map(function (m) { return m.serial; }).join(", "));
+            beep("unexpected");
+            locationInput.focus();
+            return;
+          }
+          verifying = true;
+          updateVerifyButton();
+          const tally = { verified: 0, misplaced: 0, unexpected: 0, error: 0 };
+          let aborted = false;
+          for (const scan of parsed.queue) {
+            try {
+              const result = await submitScan(scan);
+              tally[result] = (tally[result] || 0) + 1;
+              if (result === "error") { aborted = true; break; }
+            } catch (err) {
+              showResult("unexpected", "Network error scanning " + scan.serial + " — batch stopped, nothing lost. Press Verify to retry.");
+              tally.error += 1;
+              aborted = true;
+              break;
+            }
+          }
+          verifying = false;
+          if (!aborted) {
+            // The scanner may have kept typing into the box while the batch
+            // was in flight — remove only what this batch submitted. If the
+            // operator edited mid-flight the prefix no longer matches; leave
+            // the box alone (re-verifying just marks duplicates, loses nothing).
+            if (batchInput.value.startsWith(submittedText)) {
+              batchInput.value = batchInput.value.slice(submittedText.length).replace(/^\s+/, "");
+            }
+            currentLocation = parsed.lastLocation;
+            locationInput.value = currentLocation;
+            const problems = tally.misplaced + tally.unexpected;
+            const summary = "Batch done: " + tally.verified + " verified"
+              + (tally.misplaced ? ", " + tally.misplaced + " misplaced" : "")
+              + (tally.unexpected ? ", " + tally.unexpected + " unexpected" : "") + ".";
+            showResult(problems ? (tally.unexpected ? "unexpected" : "misplaced") : "verified", summary);
+            beep(problems ? (tally.unexpected ? "unexpected" : "misplaced") : "verified");
+          } else {
+            beep("unexpected");
+          }
+          updateVerifyButton();
+          batchInput.focus();
+        }
+
+        verifyButton.addEventListener("click", verifyBatch);
 
         document.getElementById("complete-audit").addEventListener("click", async function () {
+          // Completion is permanent (pending serials become missing), so never
+          // let scans that were collected but not yet verified fall through.
+          if (batchInput.value.trim()) {
+            showResult("unexpected", "There are unverified scans in the box — press Verify (or clear the box) before completing the audit.");
+            beep("unexpected");
+            verifyButton.focus();
+            return;
+          }
+          if (verifying) {
+            showResult("unexpected", "A batch is still verifying — wait for it to finish before completing the audit.");
+            return;
+          }
           if (!confirm("Complete this audit? Unscanned serials will be marked missing.")) return;
           try {
             const resp = await fetch(AUDIT.completeUrl, {
@@ -301,7 +407,7 @@
           } catch (err) { alert("Network error completing the audit."); }
         });
 
-        locationInput.focus();
+        batchInput.focus();
       }
     </script>
   </body>

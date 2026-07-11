@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "picklist-dev",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["scripts/run_dev_windows.py"],
+      "port": 5000
+    }
+  ]
+}

@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Serial number history</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <main class="page-shell">
+      {% set active_nav = 'serial' %}
+      {% include '_topnav.html' %}
+      <section class="hero card">
+        <div class="hero-top">
+          <div>
+            <p class="eyebrow">Serial Lookup</p>
+            <h1>Serial number history</h1>
+          </div>
+        </div>
+        <p class="hero-copy">
+          Scan or type a firearm serial number to see its full story &mdash; what it was
+          built as, where it has been, and who shipped it to which customer.
+        </p>
+        <form id="serial-form" class="serial-search">
+          <label class="audit-field serial-search-field">
+            <span>Serial number</span>
+            <input type="text" id="serial-input" placeholder="Scan or type a serial number"
+                   autocomplete="off" autocapitalize="characters" maxlength="50" autofocus />
+          </label>
+          <button type="submit" class="button" id="search-button">Search</button>
+        </form>
+        <p class="helper-text" id="search-hint" hidden></p>
+      </section>
+
+      <div id="flags" class="alerts" hidden></div>
+      <div id="results"></div>
+    </main>
+
+    <script>
+      (function () {
+        const API_URL = {{ url_for('api_serial_history')|tojson }};
+        const PREFILL = {{ prefill_serial|tojson }};
+
+        const form = document.getElementById("serial-form");
+        const input = document.getElementById("serial-input");
+        const button = document.getElementById("search-button");
+        const hint = document.getElementById("search-hint");
+        const flagsEl = document.getElementById("flags");
+        const resultsEl = document.getElementById("results");
+
+        const FLAG_CLASS = { error: "error", warning: "warning", info: "info" };
+        const STATUS_LABEL = {
+          shipped: "Shipped",
+          in_stock: "In stock",
+          in_wip: "In production",
+          unknown: "Unknown",
+        };
+        const STATUS_PILL = {
+          shipped: "idle",
+          in_stock: "success",
+          in_wip: "running",
+          unknown: "failed",
+        };
+
+        function el(tag, className, text) {
+          const node = document.createElement(tag);
+          if (className) node.className = className;
+          if (text !== undefined && text !== null && text !== "") node.textContent = text;
+          return node;
+        }
+
+        function setHint(message) {
+          hint.hidden = !message;
+          hint.textContent = message || "";
+        }
+
+        function renderFlags(container, flags) {
+          container.textContent = "";
+          (flags || []).forEach(function (f) {
+            const banner = el("div", "flag-banner " + (FLAG_CLASS[f.severity] || "info"));
+            banner.appendChild(el("strong", null, (f.severity || "info").toUpperCase()));
+            banner.appendChild(el("span", null, f.message));
+            container.appendChild(banner);
+          });
+          container.hidden = !flags || !flags.length;
+        }
+
+        function table(headers, rows) {
+          const wrap = el("div", "table-wrap");
+          const tbl = document.createElement("table");
+          const thead = document.createElement("thead");
+          const headRow = document.createElement("tr");
+          headers.forEach(function (h) { headRow.appendChild(el("th", null, h)); });
+          thead.appendChild(headRow);
+          tbl.appendChild(thead);
+          const tbody = document.createElement("tbody");
+          rows.forEach(function (cells) {
+            const tr = document.createElement("tr");
+            cells.forEach(function (c) {
+              const td = document.createElement("td");
+              if (c instanceof Node) td.appendChild(c);
+              else td.textContent = c === null || c === undefined ? "" : c;
+              tr.appendChild(td);
+            });
+            tbody.appendChild(tr);
+          });
+          tbl.appendChild(tbody);
+          wrap.appendChild(tbl);
+          return wrap;
+        }
+
+        function detailSection(title, node, open) {
+          const details = el("details", "detail-section");
+          if (open) details.open = true;
+          details.appendChild(el("summary", null, title));
+          details.appendChild(node);
+          return details;
+        }
+
+        function renderMatch(match) {
+          const card = el("section", "card");
+
+          const head = el("div", "serial-result-head");
+          const title = el("div");
+          title.appendChild(el("p", "eyebrow", match.serial_no || ""));
+          title.appendChild(el("h2", null,
+            (match.part_id || "Unknown part") +
+            (match.part_description ? " — " + match.part_description : "")));
+          head.appendChild(title);
+
+          const pills = el("div", "serial-result-pills");
+          pills.appendChild(el("span", "pill " + (STATUS_PILL[match.status] || "idle"),
+            STATUS_LABEL[match.status] || match.status));
+          (match.current_locations || []).forEach(function (l) {
+            pills.appendChild(el("span", "pill idle mono", l.warehouse_id + " / " + l.location_id));
+          });
+          head.appendChild(pills);
+          card.appendChild(head);
+
+          if (match.flags && match.flags.length) {
+            const matchFlags = el("div", "alerts");
+            renderFlags(matchFlags, match.flags);
+            card.appendChild(matchFlags);
+          }
+
+          card.appendChild(el("p", "serial-summary", match.summary || ""));
+
+          if (match.parts_lineage && match.parts_lineage.length > 1) {
+            card.appendChild(el("h3", null, "Part lineage"));
+            const STAGE_LABEL = { cleared: "Cleared", on_hand: "On hand", shipped: "Shipped" };
+            const STAGE_PILL = { cleared: "idle", on_hand: "success", shipped: "running" };
+            const last = match.parts_lineage.length - 1;
+            card.appendChild(table(
+              ["Stage", "Part", "Description", "On hand now"],
+              match.parts_lineage.map(function (p, i) {
+                const statusCell = el("div", "serial-event-cell");
+                const pill = el("span", "pill " + (STAGE_PILL[p.stage_status] || "idle"),
+                  (STAGE_LABEL[p.stage_status] || p.stage_status) +
+                  (p.stage_status === "on_hand" ? " · " + (p.net_qty || 0) : ""));
+                statusCell.appendChild(pill);
+                if (p.stage_status === "on_hand" && p.on_hand.length) {
+                  statusCell.appendChild(el("span", "helper-text",
+                    p.on_hand.map(function (l) {
+                      return l.warehouse_id + " / " + l.location_id + " (" + l.qty + ")";
+                    }).join(", ") + (i < last ? " — should have been cleared by the next build" : "")));
+                } else if (p.stage_status === "cleared") {
+                  statusCell.appendChild(el("span", "helper-text",
+                    i < last ? "0 on hand — consumed into the next stage" : "0 on hand"));
+                }
+                return [String(i + 1), p.part_id, p.part_description, statusCell];
+              })
+            ));
+          }
+
+          card.appendChild(el("h3", null, "Timeline"));
+          card.appendChild(table(
+            ["Date", "Event", "Part", "Location", "User", "Reference"],
+            (match.timeline || []).map(function (e) {
+              const eventCell = el("div", "serial-event-cell");
+              eventCell.appendChild(el("span", "pill event-pill event-" + (e.event_type || "other"), e.label));
+              if (e.detail) eventCell.appendChild(el("span", "helper-text", e.detail));
+              return [e.date_display, eventCell, el("span", "mono", e.part_id || ""), e.location, e.user, e.reference];
+            })
+          ));
+
+          const d = match.details || {};
+          if ((d.work_orders || []).length) {
+            card.appendChild(detailSection("Build / work order history",
+              table(["Work order", "WO part", "Status", "Role", "Users", "Created", "Closed"],
+                d.work_orders.map(function (w) {
+                  return [w.wo_id, w.wo_part_id, w.status, w.roles, w.users, w.create_date, w.close_date];
+                }))));
+          }
+          if ((d.movements || []).length) {
+            card.appendChild(detailSection("Inventory movements",
+              table(["Date", "Movement", "User"],
+                d.movements.map(function (m) { return [m.date_display, m.move, m.user]; }))));
+          }
+          if ((d.shipments || []).length) {
+            card.appendChild(detailSection("Shipping history",
+              table(["Packlist", "Shipped", "Status", "Sales order", "Customer", "Tracking", "Waybill", "Invoice"],
+                d.shipments.map(function (s) {
+                  const trackingCell = (s.tracking_numbers || []).length
+                    ? el("span", "mono", s.tracking_numbers.join(", "))
+                    : "";
+                  return [s.packlist_id, s.shipped_date_display,
+                          s.voided ? "VOIDED" : (s.status || ""),
+                          s.cust_order_id, s.customer_name || s.customer_id,
+                          trackingCell, s.waybill, s.invoice_id];
+                }))));
+          }
+          if ((d.orders || []).length) {
+            card.appendChild(detailSection("Customer / order history",
+              table(["Sales order", "Customer", "Customer PO", "Order date"],
+                d.orders.map(function (o) {
+                  return [o.cust_order_id, o.customer_name || o.customer_id, o.customer_po, o.order_date];
+                }))));
+          }
+          if ((d.raw_transactions || []).length) {
+            card.appendChild(detailSection("Raw transactions (troubleshooting)",
+              table(["Txn", "Date", "Part", "Type", "Class", "Qty", "Warehouse", "Location", "User", "WO", "PO", "SO", "Transfer"],
+                d.raw_transactions.map(function (r) {
+                  return [r.transaction_id, r.date, r.part_id, r.type, r.class, r.qty,
+                          r.warehouse_id, r.location_id, r.user_id, r.workorder,
+                          r.purc_order, r.cust_order, r.transfer_trans_id];
+                }))));
+          }
+          return card;
+        }
+
+        async function search(serial) {
+          serial = (serial || "").trim().toUpperCase();
+          if (!serial) { input.focus(); return; }
+          button.disabled = true;
+          setHint("Looking up " + serial + "…");
+          flagsEl.hidden = true;
+          resultsEl.textContent = "";
+          try {
+            const resp = await fetch(API_URL + "?serial=" + encodeURIComponent(serial));
+            let data = null;
+            try { data = await resp.json(); } catch (e) {}
+            if (!resp.ok) {
+              renderFlags(flagsEl, [{
+                severity: "error",
+                message: (data && data.message) || ("Lookup failed (HTTP " + resp.status + ")."),
+              }]);
+              setHint("");
+              return;
+            }
+            try {
+              history.replaceState(null, "", "?serial=" + encodeURIComponent(serial));
+            } catch (e) {}
+            renderFlags(flagsEl, data.flags);
+            (data.matches || []).forEach(function (m) {
+              resultsEl.appendChild(renderMatch(m));
+            });
+            if ((data.matches || []).length) {
+              setHint("");
+            } else if (!(data.flags || []).length) {
+              setHint("No results.");
+            } else {
+              setHint("");
+            }
+          } catch (err) {
+            renderFlags(flagsEl, [{ severity: "error", message: "Network error — could not reach the server." }]);
+            setHint("");
+          } finally {
+            button.disabled = false;
+            input.select();
+          }
+        }
+
+        form.addEventListener("submit", function (e) {
+          e.preventDefault();
+          search(input.value);
+        });
+
+        // Barcode scanners often terminate with Tab instead of Enter.
+        input.addEventListener("keydown", function (e) {
+          if (e.key === "Tab" && input.value.trim()) {
+            e.preventDefault();
+            search(input.value);
+          }
+        });
+
+        if (PREFILL) {
+          input.value = PREFILL;
+          search(PREFILL);
+        }
+      })();
+    </script>
+  </body>
+</html>

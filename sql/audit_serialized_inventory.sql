@@ -14,7 +14,8 @@
               Audited bins:
                 MAIN / C2               (Cage 2 - shipping cage)
                 MAIN / C2-SERIALIZED    (serialized cage)
-                SHIPPING / R01..R09     (serialized racks; excl. Stage/Intl)
+                SHIPPING / *            (every location in the SHIPPING
+                                         warehouse: racks, stage, international)
 
     Source B  Serials tied to an OPEN (not-yet-shipped) customer order through a
               COMPLETED work order — built and in the cage but possibly not yet
@@ -25,18 +26,21 @@
               cancelled WOs. Serials already resident in an audited bin (Source A)
               are NOT duplicated — they stay in their Source-A row and are flagged
               TIED_WO = 1. Tied serials with no audited-bin residence appear under
-              SCOPE = 'TIED-WO' with their inferred current location (or NULL).
+              SCOPE = 'TIED-WO' with EXPECTED_LOCATION = the SALES ORDER ID
+              (e.g. 'SO-130311'): tied units are staged on the shelf by sales
+              order, so the operator scans the SO barcode as the location and
+              each serial validates against the order it is allocated to.
 
   Output columns (one row per serial):
     SERIAL_NO, PART_ID, PART_DESCRIPTION, PRODUCT_CODE,
     EXPECTED_WAREHOUSE, EXPECTED_LOCATION, SCOPE, TIED_WO,
     CUST_ORDER_ID, CUSTOMER_ID
 
-  SCOPE is one of: 'C2', 'C2-SERIALIZED', 'SHIPPING-RACKS', 'TIED-WO'.
+  SCOPE is one of: 'C2', 'C2-SERIALIZED', 'SHIPPING', 'TIED-WO'.
 
-  __AUDIT_SCOPE_FILTER__ is string-substituted by app.py (render_audit_query):
-    - empty string            => all scopes (full audit)
-    - "AND c.SCOPE = '<scope>'" => single scope
+  The full universe is always returned; the app snapshots it per audit session
+  and flags which rows are in scope for the session's target location(s), so a
+  single-shelf audit can still recognise a misplaced gun's true home.
 
   SQL Server / Infor VISUAL (VECA). Read-only.
 ===============================================================================
@@ -68,14 +72,11 @@ OnHand AS (
         CASE
             WHEN tl.WAREHOUSE_ID = 'MAIN' AND tl.LOCATION_ID = 'C2'            THEN 'C2'
             WHEN tl.WAREHOUSE_ID = 'MAIN' AND tl.LOCATION_ID = 'C2-SERIALIZED' THEN 'C2-SERIALIZED'
-            ELSE 'SHIPPING-RACKS'
+            ELSE 'SHIPPING'
         END AS SCOPE
     FROM TraceLoc tl
     WHERE (tl.WAREHOUSE_ID = 'MAIN' AND tl.LOCATION_ID IN ('C2', 'C2-SERIALIZED'))
-       OR (tl.WAREHOUSE_ID = 'SHIPPING'
-           AND LEFT(tl.LOCATION_ID, 3) BETWEEN 'R01' AND 'R09'
-           AND UPPER(COALESCE(tl.LOCATION_ID, '')) NOT LIKE '%STAGE%'
-           AND UPPER(COALESCE(tl.LOCATION_ID, '')) NOT LIKE '%INTERNATIONAL%')
+       OR tl.WAREHOUSE_ID = 'SHIPPING'
 ),
 
 Tied AS (
@@ -159,23 +160,19 @@ Combined AS (
 
     UNION ALL
 
-    -- Source B rows: tied serials not resident in any audited bin.
+    -- Source B rows: tied serials not resident in any audited bin. These are
+    -- staged by sales order, so the SO id IS the expected "location" the
+    -- operator scans (no warehouse bin applies).
     SELECT
         td.SERIAL_NO,
         td.PART_ID,
-        loc.WAREHOUSE_ID AS EXPECTED_WAREHOUSE,
-        loc.LOCATION_ID  AS EXPECTED_LOCATION,
-        'TIED-WO'        AS SCOPE,
-        1                AS TIED_WO,
+        CAST(NULL AS nvarchar(15)) AS EXPECTED_WAREHOUSE,
+        td.CUST_ORDER_ID           AS EXPECTED_LOCATION,
+        'TIED-WO'                  AS SCOPE,
+        1                          AS TIED_WO,
         td.CUST_ORDER_ID,
         td.CUSTOMER_ID
     FROM TiedDedup td
-    OUTER APPLY (
-        SELECT TOP 1 tl.WAREHOUSE_ID, tl.LOCATION_ID
-        FROM TraceLoc tl
-        WHERE tl.TRACE_ID = td.SERIAL_NO
-        ORDER BY tl.NET_QTY DESC
-    ) loc
     WHERE td.RN = 1
       AND NOT EXISTS (SELECT 1 FROM OnHand oh WHERE oh.SERIAL_NO = td.SERIAL_NO)
 )
@@ -194,8 +191,6 @@ SELECT
 FROM Combined c
 LEFT JOIN dbo.PART p
     ON p.ID = c.PART_ID
-WHERE 1 = 1
-    __AUDIT_SCOPE_FILTER__
 ORDER BY
     c.SCOPE,
     c.EXPECTED_LOCATION,

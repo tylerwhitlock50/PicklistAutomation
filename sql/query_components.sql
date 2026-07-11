@@ -45,8 +45,9 @@ DemandBase AS (
         col.PART_ID,
         CAST((col.ORDER_QTY - col.TOTAL_SHIPPED_QTY) AS int) AS OPEN_QTY,
         CAST(co.DESIRED_SHIP_DATE AS date) AS DESIRED_SHIP_DATE,
-        CAST(co.PROMISE_SHIP_DATE AS date) AS PROMISE_SHIP_DATE,
-        CAST(co.PROMISE_DEL_DATE  AS date) AS PROMISE_DEL_DATE
+        -- Visual stores the promise ship date as PROMISE_DATE; line-level value overrides the header
+        CAST(COALESCE(col.PROMISE_DATE, co.PROMISE_DATE) AS date) AS PROMISE_SHIP_DATE,
+        CAST(COALESCE(col.PROMISE_DEL_DATE, co.PROMISE_DEL_DATE) AS date) AS PROMISE_DEL_DATE
     FROM dbo.CUST_ORDER_LINE col
     JOIN dbo.CUSTOMER_ORDER co
         ON col.CUST_ORDER_ID = co.ID

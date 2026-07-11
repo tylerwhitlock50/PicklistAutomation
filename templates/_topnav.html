@@ -1,0 +1,100 @@
+<header class="topnav">
+  <a class="topnav-brand" href="{{ url_for('index') }}">
+    <span class="topnav-logo" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
+    <span class="topnav-brand-text">
+      <span class="topnav-brand-title">Warehouse Ops</span>
+      <span class="topnav-brand-sub">Picklists &amp; Inventory Audit</span>
+    </span>
+  </a>
+
+  <nav class="topnav-tabs" aria-label="Primary">
+    <a class="topnav-tab {% if active_nav == 'dashboard' %}is-active{% endif %}" href="{{ url_for('index') }}">Dashboard</a>
+    <a class="topnav-tab {% if active_nav == 'audit' %}is-active{% endif %}" href="{{ url_for('audit_dashboard') }}" data-loading-message="Loading audit dashboard&hellip;">Audit</a>
+    <a class="topnav-tab {% if active_nav == 'scan' %}is-active{% endif %}" href="{{ url_for('audit_dashboard') }}" data-loading-message="Loading audit dashboard&hellip;">Scan</a>
+    <a class="topnav-tab {% if active_nav == 'serial' %}is-active{% endif %}" href="{{ url_for('serial_history_page') }}">Serial Lookup</a>
+  </nav>
+
+  <div class="topnav-user">
+    <div class="topnav-user-meta">
+      <span class="topnav-user-name" data-operator-name>Operator</span>
+      <span class="topnav-user-role">Shipping</span>
+    </div>
+    <div class="topnav-avatar" data-operator-initial>O</div>
+  </div>
+</header>
+
+<div class="nav-loading-overlay" data-nav-loading hidden role="status" aria-live="polite">
+  <span class="nav-loading-spinner" aria-hidden="true"></span>
+  <span class="nav-loading-text" data-nav-loading-text>Loading&hellip;</span>
+</div>
+
+<script>
+  // Full-page loading overlay for navigations and form posts. Slow pages (the
+  // audit dashboard in particular) otherwise look frozen, and impatient users
+  // re-click and re-fire the query. The overlay swallows those extra clicks.
+  (function () {
+    var overlay = document.querySelector("[data-nav-loading]");
+    if (!overlay) return;
+    var textEl = overlay.querySelector("[data-nav-loading-text]");
+    var defaultText = textEl ? textEl.textContent : "";
+    var showTimer = null;
+
+    function show(message) {
+      if (textEl) textEl.textContent = message || defaultText;
+      // Small delay so fast navigations don't flash the overlay.
+      if (showTimer) clearTimeout(showTimer);
+      showTimer = setTimeout(function () {
+        overlay.hidden = false;
+      }, 150);
+    }
+
+    function hide() {
+      if (showTimer) clearTimeout(showTimer);
+      showTimer = null;
+      overlay.hidden = true;
+    }
+
+    document.addEventListener("click", function (event) {
+      if (event.defaultPrevented || event.button !== 0) return;
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      var link = event.target.closest ? event.target.closest("a[href]") : null;
+      if (!link) return;
+      if (link.target && link.target !== "_self") return;
+      if (link.hasAttribute("download") || link.hasAttribute("data-no-loading")) return;
+      var href = link.getAttribute("href");
+      if (!href || href.charAt(0) === "#") return;
+      if (/^(javascript|mailto|tel):/i.test(href)) return;
+      if (link.origin && link.origin !== window.location.origin) return;
+      show(link.getAttribute("data-loading-message"));
+    });
+
+    document.addEventListener("submit", function (event) {
+      if (event.defaultPrevented) return;
+      var form = event.target;
+      if (form.target && form.target !== "_self") return;
+      if (form.hasAttribute("data-no-loading")) return;
+      show(form.getAttribute("data-loading-message"));
+    });
+
+    // Restore the page if the user comes back via bfcache or cancels the
+    // navigation (Esc), so the overlay never gets stuck.
+    window.addEventListener("pageshow", hide);
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape") hide();
+    });
+  })();
+</script>
+
+<script>
+  // Hydrate the operator name/initial from the value saved on the audit pages.
+  (function () {
+    try {
+      var name = (localStorage.getItem("audit_operator_name") || "").trim();
+      if (!name) return;
+      var nameEl = document.querySelector("[data-operator-name]");
+      var initialEl = document.querySelector("[data-operator-initial]");
+      if (nameEl) nameEl.textContent = name;
+      if (initialEl) initialEl.textContent = name.charAt(0).toUpperCase();
+    } catch (e) {}
+  })();
+</script>

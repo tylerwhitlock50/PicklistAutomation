@@ -8,18 +8,23 @@
   </head>
   <body>
     <main class="page-shell">
+      {% set active_nav = 'audit' %}
+      {% include '_topnav.html' %}
       <section class="hero card">
         <div class="hero-top">
           <div>
             <p class="eyebrow">Shipping</p>
             <h1>Serialized Inventory Audit</h1>
           </div>
-          <a class="button tertiary" href="{{ url_for('index') }}">&larr; Dashboard</a>
+          <div class="actions">
+            <a class="button secondary" href="{{ url_for('audit_analytics_page') }}">Analytics</a>
+            <a class="button tertiary" href="{{ url_for('index') }}">&larr; Dashboard</a>
+          </div>
         </div>
         <p class="hero-copy">
-          Pick a location, then scan the location barcode and each firearm serial. The app confirms
-          every serial is where the system expects it &mdash; flagging misplaced, missing, and
-          unexpected guns &mdash; so the weekly manual count becomes a quick daily scan.
+          Pick a shelf or bin, then scan the location barcode and each firearm serial. The app
+          confirms every serial is where the system expects it &mdash; flagging misplaced, missing,
+          and unexpected guns &mdash; so the weekly manual count becomes a quick daily scan.
         </p>
         <label class="audit-operator">
           <span>Operator (optional)</span>
@@ -47,27 +52,46 @@
       </section>
       {% else %}
 
-      {% if due_scopes %}
+      {% if sync_error %}
+      <section class="alerts">
+        <p class="flash error">{{ sync_error }} Showing the last synced location list.</p>
+      </section>
+      {% endif %}
+
+      {% if due_locations %}
       <section class="card audit-due-banner">
         <h2>Due for audit</h2>
         <p class="helper-text">These locations have not been audited within their cadence:</p>
         <div class="audit-chip-row">
-          {% for scope in due_scopes %}
-          <span class="pill running">{{ scope.label }}{% if scope.days_since is not none %} &middot; {{ scope.days_since }}d ago{% else %} &middot; never{% endif %}</span>
+          {% for loc in due_locations %}
+          <span class="pill running">{{ loc.label }}{% if loc.days_since is not none %} &middot; {{ loc.days_since }}d ago{% else %} &middot; never{% endif %}</span>
           {% endfor %}
         </div>
       </section>
       {% endif %}
 
+      {% for wh in warehouses %}
       <section class="card">
-        <h2>Locations</h2>
-        <p class="helper-text">Start an audit for a single location, or run a full audit of everything.</p>
+        <div class="hero-top">
+          <div>
+            <h2>{{ wh.warehouse_id }} warehouse</h2>
+            <p class="helper-text">{{ wh.locations|length }} locations &middot; {{ wh.serial_total }} serials</p>
+          </div>
+          <form method="post" action="{{ url_for('audit_session_start') }}" class="audit-start-form" data-loading-message="Starting audit &mdash; snapshotting expected inventory&hellip;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+            <input type="hidden" name="target_kind" value="warehouse" />
+            <input type="hidden" name="warehouse" value="{{ wh.warehouse_id }}" />
+            <input type="hidden" name="operator" value="" data-operator-field />
+            <button type="submit" class="button secondary">Audit entire warehouse</button>
+          </form>
+        </div>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
                 <th>Location</th>
-                <th>Warehouse</th>
+                <th>Description</th>
+                <th>Serials</th>
                 <th>Last inventoried</th>
                 <th>Days ago</th>
                 <th>Cadence</th>
@@ -77,25 +101,28 @@
               </tr>
             </thead>
             <tbody>
-              {% for scope in scopes %}
+              {% for loc in wh.locations %}
               <tr>
-                <td>{{ scope.label }}</td>
-                <td>{{ scope.warehouse_id or '&mdash;'|safe }}</td>
-                <td>{{ scope.last_inventoried_display or 'Never' }}</td>
-                <td>{{ scope.days_since if scope.days_since is not none else '&mdash;'|safe }}</td>
-                <td>{{ scope.cadence_days }}d</td>
+                <td class="mono">{{ loc.location_id }}</td>
+                <td>{{ loc.description or '' }}</td>
+                <td>{{ loc.serial_count }}</td>
+                <td>{{ loc.last_inventoried_display or 'Never' }}</td>
+                <td>{{ loc.days_since if loc.days_since is not none else '&mdash;'|safe }}</td>
+                <td>{{ loc.cadence_days }}d</td>
                 <td>
-                  {% if scope.due %}
+                  {% if loc.due %}
                   <span class="pill failed">Due</span>
                   {% else %}
                   <span class="pill success">OK</span>
                   {% endif %}
                 </td>
-                <td>{{ '%.0f%%'|format(scope.last_accuracy) if scope.last_accuracy is not none else '&mdash;'|safe }}</td>
+                <td>{{ '%.0f%%'|format(loc.last_accuracy) if loc.last_accuracy is not none else '&mdash;'|safe }}</td>
                 <td>
-                  <form method="post" action="{{ url_for('audit_session_start') }}" class="audit-start-form">
+                  <form method="post" action="{{ url_for('audit_session_start') }}" class="audit-start-form" data-loading-message="Starting audit &mdash; snapshotting expected inventory&hellip;">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
-                    <input type="hidden" name="scope" value="{{ scope.scope }}" />
+                    <input type="hidden" name="target_kind" value="location" />
+                    <input type="hidden" name="warehouse" value="{{ loc.warehouse_id }}" />
+                    <input type="hidden" name="location" value="{{ loc.location_id }}" />
                     <input type="hidden" name="operator" value="" data-operator-field />
                     <button type="submit" class="button table-button">Start audit</button>
                   </form>
@@ -105,12 +132,45 @@
             </tbody>
           </table>
         </div>
-        <div class="actions">
-          <form method="post" action="{{ url_for('audit_session_start') }}" class="audit-start-form">
+      </section>
+      {% endfor %}
+
+      <section class="card">
+        <div class="hero-top">
+          <div>
+            <h2>Tied work orders</h2>
+            <p class="helper-text">
+              Built for an open order, not yet shipped, and not sitting in an audited bin.
+              {% if tied_row %}
+              Last audited: {{ tied_row.last_inventoried_display or 'never' }}
+              {% if tied_row.due %}<span class="pill failed">Due</span>{% else %}<span class="pill success">OK</span>{% endif %}
+              {% endif %}
+            </p>
+          </div>
+          <form method="post" action="{{ url_for('audit_session_start') }}" class="audit-start-form" data-loading-message="Starting audit &mdash; snapshotting expected inventory&hellip;">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
-            <input type="hidden" name="scope" value="all" />
+            <input type="hidden" name="target_kind" value="tied" />
             <input type="hidden" name="operator" value="" data-operator-field />
-            <button type="submit" class="button secondary">Start full audit (all locations)</button>
+            <button type="submit" class="button table-button">Start audit</button>
+          </form>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="hero-top">
+          <div>
+            <h2>Full audit</h2>
+            <p class="helper-text">
+              Every location and tied work orders in one session.
+              {% if last_synced_display %}Locations synced from ERP: {{ last_synced_display }}.{% endif %}
+              <a href="{{ url_for('audit_dashboard', sync=1) }}" data-loading-message="Refreshing locations from ERP&hellip;">Refresh now</a>
+            </p>
+          </div>
+          <form method="post" action="{{ url_for('audit_session_start') }}" class="audit-start-form" data-loading-message="Starting audit &mdash; snapshotting expected inventory&hellip;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+            <input type="hidden" name="target_kind" value="all" />
+            <input type="hidden" name="operator" value="" data-operator-field />
+            <button type="submit" class="button secondary">Start full audit</button>
           </form>
         </div>
       </section>
@@ -123,7 +183,7 @@
             <thead>
               <tr>
                 <th>#</th>
-                <th>Location</th>
+                <th>Target</th>
                 <th>Status</th>
                 <th>Started</th>
                 <th>Completed</th>
@@ -140,7 +200,7 @@
               {% for row in recent_sessions %}
               <tr>
                 <td>{{ row.id }}</td>
-                <td>{{ row.scope or 'ALL' }}</td>
+                <td>{{ row.label or row.scope or 'Full audit' }}</td>
                 <td>
                   {% if row.status == 'completed' %}
                   <span class="pill success">completed</span>

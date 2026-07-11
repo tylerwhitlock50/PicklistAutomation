@@ -10,7 +10,8 @@ import secrets
 import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from email.message import EmailMessage
 from functools import wraps
 from pathlib import Path
@@ -34,9 +35,11 @@ from flask import (
     session,
     url_for,
 )
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 import audit_store
+import audit_universe
+import serial_history
 
 try:
     from cryptography.fernet import Fernet, InvalidToken
@@ -105,7 +108,23 @@ QUERY_FILES = {
 AUDIT_QUERY_FILE = resolve_path_setting(
     os.getenv("AUDIT_QUERY_FILE", "sql/audit_serialized_inventory.sql")
 )
-AUDIT_SCOPE_FILTER_TOKEN = "__AUDIT_SCOPE_FILTER__"
+AUDIT_LOCATIONS_SYNC_FILE = resolve_path_setting(
+    os.getenv("AUDIT_LOCATIONS_SYNC_FILE", "sql/audit_locations_sync.sql")
+)
+AUDIT_DWELL_QUERY_FILE = resolve_path_setting(
+    os.getenv("AUDIT_DWELL_QUERY_FILE", "sql/audit_dwell_time.sql")
+)
+AUDIT_LOCATION_SYNC_MAX_AGE_MINUTES = 15
+SERIAL_HISTORY_TRACE_FILE = resolve_path_setting(
+    os.getenv("SERIAL_HISTORY_TRACE_FILE", "sql/serial_history_trace.sql")
+)
+SERIAL_HISTORY_TRANSACTIONS_FILE = resolve_path_setting(
+    os.getenv("SERIAL_HISTORY_TRANSACTIONS_FILE", "sql/serial_history_transactions.sql")
+)
+SERIAL_HISTORY_SHIPMENTS_FILE = resolve_path_setting(
+    os.getenv("SERIAL_HISTORY_SHIPMENTS_FILE", "sql/serial_history_shipments.sql")
+)
+SERIAL_MAX_LENGTH = 50
 GUNS_DEFAULT_LOOKAHEAD_DAYS = 10
 GUNS_MAX_LOOKAHEAD_DAYS = 365
 GUNS_BASE_EXCLUDED_CUSTOMERS = ("CA MARK",)
@@ -749,11 +768,15 @@ def load_query(query_type: str, query_options: Optional[dict[str, Any]] = None) 
     return query_template
 
 
-def fetch_picklist_from_mssql(
-    query_type: str,
-    query_options: Optional[dict[str, Any]] = None,
-) -> pd.DataFrame:
-    query = load_query(query_type, query_options=query_options)
+# One pooled engine per connection string for the process lifetime: building
+# an engine per query paid engine construction plus a fresh ODBC login on
+# every request. Keyed by connection string so a settings change takes effect
+# without a restart.
+_erp_engines: dict[str, Any] = {}
+_erp_engines_lock = threading.Lock()
+
+
+def get_erp_engine():
     mssql_conn_string = get_config_value(
         setting_key="mssql_connection_string",
         env_key="MSSQL_CONNECTION_STRING",
@@ -762,11 +785,23 @@ def fetch_picklist_from_mssql(
         raise ValueError(
             "MSSQL_CONNECTION_STRING is not set. Configure it in Settings or in your .env file."
         )
+    with _erp_engines_lock:
+        engine = _erp_engines.get(mssql_conn_string)
+        if engine is None:
+            logger.info(
+                "Connecting to SQL Server using %s",
+                mask_connection_string(mssql_conn_string),
+            )
+            engine = create_engine(mssql_conn_string, pool_pre_ping=True, pool_recycle=1800)
+            _erp_engines[mssql_conn_string] = engine
+    return engine
 
-    logger.info(
-        "Connecting to SQL Server using %s",
-        mask_connection_string(mssql_conn_string),
-    )
+
+def fetch_picklist_from_mssql(
+    query_type: str,
+    query_options: Optional[dict[str, Any]] = None,
+) -> pd.DataFrame:
+    query = load_query(query_type, query_options=query_options)
     if query_type == "guns":
         applied_options = get_default_guns_query_options()
         if query_options:
@@ -776,53 +811,99 @@ def fetch_picklist_from_mssql(
             applied_options["lookahead_days"],
             ",".join(applied_options["excluded_customers"]),
         )
-    engine = create_engine(mssql_conn_string)
+    engine = get_erp_engine()
     with engine.connect() as connection:
         df = pd.read_sql_query(query, connection)
         logger.info("Picklist query returned %d rows.", len(df.index))
         return df
 
 
-def render_audit_query(scope: Optional[str]) -> str:
-    """Load the serialized-audit SQL and substitute the scope filter token.
+def run_audit_sql_file(query_file: Path, description: str) -> pd.DataFrame:
+    """Run one of the serialized-audit SQL files (no parameters) against SQL Server.
 
-    scope=None renders the full audit (all scopes). A scope is validated against
-    the known audit scopes before being injected as a quoted literal.
+    Sent as a raw string, not sqlalchemy.text(), so literal colons in the file
+    can never be misparsed as bind parameters.
     """
-    if not AUDIT_QUERY_FILE.exists():
-        raise FileNotFoundError(f"Audit query file not found at: {AUDIT_QUERY_FILE}")
-    query_template = AUDIT_QUERY_FILE.read_text(encoding="utf-8")
-
-    if scope is None:
-        scope_filter = ""
-    else:
-        if scope not in audit_store.VALID_SCOPES:
-            raise ValueError(f"Unknown audit scope: {scope}")
-        scope_filter = f"AND c.SCOPE = {sql_quote_literal(scope)}"
-    return query_template.replace(AUDIT_SCOPE_FILTER_TOKEN, scope_filter)
-
-
-def fetch_audit_expected(scope: Optional[str]) -> pd.DataFrame:
-    """Run the serialized-audit expected-inventory query against SQL Server."""
-    query = render_audit_query(scope)
-    mssql_conn_string = get_config_value(
-        setting_key="mssql_connection_string",
-        env_key="MSSQL_CONNECTION_STRING",
-    )
-    if not mssql_conn_string:
-        raise ValueError(
-            "MSSQL_CONNECTION_STRING is not set. Configure it in Settings or in your .env file."
-        )
-    logger.info(
-        "Running serialized audit expected query (scope=%s) via %s",
-        scope or "ALL",
-        mask_connection_string(mssql_conn_string),
-    )
-    engine = create_engine(mssql_conn_string)
+    if not query_file.exists():
+        raise FileNotFoundError(f"Audit query file not found at: {query_file}")
+    query = query_file.read_text(encoding="utf-8")
+    engine = get_erp_engine()
+    logger.info("Running %s", description)
     with engine.connect() as connection:
         df = pd.read_sql_query(query, connection)
-        logger.info("Audit expected query returned %d rows.", len(df.index))
+        logger.info("%s returned %d rows.", description, len(df.index))
         return df
+
+
+def run_erp_query_file(query_file: Path, params: dict, description: str) -> pd.DataFrame:
+    """Run a parameterized read-only ERP query from a .sql file.
+
+    Unlike run_audit_sql_file, user-supplied values go in as bound parameters
+    (:name placeholders via sqlalchemy.text) — never string interpolation.
+    """
+    if not query_file.exists():
+        raise FileNotFoundError(f"ERP query file not found at: {query_file}")
+    query = query_file.read_text(encoding="utf-8")
+    engine = get_erp_engine()
+    logger.info("Running %s", description)
+    with engine.connect() as connection:
+        df = pd.read_sql_query(text(query), connection, params=params)
+        logger.info("%s returned %d rows.", description, len(df.index))
+        return df
+
+
+def fetch_audit_expected() -> pd.DataFrame:
+    """Full serialized expected-inventory universe (all locations + tied WOs)."""
+    return run_audit_sql_file(AUDIT_QUERY_FILE, "serialized audit expected query")
+
+
+# Guards against overlapping background syncs when several dashboard requests
+# cross the TTL at once.
+_audit_sync_running = threading.Lock()
+
+
+def _run_audit_location_sync() -> None:
+    df = run_audit_sql_file(AUDIT_LOCATIONS_SYNC_FILE, "audit location sync query")
+    audit_store.sync_locations(df.to_dict(orient="records"))
+
+
+def _background_audit_location_sync() -> None:
+    try:
+        _run_audit_location_sync()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Background audit location sync failed; keeping stored locations. (%s)", exc)
+    finally:
+        _audit_sync_running.release()
+
+
+def sync_audit_locations_from_erp(force: bool = False) -> Optional[str]:
+    """Refresh the auditable-location list from the ERP if stale.
+
+    The routine TTL refresh runs in a background thread so no page render
+    blocks on the ERP aggregation — the triggering request serves the stored
+    list. Two cases run synchronously and return an error message on failure:
+    force=True (the dashboard's "Refresh now" link) and a store that has never
+    synced (there is nothing stored to show yet).
+    """
+    if not audit_store.is_available():
+        return None
+    never_synced = audit_store.last_synced_at() is None
+    if force or never_synced:
+        try:
+            _run_audit_location_sync()
+            return None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Audit location sync failed; showing stored locations. (%s)", exc)
+            return f"Could not refresh locations from the ERP: {exc}"
+    if not audit_store.needs_sync(AUDIT_LOCATION_SYNC_MAX_AGE_MINUTES):
+        return None
+    if _audit_sync_running.acquire(blocking=False):
+        threading.Thread(
+            target=_background_audit_location_sync,
+            name="audit-location-sync",
+            daemon=True,
+        ).start()
+    return None
 
 
 def prune_old_runs(conn: sqlite3.Connection) -> None:
@@ -1650,9 +1731,30 @@ def send_email_notification_with_config(
         return False, f"SMTP test failed: {exc}"
 
 
+def check_audit_universe_sql() -> None:
+    """Warn when an audit SQL file has drifted from the canonical bin universe.
+
+    The filter is hardcoded in each file (they must stay runnable in SSMS);
+    this catches the add-a-cage-but-miss-a-file mistake at boot instead of as
+    silently wrong audit results.
+    """
+    for sql_file in (AUDIT_QUERY_FILE, AUDIT_LOCATIONS_SYNC_FILE, AUDIT_DWELL_QUERY_FILE):
+        try:
+            missing = audit_universe.missing_terms(sql_file.read_text(encoding="utf-8"))
+        except OSError:
+            continue  # missing file surfaces later with a clear error of its own
+        if missing:
+            logger.warning(
+                "%s is missing audited-universe terms (%s) — update it to match audit_universe.py.",
+                sql_file.name,
+                ", ".join(missing),
+            )
+
+
 initialize_db()
 migrate_sensitive_settings_encryption()
 audit_store.initialize()
+check_audit_universe_sql()
 start_scheduler()
 
 
@@ -2084,9 +2186,12 @@ def _audit_unavailable_response():
     return render_template(
         "audit.html",
         audit_available=False,
-        scopes=[],
+        warehouses=[],
+        tied_row=None,
         recent_sessions=[],
-        due_scopes=[],
+        due_locations=[],
+        sync_error=None,
+        last_synced_display=None,
     )
 
 
@@ -2102,22 +2207,37 @@ def audit_dashboard():
     if not audit_store.is_available():
         return _audit_unavailable_response()
 
-    scopes = audit_store.list_scope_status()
-    for scope in scopes:
-        scope["last_inventoried_display"] = _audit_dt_display(scope.get("last_inventoried"))
+    sync_error = sync_audit_locations_from_erp(force=request.args.get("sync") == "1")
+
+    locations = audit_store.list_location_status()
+    tied_row = None
+    by_warehouse: dict[str, list[dict]] = {}
+    for loc in locations:
+        loc["last_inventoried_display"] = _audit_dt_display(loc.get("last_inventoried"))
+        if loc["scope"] == audit_store.TIED_WO_SCOPE:
+            tied_row = loc
+        else:
+            by_warehouse.setdefault(loc["warehouse_id"], []).append(loc)
+    warehouses = [
+        {"warehouse_id": wh, "locations": locs, "serial_total": sum(l["serial_count"] for l in locs)}
+        for wh, locs in sorted(by_warehouse.items())
+    ]
 
     recent = audit_store.recent_sessions(limit=10)
     for row in recent:
         row["started_display"] = _audit_dt_display(row.get("started_at"))
         row["completed_display"] = _audit_dt_display(row.get("completed_at"))
 
-    due_scopes = [scope for scope in scopes if scope.get("due")]
+    due_locations = [loc for loc in locations if loc.get("due")]
     return render_template(
         "audit.html",
         audit_available=True,
-        scopes=scopes,
+        warehouses=warehouses,
+        tied_row=tied_row,
         recent_sessions=recent,
-        due_scopes=due_scopes,
+        due_locations=due_locations,
+        sync_error=sync_error,
+        last_synced_display=_audit_dt_display(audit_store.last_synced_at()),
     )
 
 
@@ -2129,16 +2249,28 @@ def audit_session_start():
         flash(AUDIT_UNAVAILABLE_MESSAGE, "error")
         return redirect(url_for("audit_dashboard"))
 
-    raw_scope = (request.form.get("scope") or "").strip()
-    scope = None if raw_scope in ("", "all", "ALL") else raw_scope
-    if scope is not None and scope not in audit_store.VALID_SCOPES:
-        flash(f"Unknown audit location: {raw_scope}", "error")
+    try:
+        target = audit_store.build_target(
+            kind=request.form.get("target_kind"),
+            warehouse=request.form.get("warehouse"),
+            location=request.form.get("location"),
+        )
+    except ValueError as exc:
+        flash(str(exc), "error")
+        return redirect(url_for("audit_dashboard"))
+
+    if not audit_store.target_exists(target):
+        flash(
+            f"Unknown audit location: {target['label']}. "
+            "Refresh the dashboard and try again.",
+            "error",
+        )
         return redirect(url_for("audit_dashboard"))
 
     operator = (request.form.get("operator") or "").strip() or None
 
     try:
-        df = fetch_audit_expected(scope)
+        df = fetch_audit_expected()
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to load audit expected list: %s", exc)
         flash(f"Could not load the expected serial list: {exc}", "error")
@@ -2146,28 +2278,19 @@ def audit_session_start():
 
     expected_rows = df.to_dict(orient="records") if not df.empty else []
     try:
-        session_id = audit_store.start_session(scope, expected_rows, operator)
+        session_id = audit_store.start_session(target, expected_rows, operator)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to start audit session: %s", exc)
         flash(f"Could not start the audit session: {exc}", "error")
         return redirect(url_for("audit_dashboard"))
 
     logger.info(
-        "Started audit session #%s (scope=%s, %d expected serials).",
+        "Started audit session #%s (%s, %d serials snapshotted).",
         session_id,
-        scope or "ALL",
+        target["label"],
         len(expected_rows),
     )
     return redirect(url_for("audit_session_page", session_id=session_id))
-
-
-def _audit_scope_label(scope: Optional[str]) -> str:
-    if scope is None:
-        return "All serialized locations"
-    for entry in audit_store.AUDIT_SCOPES:
-        if entry["scope"] == scope:
-            return entry["label"]
-    return scope
 
 
 @app.get("/audit/session/<int:session_id>")
@@ -2192,12 +2315,15 @@ def audit_session_page(session_id: int):
     return render_template(
         "audit_session.html",
         session=session_row,
-        session_scope_label=_audit_scope_label(session_row.get("scope")),
+        session_scope_label=session_row.get("label")
+        or session_row.get("scope")
+        or "Full audit (all locations)",
         started_display=_audit_dt_display(session_row.get("started_at")),
         completed_display=_audit_dt_display(session_row.get("completed_at")),
         items=items,
         unexpected=unexpected,
         counts=counts,
+        known_location_ids=audit_store.list_active_location_ids(),
         ui_refresh_interval_seconds=UI_REFRESH_INTERVAL_SECONDS,
     )
 
@@ -2327,6 +2453,315 @@ def audit_session_export(session_id: int):
         download_name=filename,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+
+# Accuracy every completed audit is held against on the analytics page.
+AUDIT_ACCURACY_TARGET_PCT = float(os.getenv("AUDIT_ACCURACY_TARGET_PCT", "99"))
+AUDIT_ANALYTICS_DEFAULT_DAYS = 30
+
+# Dwell time: guns should clear the staging bins within this many hours.
+AUDIT_DWELL_TARGET_HOURS = float(os.getenv("AUDIT_DWELL_TARGET_HOURS", "24"))
+# Warehouse/location pairs the clearance metric watches.
+AUDIT_DWELL_LOCATIONS = [
+    tuple(pair.strip().upper().split("/", 1))
+    for pair in os.getenv(
+        "AUDIT_DWELL_LOCATIONS",
+        "MAIN/C2-SERIALIZED,SHIPPING/STAGE,SHIPPING/STAGE1,SHIPPING/STAGE2,SHIPPING/STAGE3",
+    ).split(",")
+    if "/" in pair
+]
+AUDIT_DWELL_CACHE_MINUTES = float(os.getenv("AUDIT_DWELL_CACHE_MINUTES", "10"))
+_dwell_cache: dict[str, Any] = {"df": None, "fetched_at": None}
+
+
+def _dwell_age_display(hours: float) -> str:
+    if hours >= 48:
+        return f"{hours / 24:.1f} d"
+    return f"{hours:.0f} h"
+
+
+def fetch_dwell_df() -> pd.DataFrame:
+    """Dwell rows for the watched locations, cached briefly (ERP query ~5s).
+
+    dwell_hours is computed against the ERP server's own clock (ERP_NOW),
+    which is on the same clock as CREATE_DATE — the app host's timezone
+    never enters into it. Ages drift up to the cache TTL; the page shows
+    the snapshot time.
+    """
+    cached_at = _dwell_cache["fetched_at"]
+    if (
+        _dwell_cache["df"] is not None
+        and cached_at is not None
+        and datetime.now() - cached_at < timedelta(minutes=AUDIT_DWELL_CACHE_MINUTES)
+    ):
+        return _dwell_cache["df"]
+    df = run_audit_sql_file(AUDIT_DWELL_QUERY_FILE, "serialized dwell-time query")
+    watched = {f"{wh}/{loc}" for wh, loc in AUDIT_DWELL_LOCATIONS}
+    keys = (
+        df["WAREHOUSE_ID"].astype(str).str.upper()
+        + "/"
+        + df["LOCATION_ID"].astype(str).str.upper()
+    )
+    df = df[keys.isin(watched)].copy()
+    df["ARRIVED_AT"] = pd.to_datetime(df["ARRIVED_AT"])
+    df["ERP_NOW"] = pd.to_datetime(df["ERP_NOW"])
+    df["dwell_hours"] = (
+        (df["ERP_NOW"] - df["ARRIVED_AT"]).dt.total_seconds() / 3600.0
+    ).clip(lower=0.0)
+    _dwell_cache["df"] = df
+    _dwell_cache["fetched_at"] = datetime.now()
+    return df
+
+
+def build_dwell_metrics() -> dict[str, Any]:
+    """Snapshot of how long guns have sat in the watched staging locations.
+
+    Unlike the rest of the analytics payload this is a *current* snapshot from
+    the ERP, not a windowed aggregate. Failure to reach the ERP degrades to an
+    error message so the audit analytics (Postgres-backed) still render.
+    """
+    target = AUDIT_DWELL_TARGET_HOURS
+    result: dict[str, Any] = {
+        "target_hours": target,
+        "locations": [f"{wh}/{loc}" for wh, loc in AUDIT_DWELL_LOCATIONS],
+        "error": None,
+    }
+    try:
+        df = fetch_dwell_df()
+    except Exception as exc:  # ERP down/misconfigured — degrade, don't 500
+        logger.exception("Dwell-time query failed")
+        result["error"] = str(exc)
+        return result
+    result["as_of"] = (
+        df["ERP_NOW"].max().to_pydatetime() if len(df) else datetime.now()
+    )
+
+    over = df[df["dwell_hours"] > target].sort_values("ARRIVED_AT")
+
+    total = int(len(df))
+    over_count = int(len(over))
+    result["summary"] = {
+        "on_hand": total,
+        "within_target": total - over_count,
+        "over_target": over_count,
+        "clearance_pct": round(100.0 * (total - over_count) / total, 1) if total else None,
+        "median_dwell_hours": round(float(df["dwell_hours"].median()), 1) if total else None,
+        "oldest_dwell_hours": round(float(df["dwell_hours"].max()), 1) if total else None,
+    }
+
+    by_location = []
+    for label in result["locations"]:
+        wh, loc = label.split("/", 1)
+        sub = df[
+            (df["WAREHOUSE_ID"].str.upper() == wh) & (df["LOCATION_ID"].str.upper() == loc)
+        ]
+        loc_over = int((sub["dwell_hours"] > target).sum())
+        oldest_hours = round(float(sub["dwell_hours"].max()), 1) if len(sub) else None
+        by_location.append(
+            {
+                "location": label,
+                "on_hand": int(len(sub)),
+                "over_target": loc_over,
+                "oldest_dwell_hours": oldest_hours,
+                "oldest_display": (
+                    _dwell_age_display(oldest_hours) if oldest_hours is not None else None
+                ),
+            }
+        )
+    result["by_location"] = by_location
+
+    result["aged_serials"] = [
+        {
+            "serial": row["SERIAL_NO"],
+            "part_id": row["PART_ID"],
+            "part_description": row["PART_DESCRIPTION"],
+            "location": f"{row['WAREHOUSE_ID']}/{row['LOCATION_ID']}",
+            "arrived_at": row["ARRIVED_AT"].to_pydatetime(),
+            "dwell_hours": round(float(row["dwell_hours"]), 1),
+            "age_display": _dwell_age_display(float(row["dwell_hours"])),
+        }
+        for _, row in over.iterrows()
+    ]
+    return result
+
+
+def _audit_json_safe(value):
+    """Recursively convert analytics rows to JSON-friendly types."""
+    if isinstance(value, dict):
+        return {k: _audit_json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_audit_json_safe(v) for v in value]
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    return value
+
+
+def _audit_analytics_window() -> int:
+    try:
+        days = int(request.args.get("days", AUDIT_ANALYTICS_DEFAULT_DAYS))
+    except (TypeError, ValueError):
+        days = AUDIT_ANALYTICS_DEFAULT_DAYS
+    return max(1, min(days, 365))
+
+
+def build_audit_analytics(days: int) -> dict[str, Any]:
+    """Everything the analytics dashboard / endpoint reports for the window."""
+    sessions = audit_store.completed_sessions_since(days)
+    serials_audited = sum(r.get("expected_count") or 0 for r in sessions)
+    verified = sum(r.get("verified_count") or 0 for r in sessions)
+    misplaced = sum(r.get("misplaced_count") or 0 for r in sessions)
+    missing = sum(r.get("missing_count") or 0 for r in sessions)
+    unexpected = sum(r.get("unexpected_count") or 0 for r in sessions)
+    weighted_accuracy = (
+        round(100.0 * verified / serials_audited, 2) if serials_audited else None
+    )
+    session_accuracies = [
+        float(r["accuracy_pct"]) for r in sessions if r.get("accuracy_pct") is not None
+    ]
+    avg_session_accuracy = (
+        round(sum(session_accuracies) / len(session_accuracies), 2)
+        if session_accuracies
+        else None
+    )
+
+    locations = audit_store.list_location_status()
+    locations_active = len(locations)
+    locations_due = sum(1 for loc in locations if loc.get("due"))
+    cadence_compliance = (
+        round(100.0 * (locations_active - locations_due) / locations_active, 1)
+        if locations_active
+        else None
+    )
+
+    open_exceptions = audit_store.current_exceptions()
+    open_missing = sum(1 for r in open_exceptions if r.get("status") == "missing")
+    open_misplaced = sum(1 for r in open_exceptions if r.get("status") == "misplaced")
+
+    return {
+        "window_days": days,
+        "target_accuracy_pct": AUDIT_ACCURACY_TARGET_PCT,
+        "generated_at": datetime.now(timezone.utc),
+        "summary": {
+            "sessions_completed": len(sessions),
+            "serials_audited": serials_audited,
+            "verified": verified,
+            "misplaced": misplaced,
+            "missing": missing,
+            "unexpected": unexpected,
+            "weighted_accuracy_pct": weighted_accuracy,
+            "avg_session_accuracy_pct": avg_session_accuracy,
+            "meets_target": (
+                weighted_accuracy is not None
+                and weighted_accuracy >= AUDIT_ACCURACY_TARGET_PCT
+            ),
+            "locations_active": locations_active,
+            "locations_due": locations_due,
+            "cadence_compliance_pct": cadence_compliance,
+            "open_missing": open_missing,
+            "open_misplaced": open_misplaced,
+        },
+        "sessions": sessions,
+        "open_exceptions": open_exceptions,
+        "problem_locations": audit_store.location_error_breakdown(days),
+        "problem_serials": audit_store.repeat_offender_serials(days),
+        "unexpected_serials": audit_store.unexpected_serials_since(days),
+        "dwell": build_dwell_metrics(),
+    }
+
+
+@app.get("/audit/analytics")
+@require_trusted_client
+def audit_analytics_page():
+    if not audit_store.is_available():
+        return _audit_unavailable_response()
+
+    days = _audit_analytics_window()
+    payload = build_audit_analytics(days)
+
+    # Human-readable timestamps for the tables (charts use the ISO values).
+    for row in payload["sessions"]:
+        row["completed_display"] = _audit_dt_display(row.get("completed_at"))
+    for row in payload["open_exceptions"]:
+        row["completed_display"] = _audit_dt_display(row.get("completed_at"))
+    for row in payload["problem_locations"]:
+        row["last_audited_display"] = _audit_dt_display(row.get("last_audited_at"))
+    for row in payload["problem_serials"]:
+        row["last_audited_display"] = _audit_dt_display(row.get("last_audited_at"))
+    for row in payload["unexpected_serials"]:
+        row["last_scanned_display"] = _audit_dt_display(row.get("last_scanned_at"))
+    # ERP timestamps are company-local naive — format without tz conversion.
+    for row in payload["dwell"].get("aged_serials", []):
+        row["arrived_display"] = row["arrived_at"].strftime("%Y-%m-%d %H:%M")
+
+    return render_template(
+        "audit_analytics.html",
+        audit_available=True,
+        data=_audit_json_safe(payload),
+        window_options=[7, 30, 90, 365],
+    )
+
+
+@app.get("/api/audit/analytics")
+@require_trusted_client
+def api_audit_analytics():
+    if not audit_store.is_available():
+        return jsonify({"error": "audit_unavailable", "message": AUDIT_UNAVAILABLE_MESSAGE}), 503
+    return jsonify(_audit_json_safe(build_audit_analytics(_audit_analytics_window()))), 200
+
+
+# ---------------------------------------------------------------------------
+# Serial number history
+# ---------------------------------------------------------------------------
+def _clean_serial_input(raw: Optional[str]) -> str:
+    return (raw or "").strip().upper()
+
+
+@app.get("/serial-history")
+@require_trusted_client
+def serial_history_page():
+    prefill = _clean_serial_input(request.args.get("serial"))[:SERIAL_MAX_LENGTH]
+    return render_template("serial_history.html", prefill_serial=prefill)
+
+
+@app.get("/api/serial-history")
+@require_trusted_client
+def api_serial_history():
+    serial = _clean_serial_input(request.args.get("serial"))
+    if not serial:
+        return jsonify({"error": "invalid", "message": "A serial number is required."}), 400
+    if len(serial) > SERIAL_MAX_LENGTH:
+        return jsonify({"error": "invalid", "message": "Serial number is too long."}), 400
+
+    try:
+        trace_df = run_erp_query_file(
+            SERIAL_HISTORY_TRACE_FILE, {"serial": serial}, "serial history trace lookup"
+        )
+        if trace_df.empty:
+            txns_df = trace_df
+            shipments_df = trace_df
+        else:
+            txns_df = run_erp_query_file(
+                SERIAL_HISTORY_TRANSACTIONS_FILE, {"serial": serial}, "serial history transactions"
+            )
+            shipments_df = run_erp_query_file(
+                SERIAL_HISTORY_SHIPMENTS_FILE, {"serial": serial}, "serial history shipments"
+            )
+    except Exception:
+        logger.exception("Serial history lookup failed for %s", serial)
+        return (
+            jsonify(
+                {
+                    "error": "lookup_failed",
+                    "message": "The ERP lookup failed. Check the SQL Server connection and try again.",
+                }
+            ),
+            500,
+        )
+
+    payload = serial_history.build_serial_history(serial, trace_df, txns_df, shipments_df)
+    return jsonify(payload), 200
 
 
 def parse_recipient_addresses(raw_value: str) -> list[str]:

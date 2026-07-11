@@ -8,6 +8,8 @@
   </head>
   <body>
     <main class="page-shell">
+      {% set active_nav = 'dashboard' %}
+      {% include '_topnav.html' %}
       <section class="hero card">
         <div class="hero-top">
           <div>
@@ -33,98 +35,115 @@
           <li>Click <strong>2. Export</strong> when it shows as ready.</li>
         </ol>
         <section class="quick-actions">
+          <div class="pl-grid">
           {% for option in query_options %}
           {% set run_state = run_state_by_type.get(option, {}) %}
           {% set latest_summary = latest_runs_by_type.get(option) %}
           {% set can_export_latest = latest_summary and latest_summary['status'] == 'success' and (latest_summary.get('export_path') or latest_summary['row_count'] > 0) and not run_state.get('running') %}
-          <section class="quick-action-row card-lite" data-quick-action data-query-type="{{ option }}">
-            <div class="quick-action-copy">
-              <h2>{{ option|capitalize }} Picklist</h2>
-              <p class="helper-text" data-quick-action-message>
-                <span class="inline-spinner" data-quick-action-spinner {% if not run_state.get('running') %}hidden{% endif %} aria-hidden="true"></span>
-                <span data-quick-action-message-text>
+          <section class="pl-card" data-quick-action data-query-type="{{ option }}">
+            <div class="pl-card-head">
+              <div>
+                <div class="pl-card-title">{{ option|capitalize }} Picklist</div>
+                <div class="pl-card-sub">
+                  {% if option == 'guns' %}Firearms shipping in the next 10 days{% else %}Parts for open work orders{% endif %}
+                </div>
+              </div>
+              <span
+                class="pill pl-status {% if run_state.get('running') %}running{% elif latest_summary and latest_summary['status'] == 'success' %}success{% else %}idle{% endif %}"
+                data-pl-status
+              >
+                <span class="inline-spinner pill-spinner" data-pl-status-spinner {% if not run_state.get('running') %}hidden{% endif %} aria-hidden="true"></span>
+                <span data-pl-status-label>{% if run_state.get('running') %}Running{% elif latest_summary and latest_summary['status'] == 'success' %}Ready{% else %}Idle{% endif %}</span>
+              </span>
+            </div>
+
+            <div class="pl-metric">
+              <span class="pl-metric-num">{{ latest_summary['row_count'] if latest_summary else 0 }}</span>
+              <span class="pl-metric-unit">records</span>
+            </div>
+
+            <p class="helper-text pl-lastrun" data-quick-action-message>
+              <span class="inline-spinner" data-quick-action-spinner {% if not run_state.get('running') %}hidden{% endif %} aria-hidden="true"></span>
+              <span data-quick-action-message-text>
               {% if run_state.get('running') %}
               Running now. Wait for idle before exporting.
               {% elif latest_summary and latest_summary['status'] == 'success' %}
                 {% if can_export_latest %}
-              
                 Ready to export. Last successful run:
                 {{ latest_success_age_by_type[option] or 'just now' }}.
-              
                 {% else %}
-              
                 Last run completed, but export data is not available yet. Run again before exporting.
-              
                 {% endif %}
               {% elif latest_summary and latest_summary['status'] == 'failed' %}
-              
                 Last run failed. Run {{ option|capitalize }} again before exporting.
-              
               {% else %}
-              
                 No completed run yet. Start with 1. Run {{ option|capitalize }}.
-              
               {% endif %}
-                </span>
-              </p>
-            </div>
-            <section class="actions quick-action-buttons">
-              <form
-                class="run-form"
-                method="post"
-                action="{{ url_for('run_picklist') }}"
-                data-query-type="{{ option }}"
-              >
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
-                <input type="hidden" name="query_type" value="{{ option }}" />
-                {% if option == 'guns' %}
-                <input
-                  type="hidden"
-                  name="guns_lookahead_days"
-                  value="{{ guns_query_defaults['lookahead_days'] }}"
-                  data-guns-hidden-days
-                />
-                <input
-                  type="hidden"
-                  name="guns_excluded_customers_json"
-                  value="[]"
-                  data-guns-hidden-customers
-                />
+              </span>
+            </p>
+
+            <form
+              class="run-form pl-run-form"
+              method="post"
+              action="{{ url_for('run_picklist') }}"
+              data-query-type="{{ option }}"
+            >
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+              <input type="hidden" name="query_type" value="{{ option }}" />
+              {% if option == 'guns' %}
+              <input
+                type="hidden"
+                name="guns_lookahead_days"
+                value="{{ guns_query_defaults['lookahead_days'] }}"
+                data-guns-hidden-days
+              />
+              <input
+                type="hidden"
+                name="guns_excluded_customers_json"
+                value="[]"
+                data-guns-hidden-customers
+              />
+              {% endif %}
+              <button type="submit" class="pl-primary" data-run-submit {% if run_state.get('running') %}disabled{% endif %}>
+                {% if run_state.get('running') %}
+                Running {{ option|capitalize }}...
+                {% else %}
+                1. Run {{ option|capitalize }}
                 {% endif %}
-                <button type="submit" data-run-submit {% if run_state.get('running') %}disabled{% endif %}>
-                  {% if run_state.get('running') %}
-                  Running {{ option|capitalize }}...
-                  {% else %}
-                  1. Run {{ option|capitalize }}
-                  {% endif %}
-                </button>
-              </form>
-              <a
-                class="button secondary"
-                data-busy-label="Preparing..."
-                data-export-link
-                href="{{ url_for('export_latest', query_type=option) }}"
-                {% if not can_export_latest %}hidden aria-hidden="true"{% endif %}
-              >
-                2. Export {{ option|capitalize }}
-              </a>
-              <button
-                type="button"
-                class="button secondary is-disabled"
-                data-export-disabled
-                disabled
-                aria-disabled="true"
-                {% if can_export_latest %}hidden{% endif %}
-              >
-                2. Export {{ option|capitalize }} (not ready)
               </button>
-            </section>
+            </form>
+            <a
+              class="button secondary pl-secondary"
+              data-busy-label="Preparing..."
+              data-export-link
+              href="{{ url_for('export_latest', query_type=option) }}"
+              {% if not can_export_latest %}hidden aria-hidden="true"{% endif %}
+            >
+              2. Export {{ option|capitalize }}
+            </a>
+            <button
+              type="button"
+              class="button secondary is-disabled pl-secondary"
+              data-export-disabled
+              disabled
+              aria-disabled="true"
+              {% if can_export_latest %}hidden{% endif %}
+            >
+              2. Export {{ option|capitalize }} (not ready)
+            </button>
           </section>
           {% endfor %}
-          <section class="actions quick-action-row">
-            <a class="button" href="{{ url_for('audit_dashboard') }}">Serialized Inventory Audit</a>
-            <p class="helper-text">Scan-based daily firearm audit for Shipping (cage &amp; racks).</p>
+          </div>
+
+          <section class="audit-cta">
+            <div class="audit-cta-icon"><span></span></div>
+            <div class="audit-cta-copy">
+              <div class="audit-cta-title">Serialized Inventory Audit</div>
+              <div class="audit-cta-sub">Scan-based daily firearm count for Shipping &mdash; cage &amp; racks.</div>
+            </div>
+            <a class="audit-cta-btn" href="{{ url_for('audit_dashboard') }}">Open audit &rarr;</a>
           </section>
+
           <section class="actions quick-action-row" data-advanced-section>
             <a class="button tertiary" href="{{ url_for('settings') }}">Settings</a>
             <p class="helper-text">Admin only. Use this for connection and notification setup.</p>
@@ -917,6 +936,22 @@
             const exportLink = card.querySelector("[data-export-link]");
             const exportDisabled = card.querySelector("[data-export-disabled]");
             const label = capitalizeQueryType(queryType);
+
+            const statusPill = card.querySelector("[data-pl-status]");
+            if (statusPill) {
+              const ready = Boolean(latest && latest.status === "success");
+              statusPill.classList.toggle("running", running);
+              statusPill.classList.toggle("success", !running && ready);
+              statusPill.classList.toggle("idle", !running && !ready);
+              const statusLabel = statusPill.querySelector("[data-pl-status-label]");
+              const statusSpinner = statusPill.querySelector("[data-pl-status-spinner]");
+              if (statusLabel) {
+                statusLabel.textContent = running ? "Running" : ready ? "Ready" : "Idle";
+              }
+              if (statusSpinner) {
+                statusSpinner.hidden = !running;
+              }
+            }
 
             if (messageTextNode) {
               if (running) {

@@ -1,0 +1,556 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Audit Analytics</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <main class="page-shell">
+      {% set active_nav = 'audit' %}
+      {% include '_topnav.html' %}
+      <section class="hero card">
+        <div class="hero-top">
+          <div>
+            <p class="eyebrow">Serialized Audit</p>
+            <h1>Audit Analytics</h1>
+          </div>
+          <a class="button tertiary" href="{{ url_for('audit_dashboard') }}">&larr; Audit dashboard</a>
+        </div>
+        <p class="hero-copy">
+          How the serialized counts are performing: accuracy against the
+          {{ '%.0f%%'|format(data.target_accuracy_pct) }} target, error mix per audit, and the
+          serials and locations that keep going wrong.
+        </p>
+        <div class="analytics-toolbar">
+          <span class="analytics-toolbar-label">Window:</span>
+          {% for opt in window_options %}
+          <a class="analytics-window {{ 'active' if data.window_days == opt }}"
+             href="{{ url_for('audit_analytics_page', days=opt) }}">{{ opt }}d</a>
+          {% endfor %}
+        </div>
+      </section>
+
+      {% set s = data.summary %}
+      <section class="card audit-tiles analytics-tiles">
+        <div class="audit-tile {{ 'tile-verified' if s.meets_target else 'tile-missing' }}">
+          <span class="audit-tile-num">{{ '%.1f%%'|format(s.weighted_accuracy_pct) if s.weighted_accuracy_pct is not none else '&mdash;'|safe }}</span>
+          <span class="audit-tile-label">Accuracy</span>
+          <span class="audit-tile-sub">{{ s.verified }}/{{ s.serials_audited }} verified &middot; target {{ '%.0f%%'|format(data.target_accuracy_pct) }}</span>
+        </div>
+        <div class="audit-tile">
+          <span class="audit-tile-num">{{ s.sessions_completed }}</span>
+          <span class="audit-tile-label">Audits</span>
+          <span class="audit-tile-sub">last {{ data.window_days }} days</span>
+        </div>
+        <div class="audit-tile tile-misplaced">
+          <span class="audit-tile-num">{{ s.misplaced }}</span>
+          <span class="audit-tile-label">Misplaced</span>
+          <span class="audit-tile-sub">{{ s.open_misplaced }} still open</span>
+        </div>
+        <div class="audit-tile tile-missing">
+          <span class="audit-tile-num">{{ s.missing }}</span>
+          <span class="audit-tile-label">Missing</span>
+          <span class="audit-tile-sub">{{ s.open_missing }} still open</span>
+        </div>
+        <div class="audit-tile tile-unexpected">
+          <span class="audit-tile-num">{{ s.unexpected }}</span>
+          <span class="audit-tile-label">Unexpected</span>
+          <span class="audit-tile-sub">not in system</span>
+        </div>
+        <div class="audit-tile {{ 'tile-verified' if s.locations_due == 0 else 'tile-pending' }}">
+          <span class="audit-tile-num">{{ '%.0f%%'|format(s.cadence_compliance_pct) if s.cadence_compliance_pct is not none else '&mdash;'|safe }}</span>
+          <span class="audit-tile-label">On cadence</span>
+          <span class="audit-tile-sub">{{ s.locations_due }} of {{ s.locations_active }} locations due</span>
+        </div>
+      </section>
+
+      {% set d = data.dwell %}
+      <section class="card">
+        <h2>Staging dwell time</h2>
+        <p class="helper-text">
+          How long guns have been sitting in {{ d.locations|join(', ') }} &mdash;
+          the goal is clearing them within {{ '%.0f'|format(d.target_hours) }} hours.
+          Live ERP snapshot{% if d.as_of %} as of {{ d.as_of[:16]|replace('T', ' ') }}{% endif %}, not tied to the window above.
+        </p>
+        {% if d.error %}
+        <p class="empty-state">Dwell data unavailable &mdash; the ERP query failed: {{ d.error }}</p>
+        {% else %}
+        {% set ds = d.summary %}
+        <div class="audit-tiles analytics-tiles">
+          <div class="audit-tile {{ 'tile-verified' if ds.over_target == 0 else 'tile-missing' }}">
+            <span class="audit-tile-num">{{ '%.0f%%'|format(ds.clearance_pct) if ds.clearance_pct is not none else '&mdash;'|safe }}</span>
+            <span class="audit-tile-label">Under {{ '%.0f'|format(d.target_hours) }}h</span>
+            <span class="audit-tile-sub">{{ ds.within_target }}/{{ ds.on_hand }} guns on hand</span>
+          </div>
+          <div class="audit-tile {{ 'tile-verified' if ds.over_target == 0 else 'tile-missing' }}">
+            <span class="audit-tile-num">{{ ds.over_target }}</span>
+            <span class="audit-tile-label">Sat too long</span>
+            <span class="audit-tile-sub">over {{ '%.0f'|format(d.target_hours) }}h in location</span>
+          </div>
+          <div class="audit-tile">
+            <span class="audit-tile-num">{{ '%.1f'|format(ds.median_dwell_hours) if ds.median_dwell_hours is not none else '&mdash;'|safe }}</span>
+            <span class="audit-tile-label">Median hours</span>
+            <span class="audit-tile-sub">time in location so far</span>
+          </div>
+          <div class="audit-tile {{ 'tile-missing' if ds.oldest_dwell_hours is not none and ds.oldest_dwell_hours > d.target_hours else '' }}">
+            <span class="audit-tile-num">{{ '%.1f'|format(ds.oldest_dwell_hours / 24) if ds.oldest_dwell_hours is not none else '&mdash;'|safe }}</span>
+            <span class="audit-tile-label">Oldest (days)</span>
+            <span class="audit-tile-sub">longest-sitting gun</span>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Location</th><th>Guns on hand</th><th>Over {{ '%.0f'|format(d.target_hours) }}h</th><th>Oldest</th></tr>
+            </thead>
+            <tbody>
+              {% for row in d.by_location %}
+              <tr>
+                <td><strong>{{ row.location }}</strong></td>
+                <td>{{ row.on_hand }}</td>
+                <td>{{ row.over_target }}</td>
+                <td>{{ row.oldest_display or '&mdash;'|safe }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Guns past the {{ '%.0f'|format(d.target_hours) }}h target</h3>
+        {% if d.aged_serials %}
+        <p class="helper-text">Currently in a watched location, oldest first &mdash; these need to move.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Serial</th><th>Part</th><th>Location</th><th>Arrived</th><th>Time in location</th></tr>
+            </thead>
+            <tbody>
+              {% for row in d.aged_serials %}
+              <tr>
+                <td><a href="{{ url_for('serial_history_page', serial=row.serial) }}"><strong>{{ row.serial }}</strong></a></td>
+                <td>{{ row.part_id or '' }}{% if row.part_description %} &middot; {{ row.part_description }}{% endif %}</td>
+                <td>{{ row.location }}</td>
+                <td>{{ row.arrived_display or '' }}</td>
+                <td><span class="pill audit-status status-missing">{{ row.age_display }}</span></td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <p class="empty-state">Nothing over target &mdash; every gun in these locations arrived within the last {{ '%.0f'|format(d.target_hours) }} hours.</p>
+        {% endif %}
+        {% endif %}
+      </section>
+
+      <section class="card">
+        <h2>Accuracy per audit</h2>
+        <p class="helper-text">Each completed audit in the window, against the {{ '%.0f%%'|format(data.target_accuracy_pct) }} target.</p>
+        <div class="chart-wrap" id="accuracy-chart"></div>
+      </section>
+
+      <section class="card">
+        <h2>Errors per audit</h2>
+        <div class="chart-legend">
+          <span><span class="swatch" style="background:#e5954e"></span>Misplaced</span>
+          <span><span class="swatch" style="background:#c0392b"></span>Missing</span>
+          <span><span class="swatch" style="background:#3b7bc4"></span>Unexpected</span>
+        </div>
+        <div class="chart-wrap" id="errors-chart"></div>
+      </section>
+
+      <section class="card">
+        <h2>Open exceptions</h2>
+        <p class="helper-text">
+          Serials whose <strong>latest</strong> completed audit left them missing or misplaced.
+          They drop off automatically once a newer audit verifies them.
+        </p>
+        {% if data.open_exceptions %}
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Serial</th>
+                <th>Part</th>
+                <th>Expected</th>
+                <th>Found at</th>
+                <th>Tied WO</th>
+                <th>Last audit</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in data.open_exceptions %}
+              <tr>
+                <td><span class="pill audit-status status-{{ row.status }}">{{ row.status }}</span></td>
+                <td><strong>{{ row.serial }}</strong></td>
+                <td>{{ row.part_id or '' }}{% if row.part_description %} &middot; {{ row.part_description }}{% endif %}</td>
+                <td>{{ row.expected_warehouse or '' }}{% if row.expected_location %} / {{ row.expected_location }}{% endif %}</td>
+                <td>{{ row.scanned_location or '&mdash;'|safe }}</td>
+                <td>{{ 'Yes' if row.tied_wo else '' }}{% if row.tied_wo and row.cust_order_id %} ({{ row.cust_order_id }}){% endif %}</td>
+                <td><a href="{{ url_for('audit_session_page', session_id=row.session_id) }}">#{{ row.session_id }}</a> &middot; {{ row.completed_display or '' }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <p class="empty-state">No open exceptions &mdash; every serial verified in its latest audit.</p>
+        {% endif %}
+      </section>
+
+      <section class="card">
+        <h2>Unexpected serials</h2>
+        <p class="helper-text">Scanned during an audit but not in the expected inventory at all &mdash; last {{ data.window_days }} days. These need investigation in VISUAL.</p>
+        {% if data.unexpected_serials %}
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Serial</th><th>Last scanned at</th><th>Location</th><th>Times scanned</th><th>Session</th></tr>
+            </thead>
+            <tbody>
+              {% for row in data.unexpected_serials %}
+              <tr>
+                <td><strong>{{ row.serial }}</strong></td>
+                <td>{{ row.last_scanned_display or '' }}</td>
+                <td>{{ row.last_scanned_location or '' }}</td>
+                <td>{{ row.scan_count }}</td>
+                <td><a href="{{ url_for('audit_session_page', session_id=row.last_session_id) }}">#{{ row.last_session_id }}</a></td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <p class="empty-state">No unexpected serials in this window.</p>
+        {% endif %}
+      </section>
+
+      <section class="card">
+        <h2>Problem locations</h2>
+        <p class="helper-text">Locations with misplaced or missing results in the last {{ data.window_days }} days, worst first.</p>
+        {% if data.problem_locations %}
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Location</th>
+                <th>Serials audited</th>
+                <th>Verified</th>
+                <th>Misplaced</th>
+                <th>Missing</th>
+                <th>Error rate</th>
+                <th>Last audited</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in data.problem_locations %}
+              <tr>
+                <td><strong>{{ row.scope }}</strong></td>
+                <td>{{ row.audited }}</td>
+                <td>{{ row.verified }}</td>
+                <td>{{ row.misplaced }}</td>
+                <td>{{ row.missing }}</td>
+                <td>{{ '%.1f%%'|format(row.error_rate_pct) if row.error_rate_pct is not none else '&mdash;'|safe }}</td>
+                <td>{{ row.last_audited_display or '' }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <p class="empty-state">No location errors in this window.</p>
+        {% endif %}
+      </section>
+
+      <section class="card">
+        <h2>Repeat-offender serials</h2>
+        <p class="helper-text">Serials flagged misplaced or missing in the last {{ data.window_days }} days &mdash; more than once means a process problem, not a scan slip.</p>
+        {% if data.problem_serials %}
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Serial</th>
+                <th>Part</th>
+                <th>Missing &times;</th>
+                <th>Misplaced &times;</th>
+                <th>Audited &times;</th>
+                <th>Last status</th>
+                <th>Expected</th>
+                <th>Last seen at</th>
+                <th>Last audit</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in data.problem_serials %}
+              <tr>
+                <td><strong>{{ row.serial }}</strong></td>
+                <td>{{ row.part_id or '' }}</td>
+                <td>{{ row.missing_times }}</td>
+                <td>{{ row.misplaced_times }}</td>
+                <td>{{ row.audits }}</td>
+                <td><span class="pill audit-status status-{{ row.last_status }}">{{ row.last_status }}</span></td>
+                <td>{{ row.expected_warehouse or '' }}{% if row.expected_location %} / {{ row.expected_location }}{% endif %}</td>
+                <td>{{ row.last_scanned_location or '&mdash;'|safe }}</td>
+                <td><a href="{{ url_for('audit_session_page', session_id=row.last_session_id) }}">#{{ row.last_session_id }}</a> &middot; {{ row.last_audited_display or '' }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <p class="empty-state">No serial errors in this window.</p>
+        {% endif %}
+      </section>
+
+      <section class="card">
+        <h2>Completed audits</h2>
+        {% if data.sessions %}
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Target</th>
+                <th>Operator</th>
+                <th>Completed</th>
+                <th>Expected</th>
+                <th>Verified</th>
+                <th>Misplaced</th>
+                <th>Missing</th>
+                <th>Unexpected</th>
+                <th>Accuracy</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in data.sessions|reverse %}
+              <tr>
+                <td><a href="{{ url_for('audit_session_page', session_id=row.id) }}">#{{ row.id }}</a></td>
+                <td>{{ row.label or row.scope or 'Full audit' }}</td>
+                <td>{{ row.operator or '' }}</td>
+                <td>{{ row.completed_display or '' }}</td>
+                <td>{{ row.expected_count }}</td>
+                <td>{{ row.verified_count }}</td>
+                <td>{{ row.misplaced_count }}</td>
+                <td>{{ row.missing_count }}</td>
+                <td>{{ row.unexpected_count }}</td>
+                <td>{{ '%.1f%%'|format(row.accuracy_pct) if row.accuracy_pct is not none else '&mdash;'|safe }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <p class="empty-state">No completed audits in this window. <a href="{{ url_for('audit_dashboard') }}">Start one from the audit dashboard.</a></p>
+        {% endif %}
+      </section>
+    </main>
+
+    <script>
+      const DATA = {{ data | tojson }};
+      const cssVar = (name, fallback) =>
+        (getComputedStyle(document.documentElement).getPropertyValue(name) || "").trim() || fallback;
+      const SURFACE = cssVar("--panel", "#fffdf8");
+      const INK = cssVar("--ink", "#26313d");
+      const MUTED = cssVar("--muted", "#67727e");
+      const GRID = cssVar("--line", "#ece4d2");
+      const GREEN = cssVar("--primary", "#2f6f52");
+      const SERIES = [
+        { key: "misplaced_count", label: "Misplaced", color: "#e5954e" },
+        { key: "missing_count", label: "Missing", color: "#c0392b" },
+        { key: "unexpected_count", label: "Unexpected", color: "#3b7bc4" },
+      ];
+      const SVG_NS = "http://www.w3.org/2000/svg";
+
+      function el(tag, attrs, text) {
+        const node = document.createElementNS(SVG_NS, tag);
+        for (const k in attrs) node.setAttribute(k, attrs[k]);
+        if (text !== undefined) node.textContent = text;
+        return node;
+      }
+
+      function dateLabel(iso) {
+        const d = new Date(iso);
+        return isNaN(d) ? "" : (d.getMonth() + 1) + "/" + d.getDate();
+      }
+
+      function makeTooltip(wrap) {
+        const tip = document.createElement("div");
+        tip.className = "chart-tooltip";
+        wrap.appendChild(tip);
+        return {
+          show(html, clientX, clientY) {
+            tip.innerHTML = html;
+            tip.style.opacity = "1";
+            const rect = wrap.getBoundingClientRect();
+            let x = clientX - rect.left + 12;
+            let y = clientY - rect.top - 10;
+            tip.style.left = "0px"; tip.style.top = "0px";
+            const tw = tip.offsetWidth, th = tip.offsetHeight;
+            if (x + tw > rect.width - 4) x = clientX - rect.left - tw - 12;
+            if (y + th > rect.height - 4) y = rect.height - th - 4;
+            if (y < 0) y = 0;
+            tip.style.left = x + "px";
+            tip.style.top = y + "px";
+          },
+          hide() { tip.style.opacity = "0"; },
+        };
+      }
+
+      function emptyState(wrap, message) {
+        const p = document.createElement("p");
+        p.className = "empty-state";
+        p.textContent = message;
+        wrap.appendChild(p);
+      }
+
+      function niceStep(rough) {
+        const pow = Math.pow(10, Math.floor(Math.log10(rough || 1)));
+        for (const m of [1, 2, 5, 10]) if (m * pow >= rough) return m * pow;
+        return 10 * pow;
+      }
+
+      function sessionName(s) {
+        return "#" + s.id + " · " + (s.label || s.scope || "Full audit");
+      }
+
+      // Session labels and operator names are user-entered free text and this
+      // string lands in tooltip innerHTML — escape everything interpolated.
+      function esc(value) {
+        return String(value).replace(/[&<>"']/g, function (c) {
+          return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+        });
+      }
+
+      function tooltipBody(s) {
+        return "<strong>" + esc(sessionName(s)) + "</strong><br>" +
+          dateLabel(s.completed_at) + (s.operator ? " · " + esc(s.operator) : "") + "<br>" +
+          "Expected " + s.expected_count + " · Verified " + s.verified_count + "<br>" +
+          "Misplaced " + s.misplaced_count + " · Missing " + s.missing_count +
+          " · Unexpected " + s.unexpected_count +
+          (s.accuracy_pct != null ? "<br>Accuracy " + Number(s.accuracy_pct).toFixed(1) + "%" : "");
+      }
+
+      // Shared frame: gridlines + y ticks + x labels. Returns scale helpers.
+      function chartFrame(svg, W, H, m, lo, hi, step, n, xLabelFor) {
+        const innerW = W - m.left - m.right, innerH = H - m.top - m.bottom;
+        const y = (v) => m.top + ((hi - v) / (hi - lo)) * innerH;
+        const bandW = innerW / n;
+        const xc = (i) => m.left + (i + 0.5) * bandW;
+        for (let v = lo; v <= hi + 1e-9; v += step) {
+          svg.appendChild(el("line", { x1: m.left, x2: W - m.right, y1: y(v), y2: y(v), stroke: GRID, "stroke-width": 1 }));
+          svg.appendChild(el("text", { x: m.left - 8, y: y(v) + 4, "text-anchor": "end", fill: MUTED, "font-size": 11 }, String(v)));
+        }
+        const every = Math.max(1, Math.ceil(n / 10));
+        for (let i = 0; i < n; i++) {
+          if (i % every !== 0 && i !== n - 1) continue;
+          svg.appendChild(el("text", { x: xc(i), y: H - m.bottom + 18, "text-anchor": "middle", fill: MUTED, "font-size": 11 }, xLabelFor(i)));
+        }
+        return { y, xc, bandW, innerH };
+      }
+
+      function renderAccuracyChart() {
+        const wrap = document.getElementById("accuracy-chart");
+        const sessions = DATA.sessions.filter((s) => s.accuracy_pct != null);
+        if (!sessions.length) return emptyState(wrap, "No completed audits with accuracy in this window.");
+
+        const W = 760, H = 250, m = { top: 16, right: 88, bottom: 34, left: 44 };
+        const target = DATA.target_accuracy_pct;
+        const accs = sessions.map((s) => Number(s.accuracy_pct));
+        let lo = Math.min(target, ...accs);
+        lo = Math.max(0, Math.floor((lo - 3) / 5) * 5);
+        const hi = 100, step = niceStep((hi - lo) / 4);
+
+        const svg = el("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": "Accuracy per completed audit" });
+        const f = chartFrame(svg, W, H, m, lo, hi, step, sessions.length, (i) => dateLabel(sessions[i].completed_at));
+
+        // Target reference line.
+        svg.appendChild(el("line", { x1: m.left, x2: W - m.right, y1: f.y(target), y2: f.y(target), stroke: "#c0392b", "stroke-width": 1 }));
+        svg.appendChild(el("text", { x: W - m.right + 6, y: f.y(target) + 4, fill: "#983a2f", "font-size": 11, "font-weight": 700 }, "Target " + target + "%"));
+
+        let path = "";
+        sessions.forEach((s, i) => { path += (i ? " L " : "M ") + f.xc(i) + " " + f.y(Number(s.accuracy_pct)); });
+        if (sessions.length > 1) {
+          svg.appendChild(el("path", { d: path, fill: "none", stroke: GREEN, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+        }
+        const tip = makeTooltip(wrap);
+        sessions.forEach((s, i) => {
+          svg.appendChild(el("circle", { cx: f.xc(i), cy: f.y(Number(s.accuracy_pct)), r: 4.5, fill: GREEN, stroke: SURFACE, "stroke-width": 2 }));
+          const hit = el("rect", { x: f.xc(i) - f.bandW / 2, y: m.top, width: f.bandW, height: H - m.top - m.bottom, fill: "transparent" });
+          hit.addEventListener("mousemove", (e) => tip.show(tooltipBody(s), e.clientX, e.clientY));
+          hit.addEventListener("mouseleave", () => tip.hide());
+          hit.addEventListener("click", () => { window.location.href = "/audit/session/" + s.id; });
+          hit.style.cursor = "pointer";
+          svg.appendChild(hit);
+        });
+        // Direct label on the latest point only.
+        const last = sessions[sessions.length - 1];
+        svg.appendChild(el("text", {
+          x: f.xc(sessions.length - 1), y: f.y(Number(last.accuracy_pct)) - 10,
+          "text-anchor": "middle", fill: INK, "font-size": 11, "font-weight": 700,
+        }, Number(last.accuracy_pct).toFixed(1) + "%"));
+        wrap.appendChild(svg);
+      }
+
+      function roundedTopRect(x, y, w, h, r) {
+        r = Math.min(r, h, w / 2);
+        return "M " + x + " " + (y + h) + " L " + x + " " + (y + r) +
+          " Q " + x + " " + y + " " + (x + r) + " " + y +
+          " L " + (x + w - r) + " " + y +
+          " Q " + (x + w) + " " + y + " " + (x + w) + " " + (y + r) +
+          " L " + (x + w) + " " + (y + h) + " Z";
+      }
+
+      function renderErrorsChart() {
+        const wrap = document.getElementById("errors-chart");
+        const sessions = DATA.sessions;
+        if (!sessions.length) return emptyState(wrap, "No completed audits in this window.");
+        const totals = sessions.map((s) => SERIES.reduce((t, sr) => t + (s[sr.key] || 0), 0));
+        const maxTotal = Math.max(...totals);
+        if (!maxTotal) return emptyState(wrap, "No errors recorded in this window — every audit came back clean.");
+
+        const W = 760, H = 250, m = { top: 16, right: 16, bottom: 34, left: 44 };
+        const step = Math.max(1, Math.round(niceStep(maxTotal / 4)));
+        const hi = Math.ceil(maxTotal / step) * step;
+
+        const svg = el("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": "Misplaced, missing, and unexpected counts per audit" });
+        const f = chartFrame(svg, W, H, m, 0, hi, step, sessions.length, (i) => dateLabel(sessions[i].completed_at));
+        const baseline = f.y(0);
+        const barW = Math.min(24, f.bandW * 0.6);
+        const unit = (baseline - m.top) / hi; // px per count
+
+        const tip = makeTooltip(wrap);
+        sessions.forEach((s, i) => {
+          const x = f.xc(i) - barW / 2;
+          const parts = SERIES.map((sr) => ({ ...sr, value: s[sr.key] || 0 })).filter((p) => p.value > 0);
+          // Stack bottom-up; each lower segment gives up 2px at its top as the
+          // surface gap, the top segment gets the rounded data-end.
+          let cursor = baseline;
+          parts.forEach((p, pi) => {
+            const segTop = cursor - p.value * unit;
+            if (pi === parts.length - 1) {
+              svg.appendChild(el("path", { d: roundedTopRect(x, segTop, barW, Math.max(cursor - segTop, 1.5), 4), fill: p.color }));
+            } else {
+              svg.appendChild(el("rect", { x: x, y: segTop + 2, width: barW, height: Math.max(cursor - segTop - 2, 1.5), fill: p.color }));
+            }
+            cursor = segTop;
+          });
+          const hit = el("rect", { x: f.xc(i) - f.bandW / 2, y: m.top, width: f.bandW, height: H - m.top - m.bottom, fill: "transparent" });
+          hit.addEventListener("mousemove", (e) => tip.show(tooltipBody(s), e.clientX, e.clientY));
+          hit.addEventListener("mouseleave", () => tip.hide());
+          hit.addEventListener("click", () => { window.location.href = "/audit/session/" + s.id; });
+          hit.style.cursor = "pointer";
+          svg.appendChild(hit);
+        });
+        wrap.appendChild(svg);
+      }
+
+      renderAccuracyChart();
+      renderErrorsChart();
+    </script>
+  </body>
+</html>
