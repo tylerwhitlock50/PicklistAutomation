@@ -10,7 +10,7 @@ import secrets
 import sqlite3
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from email.message import EmailMessage
 from functools import wraps
@@ -39,7 +39,10 @@ from sqlalchemy import create_engine, text
 
 import audit_store
 import audit_universe
+import pick_store
+import recon
 import serial_history
+import shortage
 
 try:
     from cryptography.fernet import Fernet, InvalidToken
@@ -125,6 +128,34 @@ SERIAL_HISTORY_SHIPMENTS_FILE = resolve_path_setting(
     os.getenv("SERIAL_HISTORY_SHIPMENTS_FILE", "sql/serial_history_shipments.sql")
 )
 SERIAL_MAX_LENGTH = 50
+RECON_SHIPMENTS_FILE = resolve_path_setting(
+    os.getenv("RECON_SHIPMENTS_FILE", "sql/recon_shipments.sql")
+)
+PICK_SERIAL_LOOKUP_FILE = resolve_path_setting(
+    os.getenv("PICK_SERIAL_LOOKUP_FILE", "sql/pick_serial_lookup.sql")
+)
+# How many daily picklist plan snapshots to keep for shipping reconciliation.
+PLAN_SNAPSHOT_RETENTION_DAYS = int(os.getenv("PLAN_SNAPSHOT_RETENTION_DAYS", "60"))
+# Staged shipments should leave the building within this many hours.
+STAGE_AGING_TARGET_HOURS = float(os.getenv("STAGE_AGING_TARGET_HOURS", "48"))
+# SHIPPING locations whose ID contains this term count as staging bins.
+STAGE_LOCATION_TERM = os.getenv("STAGE_LOCATION_TERM", "STAGE").strip().upper()
+# Component shortage report: which product codes count as shippable
+# components, how far out to look, and how long to cache the ERP pull.
+SHORTAGE_QUERY_FILE = resolve_path_setting(
+    os.getenv("SHORTAGE_QUERY_FILE", "sql/shortage_components.sql")
+)
+SHORTAGE_LOOKAHEAD_DAYS = int(os.getenv("SHORTAGE_LOOKAHEAD_DAYS", "10"))
+SHORTAGE_PRODUCT_CODES = [
+    code.strip().upper()
+    for code in os.getenv(
+        "SHORTAGE_PRODUCT_CODES",
+        "FG-COMP,FG-STOCK,FG-APPAREL,COMPONENT,FG-BASE,FG-RING,FG-BARREL,FG-MUZZLE",
+    ).split(",")
+    if code.strip()
+]
+SHORTAGE_CACHE_MINUTES = float(os.getenv("SHORTAGE_CACHE_MINUTES", "5"))
+SHORTAGE_PRODUCT_CODES_TOKEN = "__SHORTAGE_PRODUCT_CODES__"
 GUNS_DEFAULT_LOOKAHEAD_DAYS = 10
 GUNS_MAX_LOOKAHEAD_DAYS = 365
 GUNS_BASE_EXCLUDED_CUSTOMERS = ("CA MARK",)
@@ -350,6 +381,22 @@ def initialize_db() -> None:
                 event_timestamp TEXT NOT NULL,
                 source_run_id INTEGER NOT NULL,
                 query_type TEXT NOT NULL
+            )
+            """
+        )
+        # One picklist plan per (day, query type) for shipping reconciliation.
+        # The runs table only keeps the last MAX_RUNS runs, so recon gets its
+        # own copy — the FIRST successful run of the day is that day's plan.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS plan_snapshots (
+                plan_date TEXT NOT NULL,
+                query_type TEXT NOT NULL,
+                run_id INTEGER NOT NULL,
+                run_timestamp TEXT NOT NULL,
+                rows_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (plan_date, query_type)
             )
             """
         )
@@ -945,6 +992,104 @@ def save_run(
         return run_id
 
 
+def plan_date_for_run_timestamp(run_timestamp: datetime) -> str:
+    """Calendar day (display timezone) a picklist run belongs to."""
+    if run_timestamp.tzinfo is None:
+        run_timestamp = run_timestamp.replace(tzinfo=timezone.utc)
+    return run_timestamp.astimezone(resolve_timezone()).date().isoformat()
+
+
+def prune_plan_snapshots(conn: sqlite3.Connection) -> None:
+    cutoff = (
+        datetime.now(timezone.utc).astimezone(resolve_timezone()).date()
+        - timedelta(days=PLAN_SNAPSHOT_RETENTION_DAYS)
+    ).isoformat()
+    conn.execute("DELETE FROM plan_snapshots WHERE plan_date < ?", (cutoff,))
+
+
+def save_plan_snapshot(
+    run_id: int,
+    query_type: str,
+    run_timestamp: datetime,
+    rows: list[dict],
+) -> None:
+    """Keep the day's plan for reconciliation.
+
+    INSERT OR IGNORE: the first successful run of the day is the plan — later
+    re-runs shrink as orders ship, so overwriting would hide the real target.
+    """
+    plan_date = plan_date_for_run_timestamp(run_timestamp)
+    with get_sqlite_conn() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO plan_snapshots
+                (plan_date, query_type, run_id, run_timestamp, rows_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                plan_date,
+                query_type,
+                run_id,
+                run_timestamp.isoformat(),
+                json.dumps(rows, default=str),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        prune_plan_snapshots(conn)
+
+
+def backfill_plan_snapshots() -> None:
+    """Seed plan_snapshots from whatever runs survive in the runs table.
+
+    Makes reconciliation work immediately after this feature ships instead of
+    only for runs that happen after the upgrade.
+    """
+    with get_sqlite_conn() as conn:
+        runs = conn.execute(
+            "SELECT id, run_timestamp, query_type FROM runs WHERE status = 'success' ORDER BY id"
+        ).fetchall()
+    for run in runs:
+        try:
+            run_timestamp = parse_run_timestamp(run["run_timestamp"])
+        except ValueError:
+            continue
+        save_plan_snapshot(
+            run_id=run["id"],
+            query_type=run["query_type"],
+            run_timestamp=run_timestamp,
+            rows=get_run_rows(run["id"]),
+        )
+
+
+def get_plan_snapshots(plan_date: str) -> dict[str, dict]:
+    """{query_type: {run_id, run_timestamp, rows}} for one plan date."""
+    with get_sqlite_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM plan_snapshots WHERE plan_date = ?", (plan_date,)
+        ).fetchall()
+    plans: dict[str, dict] = {}
+    for row in rows:
+        try:
+            parsed_rows = json.loads(row["rows_json"])
+        except (TypeError, json.JSONDecodeError):
+            parsed_rows = []
+        plans[row["query_type"]] = {
+            "run_id": row["run_id"],
+            "run_timestamp": row["run_timestamp"],
+            "rows": parsed_rows,
+        }
+    return plans
+
+
+def list_plan_dates(limit: int = 45) -> list[str]:
+    with get_sqlite_conn() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT plan_date FROM plan_snapshots ORDER BY plan_date DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [row["plan_date"] for row in rows]
+
+
 def record_reporting_event(
     source_run_id: int,
     query_type: str,
@@ -1363,6 +1508,15 @@ def _execute_picklist_run_core(
             query_type=query_type,
             run_timestamp=run_timestamp,
         )
+        try:
+            save_plan_snapshot(
+                run_id=run_id,
+                query_type=query_type,
+                run_timestamp=run_timestamp,
+                rows=df.to_dict(orient="records"),
+            )
+        except Exception as exc:  # noqa: BLE001 — recon snapshot must never fail the run
+            logger.exception("Failed to save plan snapshot for run %s: %s", run_id, exc)
         export_path = generate_export(
             df=df,
             run_id=run_id,
@@ -1385,6 +1539,23 @@ def _execute_picklist_run_core(
                 f" Counted toward reporting metrics "
                 f"({ESTIMATED_MINUTES_SAVED_PER_RUN} minutes saved estimated)."
             )
+        if query_type == "components":
+            # The picklist only shows what CAN pick — put the shortfall note
+            # in the same notification so transfers get requested while the
+            # day is young. Never let this extra ERP call fail the run.
+            try:
+                shortage_payload = build_shortage_payload()
+                shortage_summary = shortage_payload.get("summary")
+                if not shortage_payload.get("error") and shortage_summary and (
+                    shortage_summary["transfer_units"] or shortage_summary["stockout_units"]
+                ):
+                    message += (
+                        f" Shortage check: {shortage_summary['transfer_units']} open units "
+                        f"need a transfer from MAIN and {shortage_summary['stockout_units']} "
+                        f"have no stock anywhere — move list on the Shipping page."
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Shortage note for run notification failed: %s", exc)
         logger.info(message)
         try:
             send_telegram_notification(message)
@@ -1754,6 +1925,8 @@ def check_audit_universe_sql() -> None:
 initialize_db()
 migrate_sensitive_settings_encryption()
 audit_store.initialize()
+pick_store.initialize(get_sqlite_conn)
+backfill_plan_snapshots()
 check_audit_universe_sql()
 start_scheduler()
 
@@ -2480,13 +2653,15 @@ def _dwell_age_display(hours: float) -> str:
     return f"{hours:.0f} h"
 
 
-def fetch_dwell_df() -> pd.DataFrame:
-    """Dwell rows for the watched locations, cached briefly (ERP query ~5s).
+def _fetch_dwell_raw() -> pd.DataFrame:
+    """Dwell rows for the whole serialized universe, cached briefly (ERP ~5s).
 
-    dwell_hours is computed against the ERP server's own clock (ERP_NOW),
-    which is on the same clock as CREATE_DATE — the app host's timezone
-    never enters into it. Ages drift up to the cache TTL; the page shows
-    the snapshot time.
+    The dwell SQL returns every SHIPPING location plus the MAIN cage bins;
+    both the audit dwell metric and shipping stage aging filter this one
+    cached snapshot. dwell_hours is computed against the ERP server's own
+    clock (ERP_NOW), which is on the same clock as CREATE_DATE — the app
+    host's timezone never enters into it. Ages drift up to the cache TTL;
+    the pages show the snapshot time.
     """
     cached_at = _dwell_cache["fetched_at"]
     if (
@@ -2496,13 +2671,6 @@ def fetch_dwell_df() -> pd.DataFrame:
     ):
         return _dwell_cache["df"]
     df = run_audit_sql_file(AUDIT_DWELL_QUERY_FILE, "serialized dwell-time query")
-    watched = {f"{wh}/{loc}" for wh, loc in AUDIT_DWELL_LOCATIONS}
-    keys = (
-        df["WAREHOUSE_ID"].astype(str).str.upper()
-        + "/"
-        + df["LOCATION_ID"].astype(str).str.upper()
-    )
-    df = df[keys.isin(watched)].copy()
     df["ARRIVED_AT"] = pd.to_datetime(df["ARRIVED_AT"])
     df["ERP_NOW"] = pd.to_datetime(df["ERP_NOW"])
     df["dwell_hours"] = (
@@ -2511,6 +2679,18 @@ def fetch_dwell_df() -> pd.DataFrame:
     _dwell_cache["df"] = df
     _dwell_cache["fetched_at"] = datetime.now()
     return df
+
+
+def fetch_dwell_df() -> pd.DataFrame:
+    """Dwell rows filtered to the audit-watched staging locations."""
+    df = _fetch_dwell_raw()
+    watched = {f"{wh}/{loc}" for wh, loc in AUDIT_DWELL_LOCATIONS}
+    keys = (
+        df["WAREHOUSE_ID"].astype(str).str.upper()
+        + "/"
+        + df["LOCATION_ID"].astype(str).str.upper()
+    )
+    return df[keys.isin(watched)].copy()
 
 
 def build_dwell_metrics() -> dict[str, Any]:
@@ -2762,6 +2942,580 @@ def api_serial_history():
 
     payload = serial_history.build_serial_history(serial, trace_df, txns_df, shipments_df)
     return jsonify(payload), 200
+
+
+# ---------------------------------------------------------------------------
+# Shipping ops: end-of-day reconciliation + stage aging + pick confirm
+# ---------------------------------------------------------------------------
+def build_stage_aging() -> dict[str, Any]:
+    """How long inventory has been sitting in the SHIPPING stage bins.
+
+    Same live-ERP snapshot the audit dwell metric uses (one cached query),
+    but scoped to every SHIPPING location whose ID contains
+    STAGE_LOCATION_TERM — staged goods are sold and boxed, so anything aging
+    here is an order that has not actually left.
+    """
+    target = STAGE_AGING_TARGET_HOURS
+    result: dict[str, Any] = {
+        "target_hours": target,
+        "term": STAGE_LOCATION_TERM,
+        "error": None,
+    }
+    try:
+        raw = _fetch_dwell_raw()
+    except Exception as exc:  # ERP down/misconfigured — degrade, don't 500
+        logger.exception("Stage aging query failed")
+        result["error"] = str(exc)
+        return result
+
+    mask = (
+        raw["WAREHOUSE_ID"].astype(str).str.upper().eq("SHIPPING")
+        & raw["LOCATION_ID"].astype(str).str.upper().str.contains(
+            STAGE_LOCATION_TERM, regex=False
+        )
+    )
+    df = raw[mask].copy()
+    result["as_of"] = (
+        raw["ERP_NOW"].max().to_pydatetime() if len(raw) else datetime.now()
+    )
+
+    total = int(len(df))
+    over = df[df["dwell_hours"] > target].sort_values("ARRIVED_AT")
+    over_count = int(len(over))
+    result["summary"] = {
+        "on_hand": total,
+        "within_target": total - over_count,
+        "over_target": over_count,
+        "clearance_pct": round(100.0 * (total - over_count) / total, 1) if total else None,
+        "median_dwell_hours": round(float(df["dwell_hours"].median()), 1) if total else None,
+        "oldest_dwell_hours": round(float(df["dwell_hours"].max()), 1) if total else None,
+    }
+
+    by_location = []
+    if total:
+        for location_id, sub in df.groupby(df["LOCATION_ID"].astype(str).str.upper()):
+            loc_over = int((sub["dwell_hours"] > target).sum())
+            oldest_hours = round(float(sub["dwell_hours"].max()), 1)
+            by_location.append(
+                {
+                    "location": f"SHIPPING/{location_id}",
+                    "on_hand": int(len(sub)),
+                    "over_target": loc_over,
+                    "oldest_dwell_hours": oldest_hours,
+                    "oldest_display": _dwell_age_display(oldest_hours),
+                }
+            )
+        by_location.sort(key=lambda row: row["location"])
+    result["by_location"] = by_location
+
+    result["aged_serials"] = [
+        {
+            "serial": row["SERIAL_NO"],
+            "part_id": row["PART_ID"],
+            "part_description": row["PART_DESCRIPTION"],
+            "location": f"{row['WAREHOUSE_ID']}/{row['LOCATION_ID']}",
+            "arrived_at": row["ARRIVED_AT"].to_pydatetime(),
+            "arrived_display": row["ARRIVED_AT"].strftime("%Y-%m-%d %H:%M"),
+            "dwell_hours": round(float(row["dwell_hours"]), 1),
+            "age_display": _dwell_age_display(float(row["dwell_hours"])),
+        }
+        for _, row in over.iterrows()
+    ]
+    return result
+
+
+_shortage_cache: dict[str, Any] = {"payload": None, "fetched_at": None}
+
+
+def _fetch_shortage_rows() -> list[dict]:
+    """Line-level shortage demand from the ERP.
+
+    The product-code list is rendered into the SQL as quoted literals (same
+    token pattern as the guns excluded-customers list) because an IN-list
+    cannot be a bind parameter; the lookahead is a normal bound value.
+    """
+    if not SHORTAGE_QUERY_FILE.exists():
+        raise FileNotFoundError(f"Shortage query file not found at: {SHORTAGE_QUERY_FILE}")
+    template = SHORTAGE_QUERY_FILE.read_text(encoding="utf-8")
+    product_code_rows = "\n    UNION ALL\n    ".join(
+        f"SELECT {sql_quote_literal(code)} AS PRODUCT_CODE"
+        for code in SHORTAGE_PRODUCT_CODES
+    )
+    query = template.replace(SHORTAGE_PRODUCT_CODES_TOKEN, product_code_rows)
+    engine = get_erp_engine()
+    logger.info("Running component shortage query")
+    with engine.connect() as connection:
+        df = pd.read_sql_query(
+            text(query), connection, params={"lookahead_days": SHORTAGE_LOOKAHEAD_DAYS}
+        )
+        logger.info("Component shortage query returned %d rows.", len(df.index))
+    return df.to_dict(orient="records")
+
+
+def build_shortage_payload(force: bool = False) -> dict[str, Any]:
+    """Cached shortage payload; degrades to an error message when ERP is down."""
+    cached_at = _shortage_cache["fetched_at"]
+    if (
+        not force
+        and _shortage_cache["payload"] is not None
+        and cached_at is not None
+        and datetime.now() - cached_at < timedelta(minutes=SHORTAGE_CACHE_MINUTES)
+    ):
+        return _shortage_cache["payload"]
+    try:
+        rows = _fetch_shortage_rows()
+    except Exception as exc:  # noqa: BLE001 — degrade like the other ERP panels
+        logger.exception("Component shortage query failed")
+        return {
+            "error": str(exc),
+            "summary": None,
+            "lines": [],
+            "transfers": [],
+            "lookahead_days": SHORTAGE_LOOKAHEAD_DAYS,
+        }
+    payload = shortage.build_shortage(rows, SHORTAGE_LOOKAHEAD_DAYS)
+    payload["error"] = None
+    payload["lookahead_days"] = SHORTAGE_LOOKAHEAD_DAYS
+    payload["as_of"] = datetime.now(timezone.utc)
+    _shortage_cache["payload"] = payload
+    _shortage_cache["fetched_at"] = datetime.now()
+    return payload
+
+
+def _today_local() -> date:
+    return datetime.now(timezone.utc).astimezone(resolve_timezone()).date()
+
+
+def _resolve_recon_date(requested: Optional[str], available: list[str]) -> Optional[str]:
+    """Requested date if we have a plan for it; else the newest date before
+    today (the 'how did yesterday go' default); else the newest we have."""
+    if requested:
+        requested = requested.strip()
+        if requested in available:
+            return requested
+        return requested  # let the caller report "no plan for this date"
+    today_iso = _today_local().isoformat()
+    for plan_date in available:  # newest first
+        if plan_date < today_iso:
+            return plan_date
+    return available[0] if available else None
+
+
+def build_recon_payload(requested_date: Optional[str]) -> dict[str, Any]:
+    """Reconciliation payload for the shipping page / API."""
+    available = list_plan_dates()
+    plan_date_iso = _resolve_recon_date(requested_date, available)
+    payload: dict[str, Any] = {
+        "available_dates": available,
+        "plan_date": plan_date_iso,
+        "error": None,
+    }
+    if not plan_date_iso:
+        payload["error"] = "no_plans"
+        payload["message"] = (
+            "No picklist plans have been captured yet. Reconciliation starts "
+            "working after the next successful picklist run."
+        )
+        return payload
+
+    try:
+        plan_day = date.fromisoformat(plan_date_iso)
+    except ValueError:
+        payload["error"] = "bad_date"
+        payload["message"] = f"'{plan_date_iso}' is not a valid date."
+        return payload
+
+    plans = get_plan_snapshots(plan_date_iso)
+    if not plans:
+        payload["error"] = "no_plan_for_date"
+        payload["message"] = f"No picklist plan was captured on {plan_date_iso}."
+        return payload
+
+    end_day = _today_local() + timedelta(days=1)
+    try:
+        shipments_df = run_erp_query_file(
+            RECON_SHIPMENTS_FILE,
+            {"start_date": plan_date_iso, "end_date": end_day.isoformat()},
+            "shipping reconciliation shipments",
+        )
+    except Exception as exc:  # noqa: BLE001 — degrade like the dwell metric
+        logger.exception("Reconciliation shipments query failed")
+        payload["error"] = "erp_failed"
+        payload["message"] = f"Could not load shipments from the ERP: {exc}"
+        return payload
+
+    result = recon.build_reconciliation(
+        plan_day, plans, shipments_df.to_dict(orient="records")
+    )
+    result.update(payload)
+    for qt, plan in result["plans"].items():
+        plan["run_timestamp_display"] = (
+            format_run_timestamp(plan["run_timestamp"]) if plan.get("run_timestamp") else None
+        )
+    return result
+
+
+@app.get("/shipping")
+@require_trusted_client
+def shipping_page():
+    recon_payload = build_recon_payload(request.args.get("date"))
+    stage = build_stage_aging()
+
+    sessions = pick_store.recent_sessions(limit=10)
+    for row in sessions:
+        row["started_display"] = _audit_dt_display(row.get("started_at"))
+        row["completed_display"] = _audit_dt_display(row.get("completed_at"))
+
+    latest_success_by_type = {}
+    for query_type in QUERY_FILES:
+        summary = get_latest_successful_run_summary(query_type)
+        latest_success_by_type[query_type] = (
+            {
+                "id": summary["id"],
+                "row_count": summary["row_count"],
+                "run_timestamp_display": format_run_timestamp(summary["run_timestamp"]),
+            }
+            if summary
+            else None
+        )
+
+    return render_template(
+        "shipping.html",
+        recon=_audit_json_safe(recon_payload),
+        stage=_audit_json_safe(stage),
+        shortages=_audit_json_safe(build_shortage_payload()),
+        pick_sessions=sessions,
+        latest_success_by_type=latest_success_by_type,
+        query_options=list(QUERY_FILES.keys()),
+        today_iso=_today_local().isoformat(),
+    )
+
+
+@app.get("/api/shipping/shortages")
+@require_trusted_client
+def api_shipping_shortages():
+    force = request.args.get("refresh") == "1"
+    return jsonify(_audit_json_safe(build_shortage_payload(force=force))), 200
+
+
+@app.get("/shipping/shortages/export")
+@require_trusted_client
+def shipping_shortages_export():
+    payload = build_shortage_payload()
+    if payload.get("error"):
+        flash(f"Shortage data is unavailable: {payload['error']}", "error")
+        return redirect(url_for("shipping_page"))
+
+    summary_df = pd.DataFrame(
+        [{"metric": k, "value": v} for k, v in (payload["summary"] or {}).items()]
+    )
+    transfers_df = pd.DataFrame([
+        {
+            "Part": t["part_id"],
+            "Description": t["part_description"],
+            "Product code": t["product_code"],
+            "Qty needed": t["qty_needed"],
+            "Stock locations": t["stock_locations"],
+        }
+        for t in payload["transfers"]
+    ])
+    lines_df = pd.DataFrame([
+        {
+            "Reason": l["reason"],
+            "Past due": "yes" if l["past_due"] else "",
+            "Desired ship": l["desired_ship_date"],
+            "Customer": l.get("customer_name") or l.get("customer_id") or "",
+            "Order": l["cust_order_id"],
+            "Line": l["line_no"],
+            "Part": l["part_id"],
+            "Description": l["part_description"],
+            "Open qty": l["open_qty"],
+            "Will print": l["will_print_qty"],
+            "Short": l["short_qty"],
+            "Coverable by transfer": l["transfer_qty"],
+            "No stock anywhere": l["stockout_qty"],
+            "No ship-to on order": "yes" if l["shipto_missing"] else "",
+            "Stock locations": l["stock_locations"],
+        }
+        for l in payload["lines"]
+    ])
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output) as writer:
+        summary_df.to_excel(writer, index=False, sheet_name="Summary")
+        (transfers_df if not transfers_df.empty else pd.DataFrame(columns=["Part"])).to_excel(
+            writer, index=False, sheet_name="Transfer move list"
+        )
+        (lines_df if not lines_df.empty else pd.DataFrame(columns=["Reason"])).to_excel(
+            writer, index=False, sheet_name="Shortage lines"
+        )
+    output.seek(0)
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=f"component_shortages_{_today_local().isoformat()}.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.get("/api/shipping/recon")
+@require_trusted_client
+def api_shipping_recon():
+    return jsonify(_audit_json_safe(build_recon_payload(request.args.get("date")))), 200
+
+
+@app.get("/shipping/recon/export")
+@require_trusted_client
+def shipping_recon_export():
+    payload = build_recon_payload(request.args.get("date"))
+    if payload.get("error"):
+        flash(payload.get("message") or "Reconciliation data is unavailable.", "error")
+        return redirect(url_for("shipping_page"))
+
+    summary = {k: v for k, v in payload["summary"].items() if k != "by_type"}
+    summary_df = pd.DataFrame([{"metric": k, "value": v} for k, v in summary.items()])
+    lines_df = pd.DataFrame([
+        {
+            "Status": l["status"],
+            "Customer": l.get("customer_name") or l.get("customer_id") or "",
+            "Order": l["cust_order_id"],
+            "Part": l["part_id"],
+            "Picklist": ", ".join(l["types"]),
+            "Locations": ", ".join(l["locations"]),
+            "Planned": l["planned_qty"],
+            "Shipped same day": l["shipped_same_day"],
+            "Shipped late": l["shipped_late"],
+            "Voided qty": l["voided_qty"],
+            "Packlists": ", ".join(str(p["packlist_id"]) for p in l["packlists"]),
+            "Tracking": ", ".join(l["tracking"]),
+        }
+        for l in payload["lines"]
+    ])
+    unplanned_df = pd.DataFrame([
+        {
+            "Customer": u.get("customer_name") or u.get("customer_id") or "",
+            "Order": u["cust_order_id"],
+            "Part": u.get("part_id") or "",
+            "Qty": u["qty"],
+            "Packlists": ", ".join(str(p["packlist_id"]) for p in u["packlists"]),
+            "Tracking": ", ".join(u["tracking"]),
+        }
+        for u in payload["unplanned"]
+    ])
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output) as writer:
+        summary_df.to_excel(writer, index=False, sheet_name="Summary")
+        (lines_df if not lines_df.empty else pd.DataFrame(columns=["Status"])).to_excel(
+            writer, index=False, sheet_name="Planned lines"
+        )
+        (unplanned_df if not unplanned_df.empty else pd.DataFrame(columns=["Order"])).to_excel(
+            writer, index=False, sheet_name="Unplanned"
+        )
+    output.seek(0)
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=f"ship_recon_{payload['plan_date']}.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pick confirm
+# ---------------------------------------------------------------------------
+@app.post("/pick/session/start")
+@require_trusted_client
+@require_csrf
+def pick_session_start():
+    query_type = get_query_type(request.form.get("query_type"))
+    operator = (request.form.get("operator") or "").strip() or None
+
+    run, rows = get_latest_successful_run(query_type=query_type)
+    if not run:
+        flash(
+            f"No successful {query_type} picklist run to pick against. Run the picklist first.",
+            "error",
+        )
+        return redirect(url_for("shipping_page"))
+    if not rows:
+        flash(
+            f"The latest {query_type} run has no rows — nothing to pick.",
+            "error",
+        )
+        return redirect(url_for("shipping_page"))
+
+    session_id = pick_store.start_session(
+        run_id=run["id"],
+        query_type=query_type,
+        plan_rows=rows,
+        operator=operator,
+    )
+    logger.info(
+        "Started pick session #%s from %s run %s (%d rows).",
+        session_id,
+        query_type,
+        run["id"],
+        len(rows),
+    )
+    return redirect(url_for("pick_session_page", session_id=session_id))
+
+
+@app.get("/pick/session/<int:session_id>")
+@require_trusted_client
+def pick_session_page(session_id: int):
+    session_row = pick_store.get_session(session_id)
+    if not session_row:
+        flash(f"Pick session #{session_id} was not found.", "error")
+        return redirect(url_for("shipping_page"))
+
+    lines = pick_store.get_lines(session_id)
+    scans = pick_store.get_scans(session_id, limit=100)
+    for scan in scans:
+        scan["scanned_display"] = _audit_dt_display(scan.get("scanned_at"))
+
+    return render_template(
+        "pick_session.html",
+        session=session_row,
+        started_display=_audit_dt_display(session_row.get("started_at")),
+        completed_display=_audit_dt_display(session_row.get("completed_at")),
+        lines=lines,
+        scans=scans,
+        counts=pick_store.compute_counts(session_id),
+    )
+
+
+def _resolve_pick_candidates(scan: str, lines: list[dict]) -> tuple[Optional[str], list[dict], bool]:
+    """(serial, part_candidates, erp_failed) for one scanned value.
+
+    A scan matching a picklist part ID directly is a part-barcode pick
+    (components); anything else is treated as a serial and resolved in the
+    ERP to the part(s) it represents plus where it currently sits.
+    """
+    line_parts = {str(l["part_id"] or "").strip().upper() for l in lines}
+    if scan in line_parts:
+        return None, [{"part_id": scan, "locations": []}], False
+
+    try:
+        df = run_erp_query_file(
+            PICK_SERIAL_LOOKUP_FILE, {"serial": scan}, "pick serial lookup"
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Pick serial lookup failed for %s", scan)
+        return scan, [], True
+    if df.empty:
+        return scan, [], False
+
+    rows = df.to_dict(orient="records")
+    on_hand = [r for r in rows if r.get("NET_QTY") is not None and pd.notna(r.get("NET_QTY")) and r["NET_QTY"] > 0]
+    pool = on_hand or rows
+    by_part: dict[str, list[str]] = {}
+    for row in pool:
+        part = str(row.get("PART_ID") or "").strip()
+        if not part:
+            continue
+        locations = by_part.setdefault(part, [])
+        loc = str(row.get("LOCATION_ID") or "").strip()
+        if loc and loc not in locations:
+            locations.append(loc)
+    candidates = [{"part_id": part, "locations": locs} for part, locs in by_part.items()]
+    return scan, candidates, False
+
+
+@app.post("/api/pick/session/<int:session_id>/scan")
+@require_trusted_client
+@require_csrf
+def api_pick_scan(session_id: int):
+    session_row = pick_store.get_session(session_id)
+    if not session_row:
+        return jsonify({"error": "not_found", "message": "Pick session not found."}), 404
+    if session_row.get("status") == "completed":
+        return jsonify({"error": "completed", "message": "This pick session is already completed."}), 409
+
+    payload = request.get_json(silent=True) or {}
+    scan = (payload.get("scan") or "").strip().upper()
+    target_order = (payload.get("order") or "").strip().upper() or None
+    operator = (payload.get("operator") or "").strip() or None
+    if not scan:
+        return jsonify({"error": "invalid", "message": "A scanned value is required."}), 400
+    if len(scan) > SERIAL_MAX_LENGTH:
+        return jsonify({"error": "invalid", "message": "Scanned value is too long."}), 400
+
+    lines = pick_store.get_lines(session_id)
+    serial, candidates, erp_failed = _resolve_pick_candidates(scan, lines)
+    if erp_failed:
+        return (
+            jsonify(
+                {
+                    "error": "erp_failed",
+                    "message": "The ERP serial lookup failed — scan not recorded. Try again.",
+                }
+            ),
+            502,
+        )
+
+    try:
+        result = pick_store.record_scan(
+            session_id,
+            scan,
+            target_order=target_order,
+            serial=serial,
+            part_candidates=candidates,
+            operator=operator,
+            unknown=(serial is not None and not candidates),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to record pick scan: %s", exc)
+        return jsonify({"error": "scan_failed", "message": str(exc)}), 500
+
+    result["scan"] = scan
+    return jsonify(result), 200
+
+
+@app.post("/api/pick/session/<int:session_id>/complete")
+@require_trusted_client
+@require_csrf
+def api_pick_complete(session_id: int):
+    session_row = pick_store.get_session(session_id)
+    if not session_row:
+        return jsonify({"error": "not_found", "message": "Pick session not found."}), 404
+
+    completed = pick_store.complete_session(session_id)
+    logger.info("Completed pick session #%s.", session_id)
+    return jsonify(
+        {
+            "status": "completed",
+            "counts": completed.get("counts"),
+            "redirect": url_for("pick_session_page", session_id=session_id),
+        }
+    ), 200
+
+
+@app.get("/pick/session/<int:session_id>/export")
+@require_trusted_client
+def pick_session_export(session_id: int):
+    session_row = pick_store.get_session(session_id)
+    if not session_row:
+        flash(f"Pick session #{session_id} was not found.", "error")
+        return redirect(url_for("shipping_page"))
+
+    lines_df = pd.DataFrame(pick_store.get_lines(session_id))
+    scans_df = pd.DataFrame(pick_store.get_scans(session_id, limit=10000))
+    output = io.BytesIO()
+    with pd.ExcelWriter(output) as writer:
+        (lines_df if not lines_df.empty else pd.DataFrame(columns=["part_id"])).to_excel(
+            writer, index=False, sheet_name="Lines"
+        )
+        (scans_df if not scans_df.empty else pd.DataFrame(columns=["scan_value"])).to_excel(
+            writer, index=False, sheet_name="Scans"
+        )
+    output.seek(0)
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=f"pick_session{session_id}_{session_row['query_type']}.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
 def parse_recipient_addresses(raw_value: str) -> list[str]:

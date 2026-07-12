@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Shipping Ops</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <main class="page-shell">
+      {% set active_nav = 'shipping' %}
+      {% include '_topnav.html' %}
+
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          {% for category, message in messages %}
+          <div class="flash {{ category }}">{{ message }}</div>
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
+
+      <section class="hero card">
+        <div class="hero-top">
+          <div>
+            <p class="eyebrow">Shipping Ops</p>
+            <h1>Did everything ship?</h1>
+          </div>
+          {% if not recon.error %}
+          <a class="button tertiary" href="{{ url_for('shipping_recon_export', date=recon.plan_date) }}" data-no-loading>Export recon</a>
+          {% endif %}
+        </div>
+        <p class="hero-copy">
+          Each morning's picklist is the plan; the packlists are what actually left.
+          This page lines them up, watches the stage bins for stuck shipments, and
+          runs pick-confirm scans against the current picklist.
+        </p>
+        <div class="analytics-toolbar">
+          <span class="analytics-toolbar-label">Plan date:</span>
+          {% if recon.available_dates %}
+          {% for d in recon.available_dates[:10] %}
+          <a class="analytics-window {{ 'active' if recon.plan_date == d }}"
+             href="{{ url_for('shipping_page', date=d) }}">{{ d }}</a>
+          {% endfor %}
+          {% else %}
+          <span class="helper-text">No captured plans yet.</span>
+          {% endif %}
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>End-of-day reconciliation {% if recon.plan_date %}&mdash; {{ recon.plan_date }}{% endif %}</h2>
+        {% if recon.error %}
+        <p class="empty-state">{{ recon.message }}</p>
+        {% else %}
+        {% set rs = recon.summary %}
+        <p class="helper-text">
+          {% for qt, plan in recon.plans.items() %}
+          <span class="pill run-type {{ qt }}">{{ qt }}</span> plan from run #{{ plan.run_id }}
+          ({{ plan.row_count }} rows{% if plan.run_timestamp_display %}, {{ plan.run_timestamp_display }}{% endif %}){{ ' · ' if not loop.last }}
+          {% endfor %}
+          {% if not recon.plans %}No plan captured for this date.{% endif %}
+          &mdash; shipments checked through today.
+        </p>
+
+        <div class="audit-tiles analytics-tiles">
+          <div class="audit-tile {{ 'tile-verified' if rs.fill_rate_pct is not none and rs.fill_rate_pct >= 100 else ('tile-misplaced' if rs.fill_rate_pct is not none else '') }}">
+            <span class="audit-tile-num">{{ '%.1f%%'|format(rs.fill_rate_pct) if rs.fill_rate_pct is not none else '&mdash;'|safe }}</span>
+            <span class="audit-tile-label">Same-day fill</span>
+            <span class="audit-tile-sub">{{ rs.shipped_units|int }}/{{ rs.planned_units|int }} planned units shipped</span>
+          </div>
+          <div class="audit-tile tile-verified">
+            <span class="audit-tile-num">{{ rs.lines_shipped }}</span>
+            <span class="audit-tile-label">Lines shipped</span>
+            <span class="audit-tile-sub">of {{ rs.planned_lines }} planned</span>
+          </div>
+          <div class="audit-tile {{ 'tile-misplaced' if rs.lines_partial else '' }}">
+            <span class="audit-tile-num">{{ rs.lines_partial }}</span>
+            <span class="audit-tile-label">Partial</span>
+            <span class="audit-tile-sub">shipped short</span>
+          </div>
+          <div class="audit-tile {{ 'tile-pending' if rs.lines_late else '' }}">
+            <span class="audit-tile-num">{{ rs.lines_late }}</span>
+            <span class="audit-tile-label">Shipped late</span>
+            <span class="audit-tile-sub">{{ rs.late_units|int }} units after plan date</span>
+          </div>
+          <div class="audit-tile {{ 'tile-missing' if rs.lines_not_shipped else 'tile-verified' }}">
+            <span class="audit-tile-num">{{ rs.lines_not_shipped }}</span>
+            <span class="audit-tile-label">Never shipped</span>
+            <span class="audit-tile-sub">need follow-up</span>
+          </div>
+          <div class="audit-tile {{ 'tile-unexpected' if rs.unplanned_lines else '' }}">
+            <span class="audit-tile-num">{{ rs.unplanned_lines }}</span>
+            <span class="audit-tile-label">Off-plan ships</span>
+            <span class="audit-tile-sub">{{ rs.unplanned_units|int }} units not on picklist</span>
+          </div>
+        </div>
+
+        <div class="table-controls">
+          <h3>Planned lines</h3>
+          <input type="search" data-table-filter placeholder="Filter orders, parts, customers..." aria-label="Filter planned lines" />
+        </div>
+        {% if recon.lines %}
+        <div class="table-wrap">
+          <table data-filterable-table>
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Customer</th>
+                <th>Order</th>
+                <th>Part</th>
+                <th>Picklist</th>
+                <th>Pick from</th>
+                <th>Planned</th>
+                <th>Shipped</th>
+                <th>Packlist / tracking</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for l in recon.lines %}
+              {% set pill = {'shipped': 'verified', 'partial': 'misplaced', 'late': 'pending', 'not_shipped': 'missing'}[l.status] %}
+              <tr>
+                <td><span class="pill audit-status status-{{ pill }}">{{ l.status|replace('_', ' ') }}</span></td>
+                <td>{{ l.customer_name or l.customer_id or '' }}</td>
+                <td class="mono">{{ l.cust_order_id }}</td>
+                <td class="mono">{{ l.part_id }}{% if l.product_code %} <span class="helper-text">{{ l.product_code }}</span>{% endif %}</td>
+                <td>{{ l.types|join(', ') }}</td>
+                <td>{{ l.locations|join(', ') }}</td>
+                <td>{{ l.planned_qty|int }}</td>
+                <td>
+                  {{ l.shipped_same_day|int }}
+                  {%- if l.shipped_late %} <span class="helper-text">(+{{ l.shipped_late|int }} late)</span>{% endif %}
+                  {%- if l.voided_qty %} <span class="helper-text">({{ l.voided_qty|int }} voided)</span>{% endif %}
+                  {%- if l.over_shipped %} <span class="helper-text">(over by {{ l.over_shipped|int }})</span>{% endif %}
+                </td>
+                <td>
+                  {% for p in l.packlists %}{{ p.packlist_id }}{% if p.late %} ({{ p.shipped_date }}){% endif %}{% if p.voided %} (voided){% endif %}{{ ', ' if not loop.last }}{% endfor %}
+                  {% if l.tracking %}<br /><span class="helper-text">{{ l.tracking|join(', ') }}</span>{% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <p class="empty-state">The plan for this date had no lines.</p>
+        {% endif %}
+
+        <h3>Shipped but not on the picklist</h3>
+        <p class="helper-text">Left the building on {{ recon.plan_date }} without being on that morning's plan &mdash; usually international, RMA replacements, or manual ships.</p>
+        {% if recon.unplanned %}
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Customer</th><th>Order</th><th>Part</th><th>Qty</th><th>Packlist / tracking</th></tr>
+            </thead>
+            <tbody>
+              {% for u in recon.unplanned %}
+              <tr>
+                <td>{{ u.customer_name or u.customer_id or '' }}</td>
+                <td class="mono">{{ u.cust_order_id }}</td>
+                <td class="mono">{{ u.part_id or '' }}</td>
+                <td>{{ u.qty|int }}</td>
+                <td>
+                  {% for p in u.packlists %}{{ p.packlist_id }}{{ ', ' if not loop.last }}{% endfor %}
+                  {% if u.tracking %}<br /><span class="helper-text">{{ u.tracking|join(', ') }}</span>{% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <p class="empty-state">Nothing shipped off-plan on this date.</p>
+        {% endif %}
+        {% endif %}
+      </section>
+
+      <section class="card">
+        <div class="hero-top">
+          <div>
+            <h2>Component shortages &mdash; next {{ shortages.lookahead_days }} days</h2>
+          </div>
+          {% if not shortages.error %}
+          <a class="button tertiary" href="{{ url_for('shipping_shortages_export') }}" data-no-loading>Export shortages</a>
+          {% endif %}
+        </div>
+        <p class="helper-text">
+          Open component demand the picklist <strong>cannot see</strong>: the picklist only pulls from
+          the DISTRIBUTION bins and rack R11, and silently drops everything it cannot cover from there.
+          This is the remainder, split by why{% if shortages.as_of %} &middot; as of {{ shortages.as_of[:16]|replace('T', ' ') }} UTC{% endif %}.
+        </p>
+        {% if shortages.error %}
+        <p class="empty-state">Shortage data unavailable &mdash; the ERP query failed: {{ shortages.error }}</p>
+        {% else %}
+        {% set sh = shortages.summary %}
+        <div class="audit-tiles analytics-tiles">
+          <div class="audit-tile tile-verified">
+            <span class="audit-tile-num">{{ sh.will_print_units }}</span>
+            <span class="audit-tile-label">Will print</span>
+            <span class="audit-tile-sub">of {{ sh.demand_units }} open units</span>
+          </div>
+          <div class="audit-tile {{ 'tile-missing' if sh.short_units else 'tile-verified' }}">
+            <span class="audit-tile-num">{{ sh.short_units }}</span>
+            <span class="audit-tile-label">Short units</span>
+            <span class="audit-tile-sub">{{ sh.short_lines }} order lines</span>
+          </div>
+          <div class="audit-tile {{ 'tile-misplaced' if sh.transfer_units else '' }}">
+            <span class="audit-tile-num">{{ sh.transfer_units }}</span>
+            <span class="audit-tile-label">Need transfer</span>
+            <span class="audit-tile-sub">stock exists, wrong warehouse</span>
+          </div>
+          <div class="audit-tile {{ 'tile-missing' if sh.stockout_units else '' }}">
+            <span class="audit-tile-num">{{ sh.stockout_units }}</span>
+            <span class="audit-tile-label">True stockout</span>
+            <span class="audit-tile-sub">no stock anywhere</span>
+          </div>
+        </div>
+
+        {% if shortages.transfers %}
+        <h3>Transfer move list</h3>
+        <p class="helper-text">Move these to DISTRIBUTION (or R11) and the waiting orders print on the next picklist. Biggest impact first.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Part</th><th>Description</th><th>Qty to move</th><th>Where it sits now</th></tr>
+            </thead>
+            <tbody>
+              {% for t in shortages.transfers %}
+              <tr>
+                <td class="mono"><strong>{{ t.part_id }}</strong></td>
+                <td>{{ t.part_description or '' }}</td>
+                <td>{{ t.qty_needed }}</td>
+                <td>{{ t.stock_locations or '' }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% endif %}
+
+        <div class="table-controls">
+          <h3>Shortage lines</h3>
+          <input type="search" data-table-filter placeholder="Filter orders, parts, customers..." aria-label="Filter shortage lines" />
+        </div>
+        {% if shortages.lines %}
+        <div class="table-wrap">
+          <table data-filterable-table>
+            <thead>
+              <tr>
+                <th>Why</th>
+                <th>Desired ship</th>
+                <th>Customer</th>
+                <th>Order</th>
+                <th>Part</th>
+                <th>Open</th>
+                <th>Will print</th>
+                <th>Short</th>
+                <th>Stock sits in</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for l in shortages.lines %}
+              {% set pill = {'needs_transfer': 'misplaced', 'partial': 'misplaced', 'stockout': 'missing'}[l.reason] %}
+              <tr>
+                <td>
+                  <span class="pill audit-status status-{{ pill }}">{{ l.reason|replace('_', ' ') }}</span>
+                  {% if l.reason == 'partial' %}<br /><span class="helper-text">{{ l.transfer_qty }} by transfer, {{ l.stockout_qty }} no stock</span>{% endif %}
+                  {% if l.shipto_missing %}<br /><span class="helper-text">no ship-to on order &mdash; fix before it can ship</span>{% endif %}
+                </td>
+                <td>{{ l.desired_ship_date or '' }}{% if l.past_due %} <span class="pill audit-status status-missing">past due</span>{% endif %}</td>
+                <td>{{ l.customer_name or l.customer_id or '' }}</td>
+                <td class="mono">{{ l.cust_order_id }} / {{ l.line_no }}</td>
+                <td class="mono">{{ l.part_id }}{% if l.part_description %} <span class="helper-text">{{ l.part_description }}</span>{% endif %}</td>
+                <td>{{ l.open_qty }}</td>
+                <td>{{ l.will_print_qty }}</td>
+                <td><strong>{{ l.short_qty }}</strong></td>
+                <td>{{ l.stock_locations or '&mdash;'|safe }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <p class="empty-state">No shortages &mdash; every open component line inside the horizon is covered by picklist stock.</p>
+        {% endif %}
+        {% endif %}
+      </section>
+
+      <section class="card">
+        <h2>Stage aging</h2>
+        <p class="helper-text">
+          Serialized units sitting in SHIPPING <strong>{{ stage.term }}</strong> bins &mdash; staged goods
+          should be gone within {{ '%.0f'|format(stage.target_hours) }} hours. Live ERP snapshot{% if stage.as_of %}
+          as of {{ stage.as_of[:16]|replace('T', ' ') }}{% endif %}.
+        </p>
+        {% if stage.error %}
+        <p class="empty-state">Stage data unavailable &mdash; the ERP query failed: {{ stage.error }}</p>
+        {% else %}
+        {% set ss = stage.summary %}
+        <div class="audit-tiles analytics-tiles">
+          <div class="audit-tile {{ 'tile-verified' if ss.over_target == 0 else 'tile-missing' }}">
+            <span class="audit-tile-num">{{ '%.0f%%'|format(ss.clearance_pct) if ss.clearance_pct is not none else '&mdash;'|safe }}</span>
+            <span class="audit-tile-label">Under {{ '%.0f'|format(stage.target_hours) }}h</span>
+            <span class="audit-tile-sub">{{ ss.within_target }}/{{ ss.on_hand }} staged units</span>
+          </div>
+          <div class="audit-tile {{ 'tile-verified' if ss.over_target == 0 else 'tile-missing' }}">
+            <span class="audit-tile-num">{{ ss.over_target }}</span>
+            <span class="audit-tile-label">Stuck in stage</span>
+            <span class="audit-tile-sub">over {{ '%.0f'|format(stage.target_hours) }}h</span>
+          </div>
+          <div class="audit-tile">
+            <span class="audit-tile-num">{{ '%.1f'|format(ss.median_dwell_hours) if ss.median_dwell_hours is not none else '&mdash;'|safe }}</span>
+            <span class="audit-tile-label">Median hours</span>
+            <span class="audit-tile-sub">time staged so far</span>
+          </div>
+          <div class="audit-tile {{ 'tile-missing' if ss.oldest_dwell_hours is not none and ss.oldest_dwell_hours > stage.target_hours else '' }}">
+            <span class="audit-tile-num">{{ '%.1f'|format(ss.oldest_dwell_hours / 24) if ss.oldest_dwell_hours is not none else '&mdash;'|safe }}</span>
+            <span class="audit-tile-label">Oldest (days)</span>
+            <span class="audit-tile-sub">longest-staged unit</span>
+          </div>
+        </div>
+
+        {% if stage.by_location %}
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Stage bin</th><th>Units</th><th>Over {{ '%.0f'|format(stage.target_hours) }}h</th><th>Oldest</th></tr>
+            </thead>
+            <tbody>
+              {% for row in stage.by_location %}
+              <tr>
+                <td><strong>{{ row.location }}</strong></td>
+                <td>{{ row.on_hand }}</td>
+                <td>{{ row.over_target }}</td>
+                <td>{{ row.oldest_display or '&mdash;'|safe }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <p class="empty-state">Nothing is sitting in a stage bin right now.</p>
+        {% endif %}
+
+        {% if stage.aged_serials %}
+        <h3>Staged past {{ '%.0f'|format(stage.target_hours) }}h</h3>
+        <p class="helper-text">Oldest first &mdash; each of these is a sold order that has not left.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Serial</th><th>Part</th><th>Stage bin</th><th>Arrived</th><th>Time staged</th></tr>
+            </thead>
+            <tbody>
+              {% for row in stage.aged_serials %}
+              <tr>
+                <td><a href="{{ url_for('serial_history_page', serial=row.serial) }}"><strong>{{ row.serial }}</strong></a></td>
+                <td>{{ row.part_id or '' }}{% if row.part_description %} &middot; {{ row.part_description }}{% endif %}</td>
+                <td>{{ row.location }}</td>
+                <td>{{ row.arrived_display or '' }}</td>
+                <td><span class="pill audit-status status-missing">{{ row.age_display }}</span></td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% endif %}
+        {% endif %}
+      </section>
+
+      <section class="card">
+        <div class="hero-top">
+          <div>
+            <h2>Pick confirm</h2>
+            <p class="helper-text">
+              Scan the <strong>sales order</strong>, then each item pulled for it &mdash; every scan is
+              verified against that exact order, so the right gun headed to the wrong customer
+              beeps immediately, before it reaches the packing bench.
+            </p>
+          </div>
+        </div>
+        <label class="audit-operator">
+          <span>Operator (optional)</span>
+          <input type="text" id="operator-name" placeholder="Your name or initials" autocomplete="off" />
+        </label>
+        <div class="actions">
+          {% for option in query_options %}
+          <form method="post" action="{{ url_for('pick_session_start') }}" class="pick-start-form" data-loading-message="Starting pick session from the latest {{ option }} run&hellip;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+            <input type="hidden" name="query_type" value="{{ option }}" />
+            <input type="hidden" name="operator" value="" data-operator-field />
+            <button type="submit" class="button {{ 'secondary' if not loop.first }}"
+              {% if not latest_success_by_type[option] %}disabled title="No successful {{ option }} run yet"{% endif %}>
+              Start {{ option }} pick
+              {% if latest_success_by_type[option] %}
+              <span class="helper-text">(run #{{ latest_success_by_type[option].id }}, {{ latest_success_by_type[option].row_count }} rows)</span>
+              {% endif %}
+            </button>
+          </form>
+          {% endfor %}
+        </div>
+
+        {% if pick_sessions %}
+        <h3>Recent pick sessions</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>#</th><th>Picklist</th><th>Status</th><th>Operator</th><th>Started</th><th>Picked</th><th>Problem scans</th><th></th></tr>
+            </thead>
+            <tbody>
+              {% for s in pick_sessions %}
+              <tr>
+                <td><a href="{{ url_for('pick_session_page', session_id=s.id) }}">#{{ s.id }}</a></td>
+                <td><span class="pill run-type {{ s.query_type }}">{{ s.query_type }}</span></td>
+                <td><span class="pill {{ 'success' if s.status == 'completed' else 'running' }}">{{ s.status }}</span></td>
+                <td>{{ s.operator or '' }}</td>
+                <td>{{ s.started_display or '' }}</td>
+                <td>{{ s.picked_units }}/{{ s.planned_units }}</td>
+                <td>{{ s.problem_scans }}</td>
+                <td><a class="button tertiary table-button" href="{{ url_for('pick_session_export', session_id=s.id) }}" data-no-loading>Export</a></td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% endif %}
+      </section>
+    </main>
+
+    <script>
+      // Shared operator name with the audit pages.
+      (function () {
+        var STORAGE_KEY = "audit_operator_name";
+        var input = document.getElementById("operator-name");
+        if (input) {
+          try { input.value = localStorage.getItem(STORAGE_KEY) || ""; } catch (e) {}
+          input.addEventListener("input", function () {
+            try { localStorage.setItem(STORAGE_KEY, input.value.trim()); } catch (e) {}
+          });
+        }
+        document.querySelectorAll(".pick-start-form").forEach(function (form) {
+          form.addEventListener("submit", function () {
+            var field = form.querySelector("[data-operator-field]");
+            if (field && input) field.value = input.value.trim();
+          });
+        });
+      })();
+
+      // Table filter (mirrors dashboard behaviour).
+      document.querySelectorAll("[data-table-filter]").forEach(function (input) {
+        input.addEventListener("input", function () {
+          const term = input.value.trim().toLowerCase();
+          const table = input.closest("section").querySelector("[data-filterable-table]");
+          if (!table) return;
+          table.querySelectorAll("tbody tr").forEach(function (tr) {
+            tr.hidden = term && tr.textContent.toLowerCase().indexOf(term) === -1;
+          });
+        });
+      });
+    </script>
+  </body>
+</html>

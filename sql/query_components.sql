@@ -63,7 +63,8 @@ DemandBase AS (
       AND (c.DISCOUNT_CODE IS NULL OR c.DISCOUNT_CODE NOT LIKE '%International%')
       AND (c.DISCOUNT_CODE IS NULL OR c.DISCOUNT_CODE NOT LIKE '%Employee%')
       AND (col.ORDER_QTY - col.TOTAL_SHIPPED_QTY) > 0
-      AND co.SHIPTO_ID IS NOT NULL
+      -- NULL ship-to is allowed on purpose: the line prints (Ship To ID blank)
+      -- so shipping notices and fixes the order instead of never seeing it.
 ),
 
 /* 3) Demand filtered to parts with supply + horizon (<= today+10 by desired ship date, includes past due; NULL treated as today)

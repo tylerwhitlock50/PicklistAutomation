@@ -144,6 +144,15 @@
             <a class="audit-cta-btn" href="{{ url_for('audit_dashboard') }}">Open audit &rarr;</a>
           </section>
 
+          <section class="audit-cta" data-transfer-banner hidden>
+            <div class="audit-cta-icon"><span></span></div>
+            <div class="audit-cta-copy">
+              <div class="audit-cta-title">Transfers needed</div>
+              <div class="audit-cta-sub" data-transfer-banner-text>Open orders are waiting on stock in MAIN.</div>
+            </div>
+            <a class="audit-cta-btn" href="{{ url_for('shipping_page') }}">Move list &rarr;</a>
+          </section>
+
           <section class="actions quick-action-row" data-advanced-section>
             <a class="button tertiary" href="{{ url_for('settings') }}">Settings</a>
             <p class="helper-text">Admin only. Use this for connection and notification setup.</p>
@@ -1062,6 +1071,29 @@
             window.location.replace(url.toString());
           }
         }
+      })();
+    </script>
+    <script>
+      // Transfer-needed banner: fetched after load so the dashboard never
+      // waits on the ERP (the shortage payload is served from a short cache).
+      (function () {
+        var banner = document.querySelector("[data-transfer-banner]");
+        if (!banner) return;
+        fetch("/api/shipping/shortages")
+          .then(function (resp) { return resp.ok ? resp.json() : null; })
+          .then(function (data) {
+            if (!data || data.error || !data.summary) return;
+            var units = data.summary.transfer_units || 0;
+            if (units <= 0) return;
+            var parts = (data.transfers || []).length;
+            var text = banner.querySelector("[data-transfer-banner-text]");
+            if (text) {
+              text.textContent = units + " open units are waiting on a MAIN transfer ("
+                + parts + " part" + (parts === 1 ? "" : "s") + ") before they can print on a picklist.";
+            }
+            banner.hidden = false;
+          })
+          .catch(function () { /* banner is best-effort */ });
       })();
     </script>
   </body>
