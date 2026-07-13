@@ -17,7 +17,7 @@
             <p class="eyebrow">Pick Confirm &middot; Session #{{ session.id }}</p>
             <h1>{{ session.query_type|capitalize }} picklist &mdash; run #{{ session.run_id }}</h1>
           </div>
-          <a class="button tertiary" href="{{ url_for('shipping_page') }}">&larr; Shipping ops</a>
+          <a class="button tertiary" href="{{ url_for('shipping_page', view='pick') }}">&larr; Shipping ops</a>
         </div>
         <p class="hero-copy">
           {% if session.status == 'completed' %}

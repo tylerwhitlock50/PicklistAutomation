@@ -8,6 +8,7 @@
   </head>
   <body>
     <main class="page-shell">
+      {% include '_topnav.html' %}
       <section class="hero card">
         <p class="eyebrow">Configuration</p>
         <h1>Runtime Settings</h1>
@@ -93,6 +94,28 @@
             Clear a visible field and save to remove its database override. Password-style fields keep
             their current saved value unless you check the matching clear option.
           </p>
+
+          <section class="settings-section">
+            <div class="settings-section-header">
+              <h2>Features</h2>
+              <p class="helper-text">
+                Uncheck a feature to hide it during rollout. Hidden features are removed from the
+                top navigation and their pages are blocked until re-enabled.
+              </p>
+            </div>
+            <label class="checkbox-row" for="feature_shipping">
+              <input id="feature_shipping" name="feature_shipping" type="checkbox" {% if feature_flags.shipping %}checked{% endif %} />
+              Show Shipping (shipping ops, pick sessions, move list)
+            </label>
+            <label class="checkbox-row" for="feature_audit">
+              <input id="feature_audit" name="feature_audit" type="checkbox" {% if feature_flags.audit %}checked{% endif %} />
+              Show Audit (serialized inventory audit)
+            </label>
+            <label class="checkbox-row" for="feature_serial">
+              <input id="feature_serial" name="feature_serial" type="checkbox" {% if feature_flags.serial %}checked{% endif %} />
+              Show Serial Lookup
+            </label>
+          </section>
 
           <section class="settings-section">
             <div class="settings-section-header">

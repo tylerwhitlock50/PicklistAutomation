@@ -1750,6 +1750,54 @@ def settings_access_granted() -> bool:
     return bool(session.get(SETTINGS_SESSION_KEY, False))
 
 
+# Feature rollout toggles. Disabled features are removed from the top nav and
+# their pages/APIs are blocked, so new modules can be introduced one at a time.
+FEATURE_FLAGS = {
+    "shipping": {
+        "setting_key": "feature_shipping_enabled",
+        "label": "Shipping",
+        "path_prefixes": ("/shipping", "/pick", "/api/shipping", "/api/pick"),
+    },
+    "audit": {
+        "setting_key": "feature_audit_enabled",
+        "label": "Audit",
+        "path_prefixes": ("/audit", "/api/audit"),
+    },
+    "serial": {
+        "setting_key": "feature_serial_enabled",
+        "label": "Serial Lookup",
+        "path_prefixes": ("/serial-history", "/api/serial-history"),
+    },
+}
+
+
+def feature_enabled(feature: str) -> bool:
+    return parse_bool(get_setting(FEATURE_FLAGS[feature]["setting_key"]), default=True)
+
+
+def get_feature_flags() -> dict[str, bool]:
+    return {name: feature_enabled(name) for name in FEATURE_FLAGS}
+
+
+@app.context_processor
+def inject_feature_flags():
+    return {"feature_flags": get_feature_flags()}
+
+
+@app.before_request
+def enforce_feature_flags():
+    for name, definition in FEATURE_FLAGS.items():
+        if not request.path.startswith(definition["path_prefixes"]):
+            continue
+        if feature_enabled(name):
+            return None
+        if request.path.startswith("/api/"):
+            return jsonify({"error": f"{definition['label']} is currently disabled."}), 404
+        flash(f"{definition['label']} is currently turned off in Settings.", "error")
+        return redirect(url_for("index"))
+    return None
+
+
 def validate_optional_chat_id(chat_id: str) -> Optional[str]:
     if chat_id and not re.fullmatch(r"-?\d+", chat_id):
         return "Chat ID must be numeric (optional leading -)."
@@ -2102,6 +2150,13 @@ def settings():
             delete_setting("smtp_recipient")
 
         set_setting("smtp_use_tls", "true" if request.form.get("smtp_use_tls") else "false")
+
+        for feature_name, feature_def in FEATURE_FLAGS.items():
+            set_setting(
+                feature_def["setting_key"],
+                "true" if request.form.get(f"feature_{feature_name}") else "false",
+            )
+
         logger.info("Settings updated by client %s.", request.remote_addr)
         flash("Settings saved. Values entered here override .env values.", "success")
         return redirect(url_for("settings"))
@@ -3155,36 +3210,61 @@ def build_recon_payload(requested_date: Optional[str]) -> dict[str, Any]:
     return result
 
 
+# Tabbed views on /shipping — each one loads only its own (ERP) payload so
+# switching tabs never pays for the other three queries.
+SHIPPING_VIEWS = {
+    "recon": "Reconciliation",
+    "shortages": "Shortages",
+    "stage": "Stage aging",
+    "pick": "Pick confirm",
+}
+
+
 @app.get("/shipping")
 @require_trusted_client
 def shipping_page():
-    recon_payload = build_recon_payload(request.args.get("date"))
-    stage = build_stage_aging()
+    view = request.args.get("view") or "recon"
+    if view not in SHIPPING_VIEWS:
+        view = "recon"
 
-    sessions = pick_store.recent_sessions(limit=10)
-    for row in sessions:
-        row["started_display"] = _audit_dt_display(row.get("started_at"))
-        row["completed_display"] = _audit_dt_display(row.get("completed_at"))
+    recon_payload = None
+    stage = None
+    shortages = None
+    pick_sessions: list[dict[str, Any]] = []
+    latest_success_by_type: dict[str, Any] = {}
 
-    latest_success_by_type = {}
-    for query_type in QUERY_FILES:
-        summary = get_latest_successful_run_summary(query_type)
-        latest_success_by_type[query_type] = (
-            {
-                "id": summary["id"],
-                "row_count": summary["row_count"],
-                "run_timestamp_display": format_run_timestamp(summary["run_timestamp"]),
-            }
-            if summary
-            else None
-        )
+    if view == "recon":
+        recon_payload = _audit_json_safe(build_recon_payload(request.args.get("date")))
+    elif view == "shortages":
+        shortages = _audit_json_safe(build_shortage_payload())
+    elif view == "stage":
+        stage = _audit_json_safe(build_stage_aging())
+    else:
+        pick_sessions = pick_store.recent_sessions(limit=10)
+        for row in pick_sessions:
+            row["started_display"] = _audit_dt_display(row.get("started_at"))
+            row["completed_display"] = _audit_dt_display(row.get("completed_at"))
+
+        for query_type in QUERY_FILES:
+            summary = get_latest_successful_run_summary(query_type)
+            latest_success_by_type[query_type] = (
+                {
+                    "id": summary["id"],
+                    "row_count": summary["row_count"],
+                    "run_timestamp_display": format_run_timestamp(summary["run_timestamp"]),
+                }
+                if summary
+                else None
+            )
 
     return render_template(
         "shipping.html",
-        recon=_audit_json_safe(recon_payload),
-        stage=_audit_json_safe(stage),
-        shortages=_audit_json_safe(build_shortage_payload()),
-        pick_sessions=sessions,
+        view=view,
+        view_options=SHIPPING_VIEWS,
+        recon=recon_payload,
+        stage=stage,
+        shortages=shortages,
+        pick_sessions=pick_sessions,
         latest_success_by_type=latest_success_by_type,
         query_options=list(QUERY_FILES.keys()),
         today_iso=_today_local().isoformat(),
@@ -3204,7 +3284,7 @@ def shipping_shortages_export():
     payload = build_shortage_payload()
     if payload.get("error"):
         flash(f"Shortage data is unavailable: {payload['error']}", "error")
-        return redirect(url_for("shipping_page"))
+        return redirect(url_for("shipping_page", view="shortages"))
 
     summary_df = pd.DataFrame(
         [{"metric": k, "value": v} for k, v in (payload["summary"] or {}).items()]
@@ -3337,13 +3417,13 @@ def pick_session_start():
             f"No successful {query_type} picklist run to pick against. Run the picklist first.",
             "error",
         )
-        return redirect(url_for("shipping_page"))
+        return redirect(url_for("shipping_page", view="pick"))
     if not rows:
         flash(
             f"The latest {query_type} run has no rows — nothing to pick.",
             "error",
         )
-        return redirect(url_for("shipping_page"))
+        return redirect(url_for("shipping_page", view="pick"))
 
     session_id = pick_store.start_session(
         run_id=run["id"],
@@ -3367,7 +3447,7 @@ def pick_session_page(session_id: int):
     session_row = pick_store.get_session(session_id)
     if not session_row:
         flash(f"Pick session #{session_id} was not found.", "error")
-        return redirect(url_for("shipping_page"))
+        return redirect(url_for("shipping_page", view="pick"))
 
     lines = pick_store.get_lines(session_id)
     scans = pick_store.get_scans(session_id, limit=100)
@@ -3497,7 +3577,7 @@ def pick_session_export(session_id: int):
     session_row = pick_store.get_session(session_id)
     if not session_row:
         flash(f"Pick session #{session_id} was not found.", "error")
-        return redirect(url_for("shipping_page"))
+        return redirect(url_for("shipping_page", view="pick"))
 
     lines_df = pd.DataFrame(pick_store.get_lines(session_id))
     scans_df = pd.DataFrame(pick_store.get_scans(session_id, limit=10000))

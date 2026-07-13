@@ -9,10 +9,15 @@
 
   <nav class="topnav-tabs" aria-label="Primary">
     <a class="topnav-tab {% if active_nav == 'dashboard' %}is-active{% endif %}" href="{{ url_for('index') }}">Dashboard</a>
+    {% if feature_flags.shipping %}
     <a class="topnav-tab {% if active_nav == 'shipping' %}is-active{% endif %}" href="{{ url_for('shipping_page') }}" data-loading-message="Loading shipping ops&hellip;">Shipping</a>
+    {% endif %}
+    {% if feature_flags.audit %}
     <a class="topnav-tab {% if active_nav == 'audit' %}is-active{% endif %}" href="{{ url_for('audit_dashboard') }}" data-loading-message="Loading audit dashboard&hellip;">Audit</a>
-    <a class="topnav-tab {% if active_nav == 'scan' %}is-active{% endif %}" href="{{ url_for('audit_dashboard') }}" data-loading-message="Loading audit dashboard&hellip;">Scan</a>
+    {% endif %}
+    {% if feature_flags.serial %}
     <a class="topnav-tab {% if active_nav == 'serial' %}is-active{% endif %}" href="{{ url_for('serial_history_page') }}">Serial Lookup</a>
+    {% endif %}
   </nav>
 
   <div class="topnav-user">

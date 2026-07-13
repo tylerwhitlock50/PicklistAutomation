@@ -135,6 +135,7 @@
           {% endfor %}
           </div>
 
+          {% if feature_flags.audit %}
           <section class="audit-cta">
             <div class="audit-cta-icon"><span></span></div>
             <div class="audit-cta-copy">
@@ -143,15 +144,18 @@
             </div>
             <a class="audit-cta-btn" href="{{ url_for('audit_dashboard') }}">Open audit &rarr;</a>
           </section>
+          {% endif %}
 
+          {% if feature_flags.shipping %}
           <section class="audit-cta" data-transfer-banner hidden>
             <div class="audit-cta-icon"><span></span></div>
             <div class="audit-cta-copy">
               <div class="audit-cta-title">Transfers needed</div>
               <div class="audit-cta-sub" data-transfer-banner-text>Open orders are waiting on stock in MAIN.</div>
             </div>
-            <a class="audit-cta-btn" href="{{ url_for('shipping_page') }}">Move list &rarr;</a>
+            <a class="audit-cta-btn" href="{{ url_for('shipping_page', view='shortages') }}">Move list &rarr;</a>
           </section>
+          {% endif %}
 
           <section class="actions quick-action-row" data-advanced-section>
             <a class="button tertiary" href="{{ url_for('settings') }}">Settings</a>

@@ -5,7 +5,8 @@
       "name": "picklist-dev",
       "runtimeExecutable": "python",
       "runtimeArgs": ["scripts/run_dev_windows.py"],
-      "port": 5000
+      "port": 5000,
+      "autoPort": true
     }
   ]
 }

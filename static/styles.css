@@ -619,6 +619,25 @@ body.density-compact td {
   padding: 6px;
 }
 
+body.density-compact td .helper-text {
+  display: none;
+}
+
+/* Long tables render with rows past the cap hidden; "Show all" (or typing a
+   filter term, which must search every row) reveals them. */
+tr.row-capped {
+  display: none;
+}
+
+table.show-all tr.row-capped:not([hidden]),
+table.is-filtered tr.row-capped:not([hidden]) {
+  display: table-row;
+}
+
+.show-all-button {
+  margin-top: 10px;
+}
+
 .run-form.is-submitting button {
   opacity: 0.65;
 }

@@ -19,36 +19,56 @@
         {% endif %}
       {% endwith %}
 
+      {% set row_cap = 50 %}
+      {% set view_titles = {
+        'recon': 'Did everything ship?',
+        'shortages': 'Component shortages',
+        'stage': 'Stage aging',
+        'pick': 'Pick confirm',
+      } %}
+      {% set view_copy = {
+        'recon': "Each morning's picklist is the plan; the packlists are what actually left. This view lines them up, with shipments checked through today.",
+        'shortages': 'Open component demand the picklist cannot see, split by why.',
+        'stage': 'Serialized units sitting in SHIPPING stage bins — staged goods should be gone within the target window.',
+        'pick': 'Scan-verify every pull against the picklist before it reaches the packing bench.',
+      } %}
+
       <section class="hero card">
         <div class="hero-top">
           <div>
             <p class="eyebrow">Shipping Ops</p>
-            <h1>Did everything ship?</h1>
+            <h1>{{ view_titles[view] }}</h1>
           </div>
-          {% if not recon.error %}
+          {% if view == 'recon' and not recon.error %}
           <a class="button tertiary" href="{{ url_for('shipping_recon_export', date=recon.plan_date) }}" data-no-loading>Export recon</a>
+          {% elif view == 'shortages' and not shortages.error %}
+          <a class="button tertiary" href="{{ url_for('shipping_shortages_export') }}" data-no-loading>Export shortages</a>
           {% endif %}
         </div>
-        <p class="hero-copy">
-          Each morning's picklist is the plan; the packlists are what actually left.
-          This page lines them up, watches the stage bins for stuck shipments, and
-          runs pick-confirm scans against the current picklist.
-        </p>
+        <p class="hero-copy">{{ view_copy[view] }}</p>
+        <nav class="analytics-toolbar" aria-label="Shipping views">
+          {% for key, label in view_options.items() %}
+          <a class="analytics-window {{ 'active' if view == key }}"
+             href="{{ url_for('shipping_page', view=key) }}"
+             data-loading-message="Loading {{ label|lower }}&hellip;">{{ label }}</a>
+          {% endfor %}
+        </nav>
+      </section>
+
+      {% if view == 'recon' %}
+      <section class="card">
+        <h2>End-of-day reconciliation {% if recon.plan_date %}&mdash; {{ recon.plan_date }}{% endif %}</h2>
         <div class="analytics-toolbar">
           <span class="analytics-toolbar-label">Plan date:</span>
           {% if recon.available_dates %}
           {% for d in recon.available_dates[:10] %}
           <a class="analytics-window {{ 'active' if recon.plan_date == d }}"
-             href="{{ url_for('shipping_page', date=d) }}">{{ d }}</a>
+             href="{{ url_for('shipping_page', view='recon', date=d) }}">{{ d }}</a>
           {% endfor %}
           {% else %}
           <span class="helper-text">No captured plans yet.</span>
           {% endif %}
         </div>
-      </section>
-
-      <section class="card">
-        <h2>End-of-day reconciliation {% if recon.plan_date %}&mdash; {{ recon.plan_date }}{% endif %}</h2>
         {% if recon.error %}
         <p class="empty-state">{{ recon.message }}</p>
         {% else %}
@@ -98,10 +118,14 @@
         <div class="table-controls">
           <h3>Planned lines</h3>
           <input type="search" data-table-filter placeholder="Filter orders, parts, customers..." aria-label="Filter planned lines" />
+          <div class="density-toggle">
+            <button type="button" class="button tertiary" data-density-value="comfortable">Comfortable</button>
+            <button type="button" class="button tertiary" data-density-value="compact">Compact</button>
+          </div>
         </div>
         {% if recon.lines %}
         <div class="table-wrap">
-          <table data-filterable-table>
+          <table id="recon-lines-table" data-filterable-table>
             <thead>
               <tr>
                 <th>Status</th>
@@ -118,7 +142,7 @@
             <tbody>
               {% for l in recon.lines %}
               {% set pill = {'shipped': 'verified', 'partial': 'misplaced', 'late': 'pending', 'not_shipped': 'missing'}[l.status] %}
-              <tr>
+              <tr{% if loop.index > row_cap %} class="row-capped"{% endif %}>
                 <td><span class="pill audit-status status-{{ pill }}">{{ l.status|replace('_', ' ') }}</span></td>
                 <td>{{ l.customer_name or l.customer_id or '' }}</td>
                 <td class="mono">{{ l.cust_order_id }}</td>
@@ -141,6 +165,11 @@
             </tbody>
           </table>
         </div>
+        {% if recon.lines|length > row_cap %}
+        <button type="button" class="button tertiary show-all-button" data-show-all="recon-lines-table">
+          Show all {{ recon.lines|length }} rows ({{ recon.lines|length - row_cap }} more)
+        </button>
+        {% endif %}
         {% else %}
         <p class="empty-state">The plan for this date had no lines.</p>
         {% endif %}
@@ -174,16 +203,11 @@
         {% endif %}
         {% endif %}
       </section>
+      {% endif %}
 
+      {% if view == 'shortages' %}
       <section class="card">
-        <div class="hero-top">
-          <div>
-            <h2>Component shortages &mdash; next {{ shortages.lookahead_days }} days</h2>
-          </div>
-          {% if not shortages.error %}
-          <a class="button tertiary" href="{{ url_for('shipping_shortages_export') }}" data-no-loading>Export shortages</a>
-          {% endif %}
-        </div>
+        <h2>Component shortages &mdash; next {{ shortages.lookahead_days }} days</h2>
         <p class="helper-text">
           Open component demand the picklist <strong>cannot see</strong>: the picklist only pulls from
           the DISTRIBUTION bins and rack R11, and silently drops everything it cannot cover from there.
@@ -241,10 +265,14 @@
         <div class="table-controls">
           <h3>Shortage lines</h3>
           <input type="search" data-table-filter placeholder="Filter orders, parts, customers..." aria-label="Filter shortage lines" />
+          <div class="density-toggle">
+            <button type="button" class="button tertiary" data-density-value="comfortable">Comfortable</button>
+            <button type="button" class="button tertiary" data-density-value="compact">Compact</button>
+          </div>
         </div>
         {% if shortages.lines %}
         <div class="table-wrap">
-          <table data-filterable-table>
+          <table id="shortage-lines-table" data-filterable-table>
             <thead>
               <tr>
                 <th>Why</th>
@@ -261,7 +289,7 @@
             <tbody>
               {% for l in shortages.lines %}
               {% set pill = {'needs_transfer': 'misplaced', 'partial': 'misplaced', 'stockout': 'missing'}[l.reason] %}
-              <tr>
+              <tr{% if loop.index > row_cap %} class="row-capped"{% endif %}>
                 <td>
                   <span class="pill audit-status status-{{ pill }}">{{ l.reason|replace('_', ' ') }}</span>
                   {% if l.reason == 'partial' %}<br /><span class="helper-text">{{ l.transfer_qty }} by transfer, {{ l.stockout_qty }} no stock</span>{% endif %}
@@ -280,12 +308,19 @@
             </tbody>
           </table>
         </div>
+        {% if shortages.lines|length > row_cap %}
+        <button type="button" class="button tertiary show-all-button" data-show-all="shortage-lines-table">
+          Show all {{ shortages.lines|length }} rows ({{ shortages.lines|length - row_cap }} more)
+        </button>
+        {% endif %}
         {% else %}
         <p class="empty-state">No shortages &mdash; every open component line inside the horizon is covered by picklist stock.</p>
         {% endif %}
         {% endif %}
       </section>
+      {% endif %}
 
+      {% if view == 'stage' %}
       <section class="card">
         <h2>Stage aging</h2>
         <p class="helper-text">
@@ -346,13 +381,13 @@
         <h3>Staged past {{ '%.0f'|format(stage.target_hours) }}h</h3>
         <p class="helper-text">Oldest first &mdash; each of these is a sold order that has not left.</p>
         <div class="table-wrap">
-          <table>
+          <table id="aged-serials-table">
             <thead>
               <tr><th>Serial</th><th>Part</th><th>Stage bin</th><th>Arrived</th><th>Time staged</th></tr>
             </thead>
             <tbody>
               {% for row in stage.aged_serials %}
-              <tr>
+              <tr{% if loop.index > row_cap %} class="row-capped"{% endif %}>
                 <td><a href="{{ url_for('serial_history_page', serial=row.serial) }}"><strong>{{ row.serial }}</strong></a></td>
                 <td>{{ row.part_id or '' }}{% if row.part_description %} &middot; {{ row.part_description }}{% endif %}</td>
                 <td>{{ row.location }}</td>
@@ -363,10 +398,17 @@
             </tbody>
           </table>
         </div>
+        {% if stage.aged_serials|length > row_cap %}
+        <button type="button" class="button tertiary show-all-button" data-show-all="aged-serials-table">
+          Show all {{ stage.aged_serials|length }} rows ({{ stage.aged_serials|length - row_cap }} more)
+        </button>
+        {% endif %}
         {% endif %}
         {% endif %}
       </section>
+      {% endif %}
 
+      {% if view == 'pick' %}
       <section class="card">
         <div class="hero-top">
           <div>
@@ -424,10 +466,11 @@
         </div>
         {% endif %}
       </section>
+      {% endif %}
     </main>
 
     <script>
-      // Shared operator name with the audit pages.
+      // Shared operator name with the audit pages (pick view only; no-ops elsewhere).
       (function () {
         var STORAGE_KEY = "audit_operator_name";
         var input = document.getElementById("operator-name");
@@ -445,17 +488,52 @@
         });
       })();
 
-      // Table filter (mirrors dashboard behaviour).
+      // Table filter (mirrors dashboard behaviour). Filtering searches every
+      // row, including capped ones, so the table drops its row cap while a
+      // filter term is active.
       document.querySelectorAll("[data-table-filter]").forEach(function (input) {
         input.addEventListener("input", function () {
           const term = input.value.trim().toLowerCase();
           const table = input.closest("section").querySelector("[data-filterable-table]");
           if (!table) return;
+          table.classList.toggle("is-filtered", Boolean(term));
           table.querySelectorAll("tbody tr").forEach(function (tr) {
             tr.hidden = term && tr.textContent.toLowerCase().indexOf(term) === -1;
           });
         });
       });
+
+      // "Show all N rows" — long tables render capped; this reveals the rest.
+      document.querySelectorAll("[data-show-all]").forEach(function (button) {
+        button.addEventListener("click", function () {
+          const table = document.getElementById(button.getAttribute("data-show-all"));
+          if (table) table.classList.add("show-all");
+          button.remove();
+        });
+      });
+
+      // Comfortable/compact density (shared with the dashboard via localStorage).
+      (function () {
+        const STORAGE_KEY = "picklist.tableDensity";
+        function setDensity(density) {
+          const normalized = density === "compact" ? "compact" : "comfortable";
+          document.body.classList.toggle("density-compact", normalized === "compact");
+          try { localStorage.setItem(STORAGE_KEY, normalized); } catch (e) {}
+          document.querySelectorAll("[data-density-value]").forEach(function (button) {
+            const selected = button.getAttribute("data-density-value") === normalized;
+            button.classList.toggle("secondary", selected);
+            button.classList.toggle("tertiary", !selected);
+          });
+        }
+        document.querySelectorAll("[data-density-value]").forEach(function (button) {
+          button.addEventListener("click", function () {
+            setDensity(button.getAttribute("data-density-value") || "comfortable");
+          });
+        });
+        var stored = "comfortable";
+        try { stored = localStorage.getItem(STORAGE_KEY) || "comfortable"; } catch (e) {}
+        setDensity(stored);
+      })();
     </script>
   </body>
 </html>
