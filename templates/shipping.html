@@ -25,12 +25,14 @@
         'shortages': 'Component shortages',
         'stage': 'Stage aging',
         'pick': 'Pick confirm',
+        'verify': 'Packlist verification',
       } %}
       {% set view_copy = {
         'recon': "Each morning's picklist is the plan; the packlists are what actually left. This view lines them up, with shipments checked through today.",
         'shortages': 'Open component demand the picklist cannot see, split by why.',
         'stage': 'Serialized units sitting in SHIPPING stage bins — staged goods should be gone within the target window.',
         'pick': 'Scan-verify every pull against the picklist before it reaches the packing bench.',
+        'verify': 'Enter a packlist, scan the guns in the box, and confirm the physical contents match what the ERP says shipped.',
       } %}
 
       <section class="hero card">
@@ -467,6 +469,169 @@
         {% endif %}
       </section>
       {% endif %}
+
+      {% if view == 'verify' %}
+      <section class="card">
+        <div class="hero-top">
+          <div>
+            <h2>Verify a packlist</h2>
+            <p class="helper-text">
+              Scan or type the <strong>packlist number</strong>, then scan every gun in the box.
+              A serial that belongs on a different packlist beeps immediately and says which one.
+            </p>
+          </div>
+        </div>
+        <label class="audit-operator">
+          <span>Operator (optional)</span>
+          <input type="text" id="operator-name" placeholder="Your name or initials" autocomplete="off" />
+        </label>
+        <form method="post" action="{{ url_for('verify_session_start') }}" class="verify-start-form actions" data-loading-message="Loading the packlist from the ERP&hellip;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+          <input type="hidden" name="operator" value="" data-operator-field />
+          <label class="audit-field">
+            <span>Packlist</span>
+            <input type="text" name="packlist_id" placeholder="e.g. PL-283888" autocomplete="off" autocapitalize="characters" spellcheck="false" required />
+          </label>
+          <button type="submit" class="button">Start verification</button>
+        </form>
+      </section>
+
+      <section class="card">
+        <div class="table-controls">
+          <h2>Packlists created {{ 'today' if verify_daily.date == verify_daily.today else verify_daily.date }}</h2>
+          <form method="get" action="{{ url_for('shipping_page') }}" class="actions">
+            <input type="hidden" name="view" value="verify" />
+            <input type="date" name="date" value="{{ verify_daily.date }}" max="{{ verify_daily.today }}" aria-label="Dashboard date" />
+            <button type="submit" class="button tertiary">Go</button>
+          </form>
+        </div>
+        {% if verify_daily.error %}
+        <p class="empty-state">{{ verify_daily.error }}</p>
+        {% else %}
+        {% set vs = verify_daily.summary %}
+        <div class="audit-tiles analytics-tiles">
+          <div class="audit-tile">
+            <span class="audit-tile-num">{{ vs.created }}</span>
+            <span class="audit-tile-label">Packlists created</span>
+            <span class="audit-tile-sub">{{ vs.no_serials }} without serials{% if vs.voided %} &middot; {{ vs.voided }} voided{% endif %}</span>
+          </div>
+          <div class="audit-tile tile-verified">
+            <span class="audit-tile-num">{{ vs.verified_clean }}</span>
+            <span class="audit-tile-label">Verified clean</span>
+          </div>
+          <div class="audit-tile {{ 'tile-missing' if vs.verified_issues else '' }}">
+            <span class="audit-tile-num">{{ vs.verified_issues }}</span>
+            <span class="audit-tile-label">Verified with issues</span>
+            <span class="audit-tile-sub">missing or wrong guns</span>
+          </div>
+          <div class="audit-tile {{ 'tile-misplaced' if vs.in_progress else '' }}">
+            <span class="audit-tile-num">{{ vs.in_progress }}</span>
+            <span class="audit-tile-label">In progress</span>
+          </div>
+          <div class="audit-tile {{ 'tile-pending' if vs.not_verified else 'tile-verified' }}">
+            <span class="audit-tile-num">{{ vs.not_verified }}</span>
+            <span class="audit-tile-label">Not verified yet</span>
+            <span class="audit-tile-sub">have serials, no scan session</span>
+          </div>
+        </div>
+
+        <div class="table-controls">
+          <h3>Packlists</h3>
+          <input type="search" data-table-filter placeholder="Filter packlists, customers..." aria-label="Filter packlists" />
+        </div>
+        {% if verify_daily.packlists %}
+        <div class="table-wrap">
+          <table id="verify-daily-table" data-filterable-table>
+            <thead>
+              <tr>
+                <th>Packlist</th>
+                <th>Created</th>
+                <th>Customer</th>
+                <th>Order</th>
+                <th>Serials</th>
+                <th>Status</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for p in verify_daily.packlists %}
+              {% set pill = {
+                'verified_clean': 'verified',
+                'verified_issues': 'missing',
+                'in_progress': 'misplaced',
+                'not_verified': 'pending',
+                'no_serials': 'pending',
+                'voided': 'missing',
+              }[p.status] %}
+              <tr{% if loop.index > row_cap %} class="row-capped"{% endif %}>
+                <td class="mono"><strong>{{ p.packlist_id }}</strong></td>
+                <td>{{ p.created_display or '' }}</td>
+                <td>{{ p.customer or '' }}</td>
+                <td class="mono">{{ p.cust_order_id or '' }}</td>
+                <td>{{ p.serial_count }}{% if p.line_count > 1 %} <span class="helper-text">({{ p.line_count }} lines)</span>{% endif %}</td>
+                <td>
+                  {% if p.status == 'no_serials' %}
+                  <span class="helper-text">no serials &mdash; nothing to verify</span>
+                  {% else %}
+                  <span class="pill audit-status status-{{ pill }}">{{ p.status|replace('_', ' ') }}</span>
+                  {% endif %}
+                  {% if p.session and p.status == 'verified_issues' %}
+                  <br /><span class="helper-text">{{ p.session.missing_count }} missing &middot; {{ p.session.unexpected_count }} unexpected</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if p.session %}
+                  <a class="button tertiary table-button" href="{{ url_for('verify_session_page', session_id=p.session.id) }}">Session #{{ p.session.id }}</a>
+                  {% elif p.status == 'not_verified' %}
+                  <form method="post" action="{{ url_for('verify_session_start') }}" class="verify-start-form inline-form" data-loading-message="Loading {{ p.packlist_id }} from the ERP&hellip;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                    <input type="hidden" name="packlist_id" value="{{ p.packlist_id }}" />
+                    <input type="hidden" name="operator" value="" data-operator-field />
+                    <button type="submit" class="button tertiary table-button">Verify</button>
+                  </form>
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% if verify_daily.packlists|length > row_cap %}
+        <button type="button" class="button tertiary show-all-button" data-show-all="verify-daily-table">
+          Show all {{ verify_daily.packlists|length }} rows ({{ verify_daily.packlists|length - row_cap }} more)
+        </button>
+        {% endif %}
+        {% else %}
+        <p class="empty-state">No packlists were created on {{ verify_daily.date }}.</p>
+        {% endif %}
+        {% endif %}
+
+        {% if verify_daily.other_sessions %}
+        <h3>Also verified {{ 'today' if verify_daily.date == verify_daily.today else 'this day' }}</h3>
+        <p class="helper-text">Sessions started this day for packlists created on other days &mdash; usually a re-check of an older box.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>#</th><th>Packlist</th><th>Packlist date</th><th>Status</th><th>Outcome</th><th>Operator</th><th>Started</th></tr>
+            </thead>
+            <tbody>
+              {% for s in verify_daily.other_sessions %}
+              <tr>
+                <td><a href="{{ url_for('verify_session_page', session_id=s.id) }}">#{{ s.id }}</a></td>
+                <td class="mono">{{ s.packlist_id }}</td>
+                <td>{{ s.packlist_date or '' }}</td>
+                <td><span class="pill {{ 'success' if s.status == 'completed' else 'running' }}">{{ s.status }}</span></td>
+                <td>{% if s.outcome %}<span class="pill audit-status status-{{ 'verified' if s.outcome == 'clean' else 'missing' }}">{{ s.outcome }}</span>{% endif %}</td>
+                <td>{{ s.operator or '' }}</td>
+                <td>{{ s.started_display or '' }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% endif %}
+      </section>
+      {% endif %}
     </main>
 
     <script>
@@ -480,7 +645,7 @@
             try { localStorage.setItem(STORAGE_KEY, input.value.trim()); } catch (e) {}
           });
         }
-        document.querySelectorAll(".pick-start-form").forEach(function (form) {
+        document.querySelectorAll(".pick-start-form, .verify-start-form").forEach(function (form) {
           form.addEventListener("submit", function () {
             var field = form.querySelector("[data-operator-field]");
             if (field && input) field.value = input.value.trim();

@@ -43,6 +43,7 @@ import pick_store
 import recon
 import serial_history
 import shortage
+import verify_store
 
 try:
     from cryptography.fernet import Fernet, InvalidToken
@@ -134,6 +135,14 @@ RECON_SHIPMENTS_FILE = resolve_path_setting(
 PICK_SERIAL_LOOKUP_FILE = resolve_path_setting(
     os.getenv("PICK_SERIAL_LOOKUP_FILE", "sql/pick_serial_lookup.sql")
 )
+PACKLIST_SERIALS_FILE = resolve_path_setting(
+    os.getenv("PACKLIST_SERIALS_FILE", "sql/packlist_serials.sql")
+)
+PACKLIST_DAILY_FILE = resolve_path_setting(
+    os.getenv("PACKLIST_DAILY_FILE", "sql/packlist_daily.sql")
+)
+# How long to cache the verify dashboard's daily ERP pull.
+VERIFY_DAILY_CACHE_SECONDS = float(os.getenv("VERIFY_DAILY_CACHE_SECONDS", "60"))
 # How many daily picklist plan snapshots to keep for shipping reconciliation.
 PLAN_SNAPSHOT_RETENTION_DAYS = int(os.getenv("PLAN_SNAPSHOT_RETENTION_DAYS", "60"))
 # Staged shipments should leave the building within this many hours.
@@ -1756,7 +1765,14 @@ FEATURE_FLAGS = {
     "shipping": {
         "setting_key": "feature_shipping_enabled",
         "label": "Shipping",
-        "path_prefixes": ("/shipping", "/pick", "/api/shipping", "/api/pick"),
+        "path_prefixes": (
+            "/shipping",
+            "/pick",
+            "/verify",
+            "/api/shipping",
+            "/api/pick",
+            "/api/verify",
+        ),
     },
     "audit": {
         "setting_key": "feature_audit_enabled",
@@ -1974,6 +1990,7 @@ initialize_db()
 migrate_sensitive_settings_encryption()
 audit_store.initialize()
 pick_store.initialize(get_sqlite_conn)
+verify_store.initialize(get_sqlite_conn)
 backfill_plan_snapshots()
 check_audit_universe_sql()
 start_scheduler()
@@ -3210,6 +3227,160 @@ def build_recon_payload(requested_date: Optional[str]) -> dict[str, Any]:
     return result
 
 
+# Verify dashboard: only the ERP day pull is cached — the local session join
+# is recomputed every request so completed scans show up immediately.
+_verify_daily_cache: dict[str, Any] = {"date": None, "rows": None, "fetched_at": None}
+
+
+def _fetch_packlists_created_on(day_iso: str, force: bool = False) -> list[dict]:
+    now = datetime.now()
+    if (
+        not force
+        and _verify_daily_cache["rows"] is not None
+        and _verify_daily_cache["date"] == day_iso
+        and _verify_daily_cache["fetched_at"] is not None
+        and now - _verify_daily_cache["fetched_at"]
+        < timedelta(seconds=VERIFY_DAILY_CACHE_SECONDS)
+    ):
+        return _verify_daily_cache["rows"]
+    end_iso = (date.fromisoformat(day_iso) + timedelta(days=1)).isoformat()
+    df = run_erp_query_file(
+        PACKLIST_DAILY_FILE,
+        {"start_date": day_iso, "end_date": end_iso},
+        "daily packlists",
+    )
+    rows = df.to_dict(orient="records")
+    _verify_daily_cache.update({"date": day_iso, "rows": rows, "fetched_at": now})
+    return rows
+
+
+def _erp_local_time_display(value) -> Optional[str]:
+    """ERP datetimes are already server-local — format without tz conversion."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return value
+    try:
+        return value.strftime("%H:%M")
+    except (AttributeError, ValueError):
+        return str(value)
+
+
+def _verify_session_display(session_row: dict) -> dict:
+    row = dict(session_row)
+    row["started_display"] = _audit_dt_display(row.get("started_at"))
+    row["completed_display"] = _audit_dt_display(row.get("completed_at"))
+    return row
+
+
+def _session_started_local_date(session_row: dict) -> Optional[str]:
+    started = session_row.get("started_at")
+    if not started:
+        return None
+    try:
+        parsed = datetime.fromisoformat(started)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo("UTC"))
+    return parsed.astimezone(resolve_timezone()).date().isoformat()
+
+
+def build_verify_daily_payload(
+    requested_date: Optional[str], force: bool = False
+) -> dict[str, Any]:
+    """Every packlist created on the requested day lined up against its
+    latest verification session, plus that day's sessions for older packlists."""
+    day_iso = (requested_date or "").strip() or _today_local().isoformat()
+    try:
+        date.fromisoformat(day_iso)
+    except ValueError:
+        day_iso = _today_local().isoformat()
+
+    payload: dict[str, Any] = {
+        "date": day_iso,
+        "today": _today_local().isoformat(),
+        "error": None,
+        "packlists": [],
+        "other_sessions": [],
+        "summary": {},
+    }
+
+    try:
+        erp_rows = _fetch_packlists_created_on(day_iso, force=force)
+    except Exception as exc:  # noqa: BLE001 — degrade like the other ERP panels
+        logger.exception("Daily packlist query failed")
+        payload["error"] = f"Could not load packlists from the ERP: {exc}"
+        erp_rows = []
+
+    packlist_ids = [str(r.get("PACKLIST_ID") or "") for r in erp_rows]
+    sessions_by_packlist = verify_store.latest_sessions_for_packlists(packlist_ids)
+
+    summary = {
+        "created": 0,
+        "verified_clean": 0,
+        "verified_issues": 0,
+        "in_progress": 0,
+        "not_verified": 0,
+        "no_serials": 0,
+        "voided": 0,
+    }
+    for row in erp_rows:
+        packlist_id = str(row.get("PACKLIST_ID") or "").strip().upper()
+        shipper_status = str(row.get("SHIPPER_STATUS") or "").strip().upper()
+        serial_count = int(row.get("SERIAL_COUNT") or 0)
+        session_row = sessions_by_packlist.get(packlist_id)
+        if shipper_status in ("X", "V"):
+            status = "voided"
+        elif session_row and session_row.get("status") == "active":
+            status = "in_progress"
+        elif session_row and session_row.get("status") == "completed":
+            status = (
+                "verified_clean"
+                if session_row.get("outcome") == verify_store.OUTCOME_CLEAN
+                else "verified_issues"
+            )
+        elif serial_count == 0:
+            status = "no_serials"
+        else:
+            status = "not_verified"
+        summary["created"] += 1
+        summary[status] += 1
+        payload["packlists"].append(
+            {
+                "packlist_id": packlist_id,
+                "created_display": _erp_local_time_display(row.get("CREATE_DATE")),
+                "cust_order_id": row.get("CUST_ORDER_ID"),
+                "customer": row.get("CUSTOMER_NAME") or row.get("CUSTOMER_ID"),
+                "line_count": int(row.get("LINE_COUNT") or 0),
+                "serial_count": serial_count,
+                "status": status,
+                "session": _verify_session_display(session_row) if session_row else None,
+            }
+        )
+    payload["summary"] = summary
+
+    # Sessions started this day for packlists created on other days
+    # (re-verifying an older box) still deserve a spot on the dashboard.
+    day_packlists = {p["packlist_id"] for p in payload["packlists"]}
+    for session_row in verify_store.recent_sessions(limit=100):
+        if session_row.get("packlist_id") in day_packlists:
+            continue
+        if _session_started_local_date(session_row) != day_iso:
+            continue
+        payload["other_sessions"].append(_verify_session_display(session_row))
+
+    return payload
+
+
 # Tabbed views on /shipping — each one loads only its own (ERP) payload so
 # switching tabs never pays for the other three queries.
 SHIPPING_VIEWS = {
@@ -3217,6 +3388,7 @@ SHIPPING_VIEWS = {
     "shortages": "Shortages",
     "stage": "Stage aging",
     "pick": "Pick confirm",
+    "verify": "Verify",
 }
 
 
@@ -3230,6 +3402,7 @@ def shipping_page():
     recon_payload = None
     stage = None
     shortages = None
+    verify_daily = None
     pick_sessions: list[dict[str, Any]] = []
     latest_success_by_type: dict[str, Any] = {}
 
@@ -3239,6 +3412,10 @@ def shipping_page():
         shortages = _audit_json_safe(build_shortage_payload())
     elif view == "stage":
         stage = _audit_json_safe(build_stage_aging())
+    elif view == "verify":
+        verify_daily = _audit_json_safe(
+            build_verify_daily_payload(request.args.get("date"))
+        )
     else:
         pick_sessions = pick_store.recent_sessions(limit=10)
         for row in pick_sessions:
@@ -3264,6 +3441,7 @@ def shipping_page():
         recon=recon_payload,
         stage=stage,
         shortages=shortages,
+        verify_daily=verify_daily,
         pick_sessions=pick_sessions,
         latest_success_by_type=latest_success_by_type,
         query_options=list(QUERY_FILES.keys()),
@@ -3594,6 +3772,216 @@ def pick_session_export(session_id: int):
         output,
         as_attachment=True,
         download_name=f"pick_session{session_id}_{session_row['query_type']}.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Packlist verification
+# ---------------------------------------------------------------------------
+def _normalize_packlist_input(raw: str) -> str:
+    """Uppercase/trim; a bare number is assumed to be a PL- packlist."""
+    value = (raw or "").strip().upper()
+    if value.isdigit():
+        return f"PL-{value}"
+    return value
+
+
+def _lookup_serial_shipment(scan: str, current_packlist: str) -> tuple[Optional[dict], bool]:
+    """(live shipment row on a different packlist, erp_checked) for a scan
+    that matched nothing in the session snapshot."""
+    try:
+        df = run_erp_query_file(
+            SERIAL_HISTORY_SHIPMENTS_FILE, {"serial": scan}, "verify serial lookup"
+        )
+    except Exception:  # noqa: BLE001 — enrichment only; the scan still records
+        logger.exception("Verify serial reverse lookup failed for %s", scan)
+        return None, False
+    other = None
+    for row in df.to_dict(orient="records"):
+        status = str(row.get("SHIPPER_STATUS") or "").strip().upper()
+        packlist = str(row.get("PACKLIST_ID") or "").strip().upper()
+        if status in ("X", "V") or not packlist or packlist == current_packlist:
+            continue
+        other = row  # keep the last (most recent SHIPPED_DATE) live shipment
+    return other, True
+
+
+@app.post("/verify/session/start")
+@require_trusted_client
+@require_csrf
+def verify_session_start():
+    packlist_id = _normalize_packlist_input(request.form.get("packlist_id") or "")
+    operator = (request.form.get("operator") or "").strip() or None
+    if not packlist_id:
+        flash("Scan or type a packlist number to verify.", "error")
+        return redirect(url_for("shipping_page", view="verify"))
+
+    try:
+        df = run_erp_query_file(
+            PACKLIST_SERIALS_FILE, {"packlist": packlist_id}, "packlist serials"
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Packlist serials query failed for %s", packlist_id)
+        flash(f"Could not load {packlist_id} from the ERP: {exc}", "error")
+        return redirect(url_for("shipping_page", view="verify"))
+
+    rows = df.to_dict(orient="records")
+    if not rows:
+        flash(f"{packlist_id} was not found in the ERP.", "error")
+        return redirect(url_for("shipping_page", view="verify"))
+
+    header = rows[0]
+    shipper_status = str(header.get("SHIPPER_STATUS") or "").strip().upper()
+    if shipper_status in ("X", "V"):
+        flash(f"{packlist_id} is voided in the ERP — nothing to verify.", "error")
+        return redirect(url_for("shipping_page", view="verify"))
+    if not any(str(r.get("TRACE_ID") or "").strip() for r in rows):
+        flash(
+            f"{packlist_id} has no serialized items — nothing to scan-verify.",
+            "error",
+        )
+        return redirect(url_for("shipping_page", view="verify"))
+
+    session_id = verify_store.start_session(packlist_id, header, rows, operator=operator)
+    logger.info(
+        "Started verify session #%s for %s (%d rows).",
+        session_id,
+        packlist_id,
+        len(rows),
+    )
+    return redirect(url_for("verify_session_page", session_id=session_id))
+
+
+@app.get("/verify/session/<int:session_id>")
+@require_trusted_client
+def verify_session_page(session_id: int):
+    session_row = verify_store.get_session(session_id)
+    if not session_row:
+        flash(f"Verification session #{session_id} was not found.", "error")
+        return redirect(url_for("shipping_page", view="verify"))
+
+    expected = verify_store.get_expected(session_id)
+    scans = verify_store.get_scans(session_id, limit=100)
+    for scan in scans:
+        scan["scanned_display"] = _audit_dt_display(scan.get("scanned_at"))
+
+    return render_template(
+        "verify_session.html",
+        session=session_row,
+        started_display=_audit_dt_display(session_row.get("started_at")),
+        completed_display=_audit_dt_display(session_row.get("completed_at")),
+        expected=[row for row in expected if row["status"] != "info"],
+        info_rows=[row for row in expected if row["status"] == "info"],
+        scans=scans,
+        counts=verify_store.compute_counts(session_id),
+    )
+
+
+@app.post("/api/verify/session/<int:session_id>/scan")
+@require_trusted_client
+@require_csrf
+def api_verify_scan(session_id: int):
+    session_row = verify_store.get_session(session_id)
+    if not session_row:
+        return jsonify({"error": "not_found", "message": "Verification session not found."}), 404
+    if session_row.get("status") == "completed":
+        return jsonify(
+            {"error": "completed", "message": "This verification session is already completed."}
+        ), 409
+
+    payload = request.get_json(silent=True) or {}
+    scan = (payload.get("scan") or "").strip().upper()
+    operator = (payload.get("operator") or "").strip() or None
+    if not scan:
+        return jsonify({"error": "invalid", "message": "A scanned value is required."}), 400
+    if len(scan) > SERIAL_MAX_LENGTH:
+        return jsonify({"error": "invalid", "message": "Scanned value is too long."}), 400
+
+    # Only a scan that matches nothing in the snapshot needs the ERP, and its
+    # failure never blocks the scan from recording (unlike pick confirm).
+    other_row = None
+    erp_checked = True
+    if not any(
+        row["status"] != "info" and scan in (row.get("serial"), row.get("serial_alt"))
+        for row in verify_store.get_expected(session_id)
+    ):
+        other_row, erp_checked = _lookup_serial_shipment(scan, session_row["packlist_id"])
+
+    try:
+        result = verify_store.record_scan(
+            session_id,
+            scan,
+            other_packlist_id=(other_row or {}).get("PACKLIST_ID"),
+            other_customer=(other_row or {}).get("CUSTOMER_NAME")
+            or (other_row or {}).get("CUSTOMER_ID"),
+            erp_checked=erp_checked,
+            operator=operator,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to record verify scan: %s", exc)
+        return jsonify({"error": "scan_failed", "message": str(exc)}), 500
+
+    result["scan"] = scan
+    return jsonify(result), 200
+
+
+@app.post("/api/verify/session/<int:session_id>/complete")
+@require_trusted_client
+@require_csrf
+def api_verify_complete(session_id: int):
+    session_row = verify_store.get_session(session_id)
+    if not session_row:
+        return jsonify({"error": "not_found", "message": "Verification session not found."}), 404
+
+    completed = verify_store.complete_session(session_id)
+    logger.info(
+        "Completed verify session #%s for %s (%s).",
+        session_id,
+        session_row.get("packlist_id"),
+        completed.get("outcome"),
+    )
+    return jsonify(
+        {
+            "status": "completed",
+            "outcome": completed.get("outcome"),
+            "counts": completed.get("counts"),
+            "redirect": url_for("verify_session_page", session_id=session_id),
+        }
+    ), 200
+
+
+@app.get("/api/verify/daily")
+@require_trusted_client
+def api_verify_daily():
+    force = request.args.get("refresh") == "1"
+    payload = build_verify_daily_payload(request.args.get("date"), force=force)
+    return jsonify(_audit_json_safe(payload)), 200
+
+
+@app.get("/verify/session/<int:session_id>/export")
+@require_trusted_client
+def verify_session_export(session_id: int):
+    session_row = verify_store.get_session(session_id)
+    if not session_row:
+        flash(f"Verification session #{session_id} was not found.", "error")
+        return redirect(url_for("shipping_page", view="verify"))
+
+    expected_df = pd.DataFrame(verify_store.get_expected(session_id))
+    scans_df = pd.DataFrame(verify_store.get_scans(session_id, limit=10000))
+    output = io.BytesIO()
+    with pd.ExcelWriter(output) as writer:
+        (expected_df if not expected_df.empty else pd.DataFrame(columns=["serial"])).to_excel(
+            writer, index=False, sheet_name="Expected"
+        )
+        (scans_df if not scans_df.empty else pd.DataFrame(columns=["scan_value"])).to_excel(
+            writer, index=False, sheet_name="Scans"
+        )
+    output.seek(0)
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=f"verify_session{session_id}_{session_row['packlist_id']}.xlsx",
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 

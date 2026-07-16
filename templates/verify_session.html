@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Verify {{ session.packlist_id }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <main class="page-shell">
+      {% set active_nav = 'shipping' %}
+      {% include '_topnav.html' %}
+
+      <section class="hero card">
+        <div class="hero-top">
+          <div>
+            <p class="eyebrow">Packlist Verification &middot; Session #{{ session.id }}</p>
+            <h1>{{ session.packlist_id }}{% if session.customer_name or session.customer_id %} &mdash; {{ session.customer_name or session.customer_id }}{% endif %}</h1>
+          </div>
+          <a class="button tertiary" href="{{ url_for('shipping_page', view='verify') }}">&larr; Verify dashboard</a>
+        </div>
+        <p class="hero-copy">
+          {% if session.status == 'completed' %}
+          This verification is complete
+          {%- if session.outcome %} &mdash; <strong>{{ 'no issues' if session.outcome == 'clean' else 'issues found' }}</strong>{% endif %}.
+          Review the results below.
+          {% else %}
+          Scan every gun in the box. Each serial is checked against what the ERP says
+          shipped on <strong>{{ session.packlist_id }}</strong> — a gun that belongs on a
+          different packlist warns immediately and names it.
+          {% endif %}
+          <span class="helper-text">
+            {% if session.cust_order_id %}Order {{ session.cust_order_id }} &middot; {% endif %}
+            Started {{ started_display }}{% if completed_display %} &middot; Completed {{ completed_display }}{% endif %}{% if session.operator %} &middot; {{ session.operator }}{% endif %}.
+          </span>
+        </p>
+      </section>
+
+      <section class="card audit-tiles" data-tiles>
+        <div class="audit-tile"><span class="audit-tile-num" data-tile="expected_serials">{{ counts.expected_serials }}</span><span class="audit-tile-label">Expected serials</span></div>
+        <div class="audit-tile tile-verified"><span class="audit-tile-num" data-tile="verified">{{ counts.verified }}</span><span class="audit-tile-label">Verified</span></div>
+        <div class="audit-tile tile-pending"><span class="audit-tile-num" data-tile="remaining">{{ counts.remaining }}</span><span class="audit-tile-label">Remaining</span></div>
+        <div class="audit-tile tile-missing"><span class="audit-tile-num" data-tile="missing">{{ counts.missing }}</span><span class="audit-tile-label">Missing</span></div>
+        <div class="audit-tile tile-unexpected"><span class="audit-tile-num" data-tile="problem_scans">{{ counts.problem_scans }}</span><span class="audit-tile-label">Problem scans</span></div>
+        <div class="audit-tile tile-misplaced"><span class="audit-tile-num" data-tile="duplicates">{{ counts.duplicates }}</span><span class="audit-tile-label">Duplicates</span></div>
+      </section>
+
+      {% if session.status != 'completed' %}
+      <section class="card">
+        <h2>Scan</h2>
+        <div class="audit-scan-grid">
+          <label class="audit-field">
+            <span>Gun serial</span>
+            <input type="text" id="scan-input" placeholder="Scan each serial in the box" autocomplete="off" autocapitalize="characters" spellcheck="false" />
+          </label>
+        </div>
+        <p class="helper-text" id="scan-hint">
+          One scan per gun &mdash; the scanner's Tab/Enter submits automatically. Complete the
+          session when the box is empty; anything left unscanned is flagged missing.
+        </p>
+        <div id="scan-result" class="audit-scan-result" hidden></div>
+        <div class="actions">
+          <button type="button" class="button secondary" id="complete-verify">Complete verification</button>
+          <a class="button tertiary" href="{{ url_for('verify_session_export', session_id=session.id) }}" data-no-loading>Export</a>
+        </div>
+        <div class="audit-log" id="scan-log" aria-live="polite">
+          {% for scan in scans[:25] %}
+          <div class="audit-log-entry result-{{ 'verified' if scan.result == 'verified' else ('misplaced' if scan.result == 'duplicate' else 'unexpected') }}">
+            {{ scan.scan_value }} &mdash; {{ scan.message }}
+          </div>
+          {% endfor %}
+        </div>
+      </section>
+      {% else %}
+      <section class="card">
+        <div class="actions">
+          <a class="button secondary" href="{{ url_for('verify_session_export', session_id=session.id) }}" data-no-loading>Export results</a>
+        </div>
+      </section>
+      {% endif %}
+
+      <section class="card">
+        <div class="table-controls">
+          <h2>Expected serials</h2>
+          <input type="search" data-table-filter placeholder="Filter serials, parts..." aria-label="Filter expected serials" />
+        </div>
+        <div class="table-wrap">
+          <table data-filterable-table>
+            <thead>
+              <tr>
+                <th>Serial</th>
+                <th>Part</th>
+                <th>Line</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in expected %}
+              <tr data-expected-id="{{ row.id }}">
+                <td class="mono"><strong>{{ row.serial }}</strong>{% if row.serial_alt %} <span class="helper-text">{{ row.serial_alt }}</span>{% endif %}</td>
+                <td class="mono">{{ row.part_id or '' }}</td>
+                <td>{{ row.line_no or '' }}</td>
+                <td data-status-cell>
+                  {% if row.status == 'verified' %}
+                  <span class="pill audit-status status-verified">verified</span>
+                  {% elif row.status == 'missing' %}
+                  <span class="pill audit-status status-missing">missing</span>
+                  {% else %}
+                  <span class="pill audit-status status-pending">pending</span>
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {% if info_rows %}
+      <section class="card">
+        <h2>Non-serialized lines</h2>
+        <p class="helper-text">These shipped on the packlist but carry no serial numbers &mdash; visual check only, not part of scan verification.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Line</th><th>Part</th><th>Qty</th></tr>
+            </thead>
+            <tbody>
+              {% for row in info_rows %}
+              <tr>
+                <td>{{ row.line_no or '' }}</td>
+                <td class="mono">{{ row.part_id or '' }}</td>
+                <td>{{ row.qty|int if row.qty is not none else '' }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      {% endif %}
+
+      {% if session.status == 'completed' and scans %}
+      <section class="card">
+        <h2>Scan log</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Scanned</th><th>Result</th><th>Detail</th><th>When</th><th>Operator</th></tr>
+            </thead>
+            <tbody>
+              {% for scan in scans %}
+              <tr>
+                <td class="mono">{{ scan.scan_value }}</td>
+                <td><span class="pill audit-status status-{{ 'verified' if scan.result == 'verified' else ('pending' if scan.result == 'duplicate' else 'missing') }}">{{ scan.result|replace('_', ' ') }}</span></td>
+                <td>{{ scan.message or '' }}</td>
+                <td>{{ scan.scanned_display or '' }}</td>
+                <td>{{ scan.operator or '' }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      {% endif %}
+    </main>
+
+    <script>
+      const VERIFY = {
+        sessionId: {{ session.id }},
+        csrfToken: {{ csrf_token()|tojson }},
+        scanUrl: {{ url_for('api_verify_scan', session_id=session.id)|tojson }},
+        completeUrl: {{ url_for('api_verify_complete', session_id=session.id)|tojson }},
+        completed: {{ (session.status == 'completed')|tojson }},
+        operator: null,
+      };
+      try { VERIFY.operator = localStorage.getItem("audit_operator_name") || null; } catch (e) {}
+
+      // ---- audio feedback (same tones as the audit scanner) ----------------
+      let audioCtx = null;
+      function beep(kind) {
+        try {
+          audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          osc.connect(gain); gain.connect(audioCtx.destination);
+          const now = audioCtx.currentTime;
+          if (kind === "ok") { osc.frequency.value = 880; }
+          else if (kind === "duplicate") { osc.frequency.value = 440; }
+          else { osc.frequency.value = 200; }
+          gain.gain.setValueAtTime(0.001, now);
+          gain.gain.exponentialRampToValueAtTime(0.25, now + 0.01);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+          osc.start(now); osc.stop(now + 0.24);
+        } catch (e) {}
+      }
+
+      document.querySelectorAll("[data-table-filter]").forEach(function (input) {
+        input.addEventListener("input", function () {
+          const term = input.value.trim().toLowerCase();
+          const table = input.closest("section").querySelector("[data-filterable-table]");
+          if (!table) return;
+          table.querySelectorAll("tbody tr").forEach(function (tr) {
+            tr.hidden = term && tr.textContent.toLowerCase().indexOf(term) === -1;
+          });
+        });
+      });
+
+      if (!VERIFY.completed) {
+        const scanInput = document.getElementById("scan-input");
+        const scanResult = document.getElementById("scan-result");
+        const scanLog = document.getElementById("scan-log");
+        let submitting = false;
+
+        function showResult(kind, message) {
+          scanResult.hidden = false;
+          scanResult.className = "audit-scan-result result-" +
+            (kind === "ok" ? "verified" : (kind === "duplicate" ? "misplaced" : "unexpected"));
+          scanResult.textContent = message;
+          const entry = document.createElement("div");
+          entry.className = "audit-log-entry result-" +
+            (kind === "ok" ? "verified" : (kind === "duplicate" ? "misplaced" : "unexpected"));
+          entry.textContent = message;
+          scanLog.prepend(entry);
+          while (scanLog.children.length > 25) scanLog.removeChild(scanLog.lastChild);
+        }
+
+        function applyCounts(counts) {
+          if (!counts) return;
+          document.querySelectorAll("[data-tile]").forEach(function (el) {
+            const key = el.getAttribute("data-tile");
+            if (counts[key] !== undefined) el.textContent = counts[key];
+          });
+        }
+
+        function updateRow(expectedRow) {
+          if (!expectedRow) return;
+          const row = document.querySelector('tr[data-expected-id="' + expectedRow.id + '"]');
+          if (!row) return;
+          const cell = row.querySelector("[data-status-cell]");
+          if (cell && expectedRow.status === "verified") {
+            cell.innerHTML = '<span class="pill audit-status status-verified">verified</span>';
+          }
+        }
+
+        async function submitScan(value) {
+          if (submitting) return;
+          submitting = true;
+          try {
+            const resp = await fetch(VERIFY.scanUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "X-CSRF-Token": VERIFY.csrfToken },
+              body: JSON.stringify({ scan: value, operator: VERIFY.operator }),
+            });
+            const data = await resp.json();
+            if (!resp.ok) {
+              showResult("problem", "Error: " + (data.message || resp.status));
+              beep("problem");
+              return;
+            }
+            const prefix = {
+              verified: "✔ ", duplicate: "⚠ DUPLICATE ",
+              wrong_packlist: "✖ WRONG PACKLIST ", unexpected: "✖ UNEXPECTED ",
+            }[data.result] || "";
+            showResult(data.result === "verified" ? "ok" : (data.result === "duplicate" ? "duplicate" : "problem"),
+              prefix + value + " — " + data.message);
+            beep(data.result === "verified" ? "ok" : (data.result === "duplicate" ? "duplicate" : "problem"));
+            updateRow(data.expected_row);
+            applyCounts(data.counts);
+          } catch (err) {
+            showResult("problem", "Network error — scan " + value + " was NOT recorded. Try again.");
+            beep("problem");
+          } finally {
+            submitting = false;
+            scanInput.value = "";
+            scanInput.focus();
+          }
+        }
+
+        scanInput.addEventListener("keydown", function (e) {
+          if (e.key === "Enter" || e.key === "Tab") {
+            e.preventDefault();
+            const value = scanInput.value.trim().toUpperCase();
+            scanInput.value = "";
+            if (!value) return;
+            submitScan(value);
+          }
+        });
+
+        document.getElementById("complete-verify").addEventListener("click", async function () {
+          if (!confirm("Complete this verification? Anything not scanned will be flagged missing.")) return;
+          try {
+            const resp = await fetch(VERIFY.completeUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "X-CSRF-Token": VERIFY.csrfToken },
+              body: JSON.stringify({}),
+            });
+            const data = await resp.json();
+            if (resp.ok && data.redirect) { window.location.href = data.redirect; }
+            else { alert(data.message || "Could not complete the verification."); }
+          } catch (err) { alert("Network error completing the verification."); }
+        });
+
+        scanInput.focus();
+      }
+    </script>
+  </body>
+</html>
