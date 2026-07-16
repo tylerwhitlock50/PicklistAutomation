@@ -66,14 +66,14 @@
           <button type="button" class="button" id="verify-batch" disabled>Verify scans</button>
           <button type="button" class="button tertiary" id="change-location">Change {{ loc_term }}</button>
           <button type="button" class="button secondary" id="complete-audit">Complete audit</button>
-          <a class="button tertiary" href="{{ url_for('audit_session_export', session_id=session.id) }}">Export</a>
+          <a class="button tertiary" href="{{ url_for('audit_session_export', session_id=session.id) }}" data-no-loading>Export</a>
         </div>
         <div class="audit-log" id="scan-log" aria-live="polite"></div>
       </section>
       {% else %}
       <section class="card">
         <div class="actions">
-          <a class="button secondary" href="{{ url_for('audit_session_export', session_id=session.id) }}">Export results</a>
+          <a class="button secondary" href="{{ url_for('audit_session_export', session_id=session.id) }}" data-no-loading>Export results</a>
         </div>
       </section>
       {% endif %}

@@ -17,7 +17,7 @@
             <p class="eyebrow">Pick Confirm &middot; Session #{{ session.id }}</p>
             <h1>{{ session.query_type|capitalize }} picklist &mdash; run #{{ session.run_id }}</h1>
           </div>
-          <a class="button tertiary" href="{{ url_for('shipping_page', view='pick') }}">&larr; Shipping ops</a>
+          <a class="button tertiary" href="{{ url_for('shipping_page', view='pick') }}">&larr; Pick orders</a>
         </div>
         <p class="hero-copy">
           {% if session.status == 'completed' %}
@@ -73,8 +73,12 @@
       </section>
       {% else %}
       <section class="card">
+        <h2>Pick complete</h2>
+        <p class="helper-text">Move the picked orders to packing. When a packlist is ready, verify the serialized contents before shipment.</p>
         <div class="actions">
-          <a class="button secondary" href="{{ url_for('pick_session_export', session_id=session.id) }}" data-no-loading>Export results</a>
+          <a class="button secondary" href="{{ url_for('shipping_page', view='verify') }}#verify-start">Verify a box</a>
+          <a class="button tertiary" href="{{ url_for('shipping_page', view='pick') }}">Back to pick work</a>
+          <a class="button tertiary" href="{{ url_for('pick_session_export', session_id=session.id) }}" data-no-loading>Export results</a>
         </div>
       </section>
       {% endif %}

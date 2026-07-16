@@ -3368,6 +3368,24 @@ def build_verify_daily_payload(
         )
     payload["summary"] = summary
 
+    # Put work that needs an operator first. The ERP query otherwise mixes
+    # actionable rows with non-serialized packlists that need no verification.
+    verify_status_order = {
+        "in_progress": 0,
+        "not_verified": 1,
+        "verified_issues": 2,
+        "verified_clean": 3,
+        "no_serials": 4,
+        "voided": 5,
+    }
+    payload["packlists"].sort(
+        key=lambda row: (
+            verify_status_order.get(str(row.get("status")), 99),
+            str(row.get("created_display") or ""),
+            str(row.get("packlist_id") or ""),
+        )
+    )
+
     # Sessions started this day for packlists created on other days
     # (re-verifying an older box) still deserve a spot on the dashboard.
     day_packlists = {p["packlist_id"] for p in payload["packlists"]}
@@ -3381,29 +3399,31 @@ def build_verify_daily_payload(
     return payload
 
 
-# Tabbed views on /shipping — each one loads only its own (ERP) payload so
-# switching tabs never pays for the other three queries.
+# Task views come first and reporting views come last. The overview uses local
+# session data only, so opening Shipping never blocks on an ERP report query.
 SHIPPING_VIEWS = {
-    "recon": "Reconciliation",
+    "work": "Overview",
+    "pick": "Pick orders",
+    "verify": "Verify boxes",
+    "stage": "Staged shipments",
     "shortages": "Shortages",
-    "stage": "Stage aging",
-    "pick": "Pick confirm",
-    "verify": "Verify",
+    "recon": "Reconciliation",
 }
 
 
 @app.get("/shipping")
 @require_trusted_client
 def shipping_page():
-    view = request.args.get("view") or "recon"
+    view = request.args.get("view") or "work"
     if view not in SHIPPING_VIEWS:
-        view = "recon"
+        view = "work"
 
     recon_payload = None
     stage = None
     shortages = None
     verify_daily = None
     pick_sessions: list[dict[str, Any]] = []
+    verify_sessions: list[dict[str, Any]] = []
     latest_success_by_type: dict[str, Any] = {}
 
     if view == "recon":
@@ -3416,11 +3436,17 @@ def shipping_page():
         verify_daily = _audit_json_safe(
             build_verify_daily_payload(request.args.get("date"))
         )
-    else:
+    elif view in ("work", "pick"):
         pick_sessions = pick_store.recent_sessions(limit=10)
         for row in pick_sessions:
             row["started_display"] = _audit_dt_display(row.get("started_at"))
             row["completed_display"] = _audit_dt_display(row.get("completed_at"))
+
+        if view == "work":
+            verify_sessions = verify_store.recent_sessions(limit=10)
+            for row in verify_sessions:
+                row["started_display"] = _audit_dt_display(row.get("started_at"))
+                row["completed_display"] = _audit_dt_display(row.get("completed_at"))
 
         for query_type in QUERY_FILES:
             summary = get_latest_successful_run_summary(query_type)
@@ -3443,6 +3469,7 @@ def shipping_page():
         shortages=shortages,
         verify_daily=verify_daily,
         pick_sessions=pick_sessions,
+        verify_sessions=verify_sessions,
         latest_success_by_type=latest_success_by_type,
         query_options=list(QUERY_FILES.keys()),
         today_iso=_today_local().isoformat(),
@@ -3602,6 +3629,23 @@ def pick_session_start():
             "error",
         )
         return redirect(url_for("shipping_page", view="pick"))
+
+    active_session = next(
+        (
+            session
+            for session in pick_store.recent_sessions(limit=100)
+            if session.get("status") == "active"
+            and session.get("query_type") == query_type
+            and int(session.get("run_id") or 0) == int(run["id"])
+        ),
+        None,
+    )
+    if active_session:
+        flash(
+            f"Resuming active {query_type} pick session #{active_session['id']}.",
+            "success",
+        )
+        return redirect(url_for("pick_session_page", session_id=active_session["id"]))
 
     session_id = pick_store.start_session(
         run_id=run["id"],

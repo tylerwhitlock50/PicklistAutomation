@@ -21,17 +21,19 @@
 
       {% set row_cap = 50 %}
       {% set view_titles = {
+        'work': 'What needs attention?',
         'recon': 'Did everything ship?',
         'shortages': 'Component shortages',
-        'stage': 'Stage aging',
-        'pick': 'Pick confirm',
+        'stage': 'Staged shipments',
+        'pick': 'Pick orders',
         'verify': 'Packlist verification',
       } %}
       {% set view_copy = {
+        'work': 'Start or resume today’s shipping work. Reports and historical checks are available after the operational steps.',
         'recon': "Each morning's picklist is the plan; the packlists are what actually left. This view lines them up, with shipments checked through today.",
         'shortages': 'Open component demand the picklist cannot see, split by why.',
         'stage': 'Serialized units sitting in SHIPPING stage bins — staged goods should be gone within the target window.',
-        'pick': 'Scan-verify every pull against the picklist before it reaches the packing bench.',
+        'pick': 'Scan-verify every pull against the correct sales order before it reaches the packing bench.',
         'verify': 'Enter a packlist, scan the guns in the box, and confirm the physical contents match what the ERP says shipped.',
       } %}
 
@@ -56,6 +58,70 @@
           {% endfor %}
         </nav>
       </section>
+
+      {% if view == 'work' %}
+      {% set active_picks = pick_sessions|selectattr('status', 'equalto', 'active')|list %}
+      {% set active_verifications = verify_sessions|selectattr('status', 'equalto', 'active')|list %}
+      <section class="shipping-work-grid" aria-label="Shipping workflow">
+        <article class="card workflow-card workflow-primary">
+          <span class="workflow-step">1</span>
+          <p class="eyebrow">Pull inventory</p>
+          <h2>Pick orders</h2>
+          <p>Scan the sales order, then confirm each item pulled for that customer.</p>
+          {% if active_picks %}
+          <div class="work-queue">
+            {% for session in active_picks[:3] %}
+            <a class="work-queue-item" href="{{ url_for('pick_session_page', session_id=session.id) }}">
+              <span><strong>Resume {{ session.query_type }} pick</strong><small>{{ session.picked_units }}/{{ session.planned_units }} units · started {{ session.started_display }}</small></span>
+              <span aria-hidden="true">&rarr;</span>
+            </a>
+            {% endfor %}
+          </div>
+          {% else %}
+          <p class="work-clear">No active pick sessions.</p>
+          {% endif %}
+          <a class="button {{ 'tertiary' if active_picks else '' }}" href="{{ url_for('shipping_page', view='pick') }}">{{ 'View pick work' if active_picks else 'Start a pick' }}</a>
+        </article>
+
+        <article class="card workflow-card workflow-primary">
+          <span class="workflow-step">2</span>
+          <p class="eyebrow">Check the box</p>
+          <h2>Verify packlists</h2>
+          <p>Scan a packlist and confirm every serialized item before the box leaves.</p>
+          {% if active_verifications %}
+          <div class="work-queue">
+            {% for session in active_verifications[:3] %}
+            <a class="work-queue-item" href="{{ url_for('verify_session_page', session_id=session.id) }}">
+              <span><strong>Resume {{ session.packlist_id }}</strong><small>{{ session.customer_name or session.customer_id or 'Customer not listed' }} · started {{ session.started_display }}</small></span>
+              <span aria-hidden="true">&rarr;</span>
+            </a>
+            {% endfor %}
+          </div>
+          {% else %}
+          <p class="work-clear">No verifications in progress.</p>
+          {% endif %}
+          <a class="button {{ 'tertiary' if active_verifications else '' }}" href="{{ url_for('shipping_page', view='verify') }}#verify-start">{{ 'View verification work' if active_verifications else 'Verify a box' }}</a>
+        </article>
+
+        <article class="card workflow-card workflow-support">
+          <span class="workflow-step">3</span>
+          <p class="eyebrow">Clear blockers</p>
+          <h2>Exceptions</h2>
+          <div class="workflow-links">
+            <a href="{{ url_for('shipping_page', view='stage') }}"><strong>Staged shipments</strong><span>Find serialized units waiting too long &rarr;</span></a>
+            <a href="{{ url_for('shipping_page', view='shortages') }}"><strong>Component shortages</strong><span>Find transfers and true stockouts &rarr;</span></a>
+          </div>
+        </article>
+
+        <article class="card workflow-card workflow-support">
+          <span class="workflow-step">4</span>
+          <p class="eyebrow">Close the day</p>
+          <h2>Reconciliation</h2>
+          <p>Compare the morning plan with what actually shipped after operational work is complete.</p>
+          <a class="button tertiary" href="{{ url_for('shipping_page', view='recon') }}" data-loading-message="Loading reconciliation&hellip;">Review shipments</a>
+        </article>
+      </section>
+      {% endif %}
 
       {% if view == 'recon' %}
       <section class="card">
@@ -414,7 +480,7 @@
       <section class="card">
         <div class="hero-top">
           <div>
-            <h2>Pick confirm</h2>
+            <h2>Start or resume a pick</h2>
             <p class="helper-text">
               Scan the <strong>sales order</strong>, then each item pulled for it &mdash; every scan is
               verified against that exact order, so the right gun headed to the wrong customer
@@ -434,7 +500,7 @@
             <input type="hidden" name="operator" value="" data-operator-field />
             <button type="submit" class="button {{ 'secondary' if not loop.first }}"
               {% if not latest_success_by_type[option] %}disabled title="No successful {{ option }} run yet"{% endif %}>
-              Start {{ option }} pick
+              Open {{ option }} pick
               {% if latest_success_by_type[option] %}
               <span class="helper-text">(run #{{ latest_success_by_type[option].id }}, {{ latest_success_by_type[option].row_count }} rows)</span>
               {% endif %}
@@ -448,7 +514,7 @@
         <div class="table-wrap">
           <table>
             <thead>
-              <tr><th>#</th><th>Picklist</th><th>Status</th><th>Operator</th><th>Started</th><th>Picked</th><th>Problem scans</th><th></th></tr>
+              <tr><th>#</th><th>Picklist</th><th>Status</th><th>Operator</th><th>Started</th><th>Picked</th><th>Problem scans</th><th>Action</th></tr>
             </thead>
             <tbody>
               {% for s in pick_sessions %}
@@ -460,7 +526,10 @@
                 <td>{{ s.started_display or '' }}</td>
                 <td>{{ s.picked_units }}/{{ s.planned_units }}</td>
                 <td>{{ s.problem_scans }}</td>
-                <td><a class="button tertiary table-button" href="{{ url_for('pick_session_export', session_id=s.id) }}" data-no-loading>Export</a></td>
+                <td class="table-actions">
+                  <a class="button {{ 'secondary' if s.status == 'active' else 'tertiary' }} table-button" href="{{ url_for('pick_session_page', session_id=s.id) }}">{{ 'Resume' if s.status == 'active' else 'View' }}</a>
+                  <a class="button tertiary table-button" href="{{ url_for('pick_session_export', session_id=s.id) }}" data-no-loading>Export</a>
+                </td>
               </tr>
               {% endfor %}
             </tbody>
@@ -471,7 +540,7 @@
       {% endif %}
 
       {% if view == 'verify' %}
-      <section class="card">
+      <section class="card" id="verify-start">
         <div class="hero-top">
           <div>
             <h2>Verify a packlist</h2>
@@ -490,7 +559,7 @@
           <input type="hidden" name="operator" value="" data-operator-field />
           <label class="audit-field">
             <span>Packlist</span>
-            <input type="text" name="packlist_id" placeholder="e.g. PL-283888" autocomplete="off" autocapitalize="characters" spellcheck="false" required />
+            <input type="text" id="packlist-input" name="packlist_id" placeholder="Scan or enter a packlist" autocomplete="off" autocapitalize="characters" spellcheck="false" autofocus required />
           </label>
           <button type="submit" class="button">Start verification</button>
         </form>
@@ -535,13 +604,22 @@
           </div>
         </div>
 
+        <div class="work-filter-bar" aria-label="Filter verification work">
+          <span class="analytics-toolbar-label">Show:</span>
+          <button type="button" class="analytics-window active" data-verify-filter="actionable" aria-pressed="true">Needs action ({{ vs.not_verified + vs.in_progress }})</button>
+          <button type="button" class="analytics-window" data-verify-filter="in_progress" aria-pressed="false">In progress ({{ vs.in_progress }})</button>
+          <button type="button" class="analytics-window" data-verify-filter="verified_issues" aria-pressed="false">Issues ({{ vs.verified_issues }})</button>
+          <button type="button" class="analytics-window" data-verify-filter="verified_clean" aria-pressed="false">Completed ({{ vs.verified_clean }})</button>
+          <button type="button" class="analytics-window" data-verify-filter="all" aria-pressed="false">All ({{ vs.created }})</button>
+        </div>
+
         <div class="table-controls">
           <h3>Packlists</h3>
           <input type="search" data-table-filter placeholder="Filter packlists, customers..." aria-label="Filter packlists" />
         </div>
         {% if verify_daily.packlists %}
         <div class="table-wrap">
-          <table id="verify-daily-table" data-filterable-table>
+          <table id="verify-daily-table" data-filterable-table data-status-filter="actionable">
             <thead>
               <tr>
                 <th>Packlist</th>
@@ -563,7 +641,7 @@
                 'no_serials': 'pending',
                 'voided': 'missing',
               }[p.status] %}
-              <tr{% if loop.index > row_cap %} class="row-capped"{% endif %}>
+              <tr data-verify-status="{{ p.status }}"{% if loop.index > row_cap %} class="row-capped"{% endif %}>
                 <td class="mono"><strong>{{ p.packlist_id }}</strong></td>
                 <td>{{ p.created_display or '' }}</td>
                 <td>{{ p.customer or '' }}</td>
@@ -656,17 +734,42 @@
       // Table filter (mirrors dashboard behaviour). Filtering searches every
       // row, including capped ones, so the table drops its row cap while a
       // filter term is active.
+      function applyTableFilters(input) {
+        const term = input ? input.value.trim().toLowerCase() : "";
+        const table = input
+          ? input.closest("section").querySelector("[data-filterable-table]")
+          : document.getElementById("verify-daily-table");
+        if (!table) return;
+        const statusFilter = table.getAttribute("data-status-filter") || "all";
+        table.classList.toggle("is-filtered", Boolean(term) || statusFilter !== "all");
+        table.querySelectorAll("tbody tr").forEach(function (tr) {
+          const status = tr.getAttribute("data-verify-status");
+          const statusMatches = !status || statusFilter === "all" ||
+            (statusFilter === "actionable" && (status === "not_verified" || status === "in_progress")) ||
+            status === statusFilter;
+          const termMatches = !term || tr.textContent.toLowerCase().indexOf(term) !== -1;
+          tr.hidden = !(statusMatches && termMatches);
+        });
+      }
+
       document.querySelectorAll("[data-table-filter]").forEach(function (input) {
-        input.addEventListener("input", function () {
-          const term = input.value.trim().toLowerCase();
-          const table = input.closest("section").querySelector("[data-filterable-table]");
+        input.addEventListener("input", function () { applyTableFilters(input); });
+      });
+
+      document.querySelectorAll("[data-verify-filter]").forEach(function (button) {
+        button.addEventListener("click", function () {
+          const table = document.getElementById("verify-daily-table");
           if (!table) return;
-          table.classList.toggle("is-filtered", Boolean(term));
-          table.querySelectorAll("tbody tr").forEach(function (tr) {
-            tr.hidden = term && tr.textContent.toLowerCase().indexOf(term) === -1;
+          table.setAttribute("data-status-filter", button.getAttribute("data-verify-filter") || "all");
+          document.querySelectorAll("[data-verify-filter]").forEach(function (candidate) {
+            const selected = candidate === button;
+            candidate.classList.toggle("active", selected);
+            candidate.setAttribute("aria-pressed", selected ? "true" : "false");
           });
+          applyTableFilters(document.querySelector('[aria-label="Filter packlists"]'));
         });
       });
+      applyTableFilters(document.querySelector('[aria-label="Filter packlists"]'));
 
       // "Show all N rows" — long tables render capped; this reveals the rest.
       document.querySelectorAll("[data-show-all]").forEach(function (button) {

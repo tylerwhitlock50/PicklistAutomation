@@ -74,6 +74,7 @@
       {% else %}
       <section class="card">
         <div class="actions">
+          <a class="button secondary" href="{{ url_for('shipping_page', view='verify') }}#verify-start">Verify next packlist</a>
           <a class="button secondary" href="{{ url_for('verify_session_export', session_id=session.id) }}" data-no-loading>Export results</a>
         </div>
       </section>

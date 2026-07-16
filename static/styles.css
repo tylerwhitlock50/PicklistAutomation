@@ -1086,6 +1086,159 @@ table.is-filtered tr.row-capped:not([hidden]) {
   color: #fff;
 }
 
+/* Shipping work overview and task queues. */
+.shipping-work-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.workflow-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-height: 250px;
+}
+
+.workflow-card h2 {
+  margin: 6px 0 8px;
+}
+
+.workflow-card > p:not(.eyebrow) {
+  margin: 0 0 16px;
+  color: var(--muted);
+}
+
+.workflow-card > .button {
+  margin-top: auto;
+}
+
+.workflow-primary {
+  border-top: 4px solid var(--primary);
+}
+
+.workflow-support {
+  min-height: 210px;
+}
+
+.workflow-step {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  background: #edf5f0;
+  color: var(--primary);
+  font-weight: 800;
+}
+
+.work-queue {
+  display: grid;
+  width: 100%;
+  gap: 8px;
+  margin: 0 0 16px;
+}
+
+.work-queue-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px 12px;
+  border: 1px solid #cfe0d6;
+  border-radius: 11px;
+  background: #f3f8f5;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.work-queue-item:hover {
+  border-color: var(--primary);
+}
+
+.work-queue-item span:first-child {
+  display: grid;
+  gap: 2px;
+}
+
+.work-queue-item small {
+  color: var(--muted);
+}
+
+.work-clear {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #f5f3ed;
+}
+
+.workflow-links {
+  display: grid;
+  width: 100%;
+  gap: 8px;
+}
+
+.workflow-links a {
+  display: grid;
+  gap: 2px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.workflow-links a:hover {
+  border-color: var(--primary);
+}
+
+.workflow-links span {
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.work-filter-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 18px 0 4px;
+}
+
+button.analytics-window {
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.table-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+@media (max-width: 720px) {
+  .shipping-work-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .workflow-card,
+  .workflow-support {
+    min-height: auto;
+  }
+
+  .workflow-card > .button {
+    width: 100%;
+    text-align: center;
+  }
+
+  .work-filter-bar .analytics-window {
+    flex: 1 1 auto;
+  }
+}
+
 .audit-tile-sub {
   font-size: 0.7rem;
   color: var(--muted);

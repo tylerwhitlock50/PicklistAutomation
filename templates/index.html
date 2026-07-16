@@ -58,7 +58,7 @@
             </div>
 
             <div class="pl-metric">
-              <span class="pl-metric-num">{{ latest_summary['row_count'] if latest_summary else 0 }}</span>
+              <span class="pl-metric-num" data-pl-metric-num>{{ latest_summary['row_count'] if latest_summary else 0 }}</span>
               <span class="pl-metric-unit">records</span>
             </div>
 
@@ -116,6 +116,7 @@
               class="button secondary pl-secondary"
               data-busy-label="Preparing..."
               data-export-link
+              data-no-loading
               href="{{ url_for('export_latest', query_type=option) }}"
               {% if not can_export_latest %}hidden aria-hidden="true"{% endif %}
             >
@@ -359,7 +360,7 @@
                 <td>{{ run['formatted_run_timestamp'] }}</td>
                 <td>
                   {% if run['status'] == 'success' %}
-                  <a class="button secondary table-button" data-busy-label="Preparing..." href="{{ url_for('export_run', run_id=run['id'], query_type=option) }}">Download</a>
+                  <a class="button secondary table-button" data-busy-label="Preparing..." data-no-loading href="{{ url_for('export_run', run_id=run['id'], query_type=option) }}">Download</a>
                   {% else %}
                   -
                   {% endif %}
@@ -789,10 +790,19 @@
           link.addEventListener("click", function () {
             const busyLabel = link.getAttribute("data-busy-label");
             if (!busyLabel) return;
+            const originalLabel = link.textContent;
             link.textContent = busyLabel;
             link.classList.add("is-disabled");
             link.setAttribute("aria-disabled", "true");
             link.style.pointerEvents = "none";
+            // Downloads never navigate, so nothing else restores the link —
+            // re-enable it once the download has had time to start.
+            window.setTimeout(function () {
+              link.textContent = originalLabel;
+              link.classList.remove("is-disabled");
+              link.removeAttribute("aria-disabled");
+              link.style.pointerEvents = "";
+            }, 4000);
           });
         });
 
@@ -964,6 +974,11 @@
               if (statusSpinner) {
                 statusSpinner.hidden = !running;
               }
+            }
+
+            const metricNode = card.querySelector("[data-pl-metric-num]");
+            if (metricNode) {
+              metricNode.textContent = latest ? String(latest.row_count) : "0";
             }
 
             if (messageTextNode) {
