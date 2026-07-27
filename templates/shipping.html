@@ -480,34 +480,47 @@
       <section class="card">
         <div class="hero-top">
           <div>
-            <h2>Start or resume a pick</h2>
+            <h2>Select orders to pick</h2>
             <p class="helper-text">
-              Scan the <strong>sales order</strong>, then each item pulled for it &mdash; every scan is
-              verified against that exact order, so the right gun headed to the wrong customer
-              beeps immediately, before it reaches the packing bench.
+              Default to one order, or create a controlled wave of up to
+              <strong>{{ max_pick_orders }}</strong>. Each selected order gets its own tote.
             </p>
           </div>
         </div>
-        <label class="audit-operator">
-          <span>Operator (optional)</span>
-          <input type="text" id="operator-name" placeholder="Your name or initials" autocomplete="off" />
-        </label>
-        <div class="actions">
-          {% for option in query_options %}
-          <form method="post" action="{{ url_for('pick_session_start') }}" class="pick-start-form" data-loading-message="Starting pick session from the latest {{ option }} run&hellip;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
-            <input type="hidden" name="query_type" value="{{ option }}" />
-            <input type="hidden" name="operator" value="" data-operator-field />
-            <button type="submit" class="button {{ 'secondary' if not loop.first }}"
-              {% if not latest_success_by_type[option] %}disabled title="No successful {{ option }} run yet"{% endif %}>
-              Open {{ option }} pick
-              {% if latest_success_by_type[option] %}
-              <span class="helper-text">(run #{{ latest_success_by_type[option].id }}, {{ latest_success_by_type[option].row_count }} rows)</span>
-              {% endif %}
-            </button>
-          </form>
-          {% endfor %}
-        </div>
+        <form method="post" action="{{ url_for('pick_session_start') }}" class="pick-start-form" data-max-orders="{{ max_pick_orders }}" data-loading-message="Claiming selected orders&hellip;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+          <label class="audit-operator">
+            <span>Operator</span>
+            <input type="text" id="operator-name" name="operator" placeholder="Your name or initials" autocomplete="off" required />
+          </label>
+          {% if pick_orders %}
+          <div class="table-wrap pick-order-queue">
+            <table>
+              <thead><tr><th>Pick</th><th>Order</th><th>Customer</th><th>Guns</th><th>Components</th><th>Units</th><th>Locations</th><th>Desired ship</th></tr></thead>
+              <tbody>
+                {% for order in pick_orders %}
+                <tr class="{{ 'is-claimed' if order.claimed else '' }}">
+                  <td><input type="checkbox" name="orders" value="{{ order.order_id }}" aria-label="Select {{ order.order_id }}" {{ 'disabled' if order.claimed else '' }} /></td>
+                  <td class="mono"><strong>{{ order.order_id }}</strong>{% if order.claimed %}<br><span class="pill running">claimed</span>{% endif %}</td>
+                  <td>{{ order.customer_id }}</td>
+                  <td>{{ order.guns }}</td>
+                  <td>{{ order.components }}</td>
+                  <td>{{ order.units }}</td>
+                  <td>{{ order.locations|join(', ') }}</td>
+                  <td>{{ order.desired_ship_date or '' }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <div class="actions">
+            <button type="submit" class="button" data-start-wave disabled>Start selected orders</button>
+            <span class="helper-text" data-selection-count>0 of {{ max_pick_orders }} selected</span>
+          </div>
+          {% else %}
+          <p class="empty-state">No orders are available in the latest guns or components picklists.</p>
+          {% endif %}
+        </form>
 
         {% if pick_sessions %}
         <h3>Recent pick sessions</h3>
@@ -537,6 +550,23 @@
         </div>
         {% endif %}
       </section>
+
+      {% if ready_for_pack %}
+      <section class="card">
+        <h2>Ready for packing</h2>
+        <p class="helper-text">These orders are fully picked and include their accepted serial/UPC scan history.</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Order</th><th>Customer</th><th>Tote</th><th>Picker</th><th>Ready</th><th>Pick session</th></tr></thead>
+            <tbody>
+              {% for order in ready_for_pack %}
+              <tr><td class="mono"><strong>{{ order.cust_order_id }}</strong></td><td>{{ order.customer_id or '' }}</td><td>{{ order.tote_code }}</td><td>{{ order.operator or '' }}</td><td>{{ order.completed_display or '' }}</td><td><a href="{{ url_for('pick_session_page', session_id=order.pick_session_id) }}">#{{ order.pick_session_id }}</a></td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      {% endif %}
       {% endif %}
 
       {% if view == 'verify' %}
@@ -729,6 +759,34 @@
             if (field && input) field.value = input.value.trim();
           });
         });
+      })();
+
+      // Controlled micro-batch: one order by default, never more than three.
+      (function () {
+        const form = document.querySelector(".pick-start-form[data-max-orders]");
+        if (!form) return;
+        const max = Number(form.getAttribute("data-max-orders")) || 3;
+        const boxes = Array.from(form.querySelectorAll('input[name="orders"]'));
+        const button = form.querySelector("[data-start-wave]");
+        const count = form.querySelector("[data-selection-count]");
+        function update(changed) {
+          let selected = boxes.filter(function (box) { return box.checked; });
+          if (selected.length > max && changed) {
+            changed.checked = false;
+            selected = boxes.filter(function (box) { return box.checked; });
+            alert("A pick wave can contain at most " + max + " orders.");
+          }
+          if (button) button.disabled = selected.length === 0;
+          if (count) count.textContent = selected.length + " of " + max + " selected";
+        }
+        boxes.forEach(function (box) {
+          box.addEventListener("change", function () { update(box); });
+        });
+        form.addEventListener("submit", function (event) {
+          const selected = boxes.filter(function (box) { return box.checked; }).length;
+          if (selected < 1 || selected > max) event.preventDefault();
+        });
+        update(null);
       })();
 
       // Table filter (mirrors dashboard behaviour). Filtering searches every

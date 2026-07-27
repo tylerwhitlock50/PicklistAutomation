@@ -135,6 +135,9 @@ RECON_SHIPMENTS_FILE = resolve_path_setting(
 PICK_SERIAL_LOOKUP_FILE = resolve_path_setting(
     os.getenv("PICK_SERIAL_LOOKUP_FILE", "sql/pick_serial_lookup.sql")
 )
+PICK_UPC_LOOKUP_FILE = resolve_path_setting(
+    os.getenv("PICK_UPC_LOOKUP_FILE", "sql/pick_upc_lookup.sql")
+)
 PACKLIST_SERIALS_FILE = resolve_path_setting(
     os.getenv("PACKLIST_SERIALS_FILE", "sql/packlist_serials.sql")
 )
@@ -2568,6 +2571,8 @@ def audit_session_page(session_id: int):
         items=items,
         unexpected=unexpected,
         counts=counts,
+        resolutions=audit_store.get_resolutions(session_id),
+        resolution_codes=audit_store.RESOLUTION_CODES,
         known_location_ids=audit_store.list_active_location_ids(),
         ui_refresh_interval_seconds=UI_REFRESH_INTERVAL_SECONDS,
     )
@@ -2607,6 +2612,49 @@ def api_audit_scan(session_id: int):
             "counts": result["counts"],
             "serial": serial,
             "location": location,
+        }
+    ), 200
+
+
+@app.post("/api/audit/session/<int:session_id>/resolve")
+@require_trusted_client
+@require_csrf
+def api_audit_resolve(session_id: int):
+    # Allowed on both in-progress and completed sessions: exceptions found by a
+    # completed audit are a punch list worked after the fact.
+    if not audit_store.is_available():
+        return jsonify({"error": "audit_unavailable", "message": AUDIT_UNAVAILABLE_MESSAGE}), 503
+
+    session_row = audit_store.get_session(session_id)
+    if not session_row:
+        return jsonify({"error": "not_found", "message": "Audit session not found."}), 404
+
+    payload = request.get_json(silent=True) or {}
+    serial = (payload.get("serial") or "").strip()
+    resolution = (payload.get("resolution") or "").strip()
+    note = (payload.get("note") or "").strip() or None
+    operator = (payload.get("operator") or "").strip() or None
+    if not serial:
+        return jsonify({"error": "invalid", "message": "A serial number is required."}), 400
+    if resolution not in audit_store.RESOLUTION_CODES:
+        return jsonify({"error": "invalid", "message": "A valid resolution status is required."}), 400
+
+    try:
+        result = audit_store.record_resolution(session_id, serial, resolution, note, operator)
+    except ValueError as exc:
+        return jsonify({"error": "invalid", "message": str(exc)}), 400
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to record audit resolution: %s", exc)
+        return jsonify({"error": "resolve_failed", "message": str(exc)}), 500
+
+    return jsonify(
+        {
+            "resolution": result["resolution"],
+            "resolution_label": result["resolution_label"],
+            "exception_type": result["exception_type"],
+            "item": result["item"],
+            "counts": result["counts"],
+            "serial": serial,
         }
     ), 200
 
@@ -2678,9 +2726,31 @@ def audit_session_export(session_id: int):
 
     items = audit_store.get_expected_items(session_id)
     unexpected = audit_store.get_unexpected_scans(session_id)
+    resolutions = audit_store.get_resolutions(session_id)
+
+    for item in items:
+        res = resolutions.get((item.get("serial") or "").upper())
+        item["resolution"] = audit_store.RESOLUTION_CODES.get(res["resolution"]) if res else None
+        item["resolution_note"] = res["note"] if res else None
+    for row in unexpected:
+        res = resolutions.get((row.get("scanned_serial") or "").upper())
+        row["resolution"] = audit_store.RESOLUTION_CODES.get(res["resolution"]) if res else None
+        row["resolution_note"] = res["note"] if res else None
+    resolution_rows = [
+        {
+            "serial": res["serial"],
+            "exception_type": res["exception_type"],
+            "resolution": audit_store.RESOLUTION_CODES.get(res["resolution"], res["resolution"]),
+            "note": res["note"],
+            "resolved_by": res["resolved_by"],
+            "resolved_at": _audit_dt_display(res["resolved_at"]),
+        }
+        for res in resolutions.values()
+    ]
 
     expected_df = pd.DataFrame(items)
     unexpected_df = pd.DataFrame(unexpected)
+    resolutions_df = pd.DataFrame(resolution_rows)
     output = io.BytesIO()
     with pd.ExcelWriter(output) as writer:
         (expected_df if not expected_df.empty else pd.DataFrame(columns=["serial"])).to_excel(
@@ -2688,6 +2758,9 @@ def audit_session_export(session_id: int):
         )
         (unexpected_df if not unexpected_df.empty else pd.DataFrame(columns=["scanned_serial"])).to_excel(
             writer, index=False, sheet_name="Unexpected"
+        )
+        (resolutions_df if not resolutions_df.empty else pd.DataFrame(columns=["serial"])).to_excel(
+            writer, index=False, sheet_name="Resolutions"
         )
     output.seek(0)
     scope_label = (session_row.get("scope") or "ALL").replace("/", "-")
@@ -3411,6 +3484,67 @@ SHIPPING_VIEWS = {
 }
 
 
+def build_pick_order_queue() -> dict[str, Any]:
+    """Combine the latest guns/components plans into one order work queue."""
+    source_runs: dict[str, int] = {}
+    plan_rows: list[dict[str, Any]] = []
+    for query_type in QUERY_FILES:
+        run, rows = get_latest_successful_run(query_type=query_type)
+        if not run:
+            continue
+        source_runs[query_type] = int(run["id"])
+        for row in rows:
+            plan_rows.append({**row, "_query_type": query_type})
+
+    claimed = pick_store.claimed_orders()
+    by_order: dict[str, dict[str, Any]] = {}
+    for row in plan_rows:
+        order_id = str(row.get("Cust Order ID") or "").strip().upper()
+        if not order_id:
+            continue
+        entry = by_order.setdefault(
+            order_id,
+            {
+                "order_id": order_id,
+                "customer_id": str(row.get("Customer ID") or "").strip(),
+                "guns": 0,
+                "components": 0,
+                "units": 0,
+                "locations": set(),
+                "desired_ship_date": None,
+                "claimed": order_id in claimed,
+            },
+        )
+        try:
+            quantity = int(float(row.get("SO Qty") or 0))
+        except (TypeError, ValueError):
+            quantity = 0
+        item_type = str(row.get("_query_type") or "").lower()
+        entry[item_type] = int(entry.get(item_type) or 0) + quantity
+        entry["units"] += quantity
+        location = str(row.get("Location") or "").strip()
+        if location:
+            entry["locations"].add(location)
+        desired = str(row.get("Desired Ship Date") or "").strip() or None
+        if desired and (
+            entry["desired_ship_date"] is None or desired < entry["desired_ship_date"]
+        ):
+            entry["desired_ship_date"] = desired
+
+    orders = []
+    for entry in by_order.values():
+        entry["locations"] = sorted(entry["locations"])
+        orders.append(entry)
+    orders.sort(
+        key=lambda row: (
+            bool(row["claimed"]),
+            str(row.get("desired_ship_date") or "9999-12-31"),
+            row["order_id"],
+        )
+    )
+    return {"orders": orders, "plan_rows": plan_rows, "source_runs": source_runs}
+
+
 @app.get("/shipping")
 @require_trusted_client
 def shipping_page():
@@ -3425,6 +3559,8 @@ def shipping_page():
     pick_sessions: list[dict[str, Any]] = []
     verify_sessions: list[dict[str, Any]] = []
     latest_success_by_type: dict[str, Any] = {}
+    pick_orders: list[dict[str, Any]] = []
+    ready_for_pack: list[dict[str, Any]] = []
 
     if view == "recon":
         recon_payload = _audit_json_safe(build_recon_payload(request.args.get("date")))
@@ -3459,6 +3595,11 @@ def shipping_page():
                 if summary
                 else None
             )
+        if view == "pick":
+            pick_orders = build_pick_order_queue()["orders"]
+            ready_for_pack = pick_store.ready_for_pack_orders(limit=100)
+            for row in ready_for_pack:
+                row["completed_display"] = _audit_dt_display(row.get("completed_at"))
 
     return render_template(
         "shipping.html",
@@ -3472,6 +3613,9 @@ def shipping_page():
         verify_sessions=verify_sessions,
         latest_success_by_type=latest_success_by_type,
         query_options=list(QUERY_FILES.keys()),
+        pick_orders=pick_orders,
+        ready_for_pack=ready_for_pack,
+        max_pick_orders=pick_store.MAX_ORDERS_PER_SESSION,
         today_iso=_today_local().isoformat(),
     )
 
@@ -3613,6 +3757,28 @@ def shipping_recon_export():
 @require_trusted_client
 @require_csrf
 def pick_session_start():
+    operator = (request.form.get("operator") or "").strip() or None
+    selected_orders = request.form.getlist("orders")
+    queue = build_pick_order_queue()
+    try:
+        session_id = pick_store.start_order_session(
+            plan_rows=queue["plan_rows"],
+            selected_orders=selected_orders,
+            source_runs=queue["source_runs"],
+            operator=operator,
+        )
+    except ValueError as exc:
+        flash(str(exc), "error")
+        return redirect(url_for("shipping_page", view="pick"))
+    logger.info(
+        "Started order pick session #%s for %s.",
+        session_id,
+        ", ".join(selected_orders),
+    )
+    return redirect(url_for("pick_session_page", session_id=session_id))
+
+
+def _legacy_pick_session_start():
     query_type = get_query_type(request.form.get("query_type"))
     operator = (request.form.get("operator") or "").strip() or None
 
@@ -3672,9 +3838,29 @@ def pick_session_page(session_id: int):
         return redirect(url_for("shipping_page", view="pick"))
 
     lines = pick_store.get_lines(session_id)
+    orders = pick_store.get_orders(session_id)
+    order_context: dict[str, dict[str, Any]] = {}
+    for order in orders:
+        order_id = str(order.get("cust_order_id") or "").strip().upper()
+        order_context[order_id] = {
+            "tote": order.get("tote_barcode") or order.get("tote_code"),
+            "locations": sorted(
+                {
+                    str(line.get("location") or "").strip().upper()
+                    for line in lines
+                    if str(line.get("cust_order_id") or "").strip().upper() == order_id
+                    and str(line.get("location") or "").strip()
+                }
+            ),
+            "status": order.get("status"),
+            "assigned_operator": order.get("assigned_operator"),
+        }
     scans = pick_store.get_scans(session_id, limit=100)
+    order_events = pick_store.get_order_events(session_id, limit=200)
     for scan in scans:
         scan["scanned_display"] = _audit_dt_display(scan.get("scanned_at"))
+    for event in order_events:
+        event["created_display"] = _audit_dt_display(event.get("created_at"))
 
     return render_template(
         "pick_session.html",
@@ -3682,7 +3868,10 @@ def pick_session_page(session_id: int):
         started_display=_audit_dt_display(session_row.get("started_at")),
         completed_display=_audit_dt_display(session_row.get("completed_at")),
         lines=lines,
+        orders=orders,
+        order_context=order_context,
         scans=scans,
+        order_events=order_events,
         counts=pick_store.compute_counts(session_id),
     )
 
@@ -3697,6 +3886,13 @@ def _resolve_pick_candidates(scan: str, lines: list[dict]) -> tuple[Optional[str
     line_parts = {str(l["part_id"] or "").strip().upper() for l in lines}
     if scan in line_parts:
         return None, [{"part_id": scan, "locations": []}], False
+    upc_parts = {
+        str(line.get("upc") or "").strip().upper(): str(line["part_id"] or "").strip()
+        for line in lines
+        if str(line.get("upc") or "").strip()
+    }
+    if scan in upc_parts:
+        return None, [{"part_id": upc_parts[scan], "locations": []}], False
 
     try:
         df = run_erp_query_file(
@@ -3705,6 +3901,21 @@ def _resolve_pick_candidates(scan: str, lines: list[dict]) -> tuple[Optional[str
     except Exception:  # noqa: BLE001
         logger.exception("Pick serial lookup failed for %s", scan)
         return scan, [], True
+    if df.empty and any(line.get("item_type") == "components" for line in lines):
+        try:
+            upc_df = run_erp_query_file(
+                PICK_UPC_LOOKUP_FILE, {"upc": scan}, "pick UPC lookup"
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Pick UPC lookup failed for %s", scan)
+            return None, [], True
+        if not upc_df.empty:
+            upc_candidates = [
+                {"part_id": str(row.get("PART_ID") or "").strip(), "locations": []}
+                for row in upc_df.to_dict(orient="records")
+                if str(row.get("PART_ID") or "").strip()
+            ]
+            return None, upc_candidates, False
     if df.empty:
         return scan, [], False
 
@@ -3737,11 +3948,16 @@ def api_pick_scan(session_id: int):
     payload = request.get_json(silent=True) or {}
     scan = (payload.get("scan") or "").strip().upper()
     target_order = (payload.get("order") or "").strip().upper() or None
-    operator = (payload.get("operator") or "").strip() or None
+    operator = (payload.get("operator") or session_row.get("operator") or "").strip() or None
+    request_id = (payload.get("request_id") or "").strip() or None
+    scanned_tote = (payload.get("tote") or "").strip().upper() or None
+    scanned_location = (payload.get("location") or "").strip().upper() or None
     if not scan:
         return jsonify({"error": "invalid", "message": "A scanned value is required."}), 400
     if len(scan) > SERIAL_MAX_LENGTH:
         return jsonify({"error": "invalid", "message": "Scanned value is too long."}), 400
+    if not request_id or len(request_id) > 100:
+        return jsonify({"error": "invalid", "message": "A valid scan request ID is required."}), 400
 
     lines = pick_store.get_lines(session_id)
     serial, candidates, erp_failed = _resolve_pick_candidates(scan, lines)
@@ -3765,12 +3981,38 @@ def api_pick_scan(session_id: int):
             part_candidates=candidates,
             operator=operator,
             unknown=(serial is not None and not candidates),
+            request_id=request_id,
+            scanned_tote=scanned_tote,
+            scanned_location=scanned_location,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to record pick scan: %s", exc)
         return jsonify({"error": "scan_failed", "message": str(exc)}), 500
 
     result["scan"] = scan
+    return jsonify(result), 200
+
+
+@app.post("/api/pick/session/<int:session_id>/order/<path:order_id>/action")
+@require_trusted_client
+@require_csrf
+def api_pick_order_action(session_id: int, order_id: str):
+    session_row = pick_store.get_session(session_id)
+    if not session_row:
+        return jsonify({"error": "not_found", "message": "Pick session not found."}), 404
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = pick_store.order_action(
+            session_id,
+            order_id,
+            str(payload.get("action") or ""),
+            operator=str(payload.get("operator") or session_row.get("operator") or ""),
+            reason=payload.get("reason"),
+            to_operator=payload.get("to_operator"),
+        )
+    except ValueError as exc:
+        return jsonify({"error": "invalid_action", "message": str(exc)}), 409
+    result["redirect"] = url_for("pick_session_page", session_id=session_id)
     return jsonify(result), 200
 
 
@@ -3782,12 +4024,22 @@ def api_pick_complete(session_id: int):
     if not session_row:
         return jsonify({"error": "not_found", "message": "Pick session not found."}), 404
 
-    completed = pick_store.complete_session(session_id)
-    logger.info("Completed pick session #%s.", session_id)
+    payload = request.get_json(silent=True) or {}
+    order_id = (payload.get("order") or "").strip().upper()
+    try:
+        if order_id:
+            completed = pick_store.complete_order(session_id, order_id)
+            counts = pick_store.compute_counts(session_id)
+            logger.info("Order %s is ready for packing from pick session #%s.", order_id, session_id)
+        else:
+            completed = pick_store.complete_session(session_id)
+            counts = completed.get("counts")
+    except ValueError as exc:
+        return jsonify({"error": "incomplete", "message": str(exc)}), 409
     return jsonify(
         {
-            "status": "completed",
-            "counts": completed.get("counts"),
+            "status": completed.get("status", "completed"),
+            "counts": counts,
             "redirect": url_for("pick_session_page", session_id=session_id),
         }
     ), 200
@@ -3880,7 +4132,16 @@ def verify_session_start():
     if shipper_status in ("X", "V"):
         flash(f"{packlist_id} is voided in the ERP — nothing to verify.", "error")
         return redirect(url_for("shipping_page", view="verify"))
+    pick_attached = pick_store.attach_packlist(
+        header.get("CUST_ORDER_ID"), packlist_id
+    )
     if not any(str(r.get("TRACE_ID") or "").strip() for r in rows):
+        if pick_attached:
+            flash(
+                f"{packlist_id} was attached to the picked order; it has no serialized items to scan-verify.",
+                "success",
+            )
+            return redirect(url_for("shipping_page", view="verify"))
         flash(
             f"{packlist_id} has no serialized items — nothing to scan-verify.",
             "error",
@@ -3888,6 +4149,12 @@ def verify_session_start():
         return redirect(url_for("shipping_page", view="verify"))
 
     session_id = verify_store.start_session(packlist_id, header, rows, operator=operator)
+    if pick_attached:
+        logger.info(
+            "Attached %s to ready picked order %s.",
+            packlist_id,
+            header.get("CUST_ORDER_ID"),
+        )
     logger.info(
         "Started verify session #%s for %s (%d rows).",
         session_id,

@@ -15,13 +15,13 @@
         <div class="hero-top">
           <div>
             <p class="eyebrow">Pick Confirm &middot; Session #{{ session.id }}</p>
-            <h1>{{ session.query_type|capitalize }} picklist &mdash; run #{{ session.run_id }}</h1>
+            <h1>{% if orders %}Order pick wave{% else %}{{ session.query_type|capitalize }} picklist &mdash; run #{{ session.run_id }}{% endif %}</h1>
           </div>
           <a class="button tertiary" href="{{ url_for('shipping_page', view='pick') }}">&larr; Pick orders</a>
         </div>
         <p class="hero-copy">
-          {% if session.status == 'completed' %}
-          This pick session is complete. Review the results below.
+          {% if session.status != 'active' %}
+          This pick session is {{ session.status }}. Review the results below.
           {% else %}
           Scan the <strong>sales order barcode</strong> first, then each item you pull for it.
           Every scan is checked against that exact order — the right gun in the wrong
@@ -40,27 +40,64 @@
         <div class="audit-tile tile-misplaced"><span class="audit-tile-num" data-tile="duplicate_scans">{{ counts.duplicate_scans }}</span><span class="audit-tile-label">Duplicates</span></div>
       </section>
 
-      {% if session.status != 'completed' %}
+      {% if session.status == 'active' %}
       <section class="card">
         <h2>Scan</h2>
+        {% if orders %}
+        <div class="pick-wave-orders" aria-label="Orders in this pick wave">
+          {% for order in orders %}
+          <article class="pick-wave-order {{ 'is-ready' if order.status == 'ready_for_pack' else '' }}" data-order-card="{{ order.cust_order_id }}">
+            <span class="pick-tote">Tote {{ order.tote_code }}</span>
+            <span class="mono pick-tote-barcode">{{ order.tote_barcode }}</span>
+            <strong class="mono">{{ order.cust_order_id }}</strong>
+            <span>{{ order.customer_id or '' }}</span>
+            <span>Assigned to <strong>{{ order.assigned_operator or session.operator }}</strong></span>
+            <span data-order-progress>{{ order.picked_units }} / {{ order.planned_units }} units</span>
+            {% if order.status == 'ready_for_pack' %}
+            <span class="pill success">ready for pack</span>
+            {% elif order.status == 'exception' %}
+            <span class="pill audit-status status-missing">exception hold</span>
+            <button type="button" class="button secondary table-button" data-order-action="resume" data-order-id="{{ order.cust_order_id }}">Resume after review</button>
+            {% elif order.status == 'picking' %}
+            <button type="button" class="button secondary table-button" data-complete-order="{{ order.cust_order_id }}" {{ 'disabled' if order.picked_units < order.planned_units else '' }}>Mark order complete</button>
+            <div class="pick-order-actions">
+              <button type="button" class="button tertiary table-button" data-order-action="transfer" data-order-id="{{ order.cust_order_id }}">Transfer</button>
+              <button type="button" class="button tertiary table-button" data-order-action="release" data-order-id="{{ order.cust_order_id }}" {{ 'disabled' if order.picked_units > 0 else '' }}>Release</button>
+              <button type="button" class="button tertiary table-button" data-order-action="exception" data-order-id="{{ order.cust_order_id }}">Short / issue</button>
+            </div>
+            {% else %}
+            <span class="pill">{{ order.status }}</span>
+            {% endif %}
+          </article>
+          {% endfor %}
+        </div>
+        {% endif %}
         <div class="audit-scan-grid">
           <label class="audit-field">
             <span>Current sales order</span>
             <input type="text" id="order-input" placeholder="Scan the SO barcode (e.g. SO-130311)" autocomplete="off" autocapitalize="characters" spellcheck="false" />
           </label>
           <label class="audit-field">
-            <span>Item &mdash; serial (guns) or part number (components)</span>
-            <input type="text" id="scan-input" placeholder="Scan each item pulled for this order" autocomplete="off" autocapitalize="characters" spellcheck="false" />
+            <span>Order tote</span>
+            <input type="text" id="tote-input" placeholder="Scan the tote barcode" autocomplete="off" autocapitalize="characters" spellcheck="false" />
+          </label>
+          <label class="audit-field">
+            <span>Pick location</span>
+            <input type="text" id="location-input" placeholder="Scan the shelf or bin" autocomplete="off" autocapitalize="characters" spellcheck="false" />
+          </label>
+          <label class="audit-field">
+            <span>Item &mdash; serial (guns) or UPC (components)</span>
+            <input type="text" id="scan-input" placeholder="Scan the item after tote and location" autocomplete="off" autocapitalize="characters" spellcheck="false" />
           </label>
         </div>
         <p class="helper-text" id="scan-hint">
-          Order barcode first, then one scan per unit &mdash; the scanner's Tab/Enter submits
-          automatically. Scanning another order barcode into the item box switches the order.
+          Required sequence: order &rarr; tote &rarr; location &rarr; item. The tote and
+          location stay active for consecutive units until you change order or location.
         </p>
         <div id="scan-result" class="audit-scan-result" hidden></div>
         <div class="actions">
           <button type="button" class="button tertiary" id="change-order">Change order</button>
-          <button type="button" class="button secondary" id="complete-pick">Complete pick session</button>
+          {% if not orders %}<button type="button" class="button secondary" id="complete-pick">Complete pick session</button>{% endif %}
           <a class="button tertiary" href="{{ url_for('pick_session_export', session_id=session.id) }}" data-no-loading>Export</a>
         </div>
         <div class="audit-log" id="scan-log" aria-live="polite">
@@ -73,8 +110,8 @@
       </section>
       {% else %}
       <section class="card">
-        <h2>Pick complete</h2>
-        <p class="helper-text">Move the picked orders to packing. When a packlist is ready, verify the serialized contents before shipment.</p>
+        <h2>{{ 'Pick complete' if session.status == 'completed' else 'Pick session closed' }}</h2>
+        <p class="helper-text">{% if session.status == 'completed' %}Move the picked orders to packing. When a packlist is ready, verify the serialized contents before shipment.{% else %}This wave has no actively picked orders. Released orders can be claimed again; exception orders remain held for review.{% endif %}</p>
         <div class="actions">
           <a class="button secondary" href="{{ url_for('shipping_page', view='verify') }}#verify-start">Verify a box</a>
           <a class="button tertiary" href="{{ url_for('shipping_page', view='pick') }}">Back to pick work</a>
@@ -94,6 +131,7 @@
               <tr>
                 <th>Order</th>
                 <th>Customer</th>
+                <th>Type</th>
                 <th>Part</th>
                 <th>Pick from</th>
                 <th>Picked / planned</th>
@@ -102,9 +140,10 @@
             </thead>
             <tbody>
               {% for line in lines %}
-              <tr data-line-id="{{ line.id }}">
+              <tr data-line-id="{{ line.id }}" data-order-id="{{ line.cust_order_id }}" data-planned="{{ line.planned_qty }}" data-picked="{{ line.picked_qty }}">
                 <td class="mono">{{ line.cust_order_id or '' }}</td>
                 <td>{{ line.customer_id or '' }}</td>
+                <td><span class="pill run-type {{ line.item_type }}">{{ line.item_type }}</span></td>
                 <td class="mono">{{ line.part_id }}</td>
                 <td>{{ line.location or '' }}</td>
                 <td data-progress-cell>{{ line.picked_qty }} / {{ line.planned_qty }}</td>
@@ -124,7 +163,7 @@
         </div>
       </section>
 
-      {% if session.status == 'completed' and scans %}
+      {% if session.status != 'active' and scans %}
       <section class="card">
         <h2>Scan log</h2>
         <div class="table-wrap">
@@ -148,6 +187,22 @@
         </div>
       </section>
       {% endif %}
+
+      {% if order_events %}
+      <section class="card">
+        <h2>Order activity</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Order</th><th>Event</th><th>Reason</th><th>From</th><th>To</th><th>Operator</th><th>When</th></tr></thead>
+            <tbody>
+              {% for event in order_events %}
+              <tr><td class="mono">{{ event.cust_order_id }}</td><td>{{ event.event_type|replace('_', ' ') }}</td><td>{{ event.reason or '' }}</td><td>{{ event.from_operator or '' }}</td><td>{{ event.to_operator or '' }}</td><td>{{ event.operator or '' }}</td><td>{{ event.created_display or '' }}</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      {% endif %}
     </main>
 
     <script>
@@ -156,7 +211,8 @@
         csrfToken: {{ csrf_token()|tojson }},
         scanUrl: {{ url_for('api_pick_scan', session_id=session.id)|tojson }},
         completeUrl: {{ url_for('api_pick_complete', session_id=session.id)|tojson }},
-        completed: {{ (session.status == 'completed')|tojson }},
+        orderActionUrl: {{ url_for('api_pick_order_action', session_id=session.id, order_id='__ORDER__')|tojson }},
+        completed: {{ (session.status != 'active')|tojson }},
         operator: null,
       };
       try { PICK.operator = localStorage.getItem("audit_operator_name") || null; } catch (e) {}
@@ -192,6 +248,7 @@
       });
 
       if (!PICK.completed) {
+        const ORDER_CONTEXT = {{ order_context|tojson }};
         // Order barcodes scanned into the item box switch the current order
         // instead of being submitted as items.
         const KNOWN_ORDERS = new Set(
@@ -200,23 +257,71 @@
         );
 
         const orderInput = document.getElementById("order-input");
+        const toteInput = document.getElementById("tote-input");
+        const locationInput = document.getElementById("location-input");
         const scanInput = document.getElementById("scan-input");
         const scanResult = document.getElementById("scan-result");
         const scanLog = document.getElementById("scan-log");
         const scanHint = document.getElementById("scan-hint");
         let currentOrder = "";
+        let currentTote = "";
+        let currentLocation = "";
         let submitting = false;
 
         function setOrder(value) {
           currentOrder = value.trim().toUpperCase();
           if (!currentOrder) return;
+          currentTote = "";
+          currentLocation = "";
+          toteInput.value = "";
+          locationInput.value = "";
           orderInput.value = currentOrder;
           if (!KNOWN_ORDERS.has(currentOrder)) {
             scanHint.textContent = currentOrder + " is not on this picklist — check the order number, or scan items anyway to log the mismatch.";
             beep("duplicate");
           } else {
-            scanHint.textContent = "Picking for " + currentOrder + ". Scan each item pulled for it.";
+            const context = ORDER_CONTEXT[currentOrder] || {};
+            scanHint.textContent = "Picking for " + currentOrder + ". Scan tote " + context.tote + ".";
           }
+          toteInput.focus();
+        }
+
+        function setTote(value) {
+          if (!currentOrder) { orderInput.focus(); return; }
+          const scanned = value.trim().toUpperCase();
+          const context = ORDER_CONTEXT[currentOrder] || {};
+          const expected = String(context.tote || "").toUpperCase();
+          const slot = expected.split("-").pop();
+          if (scanned !== expected && scanned !== slot && scanned !== "TOTE-" + slot) {
+            currentTote = "";
+            toteInput.value = "";
+            showResult("problem", "Wrong tote. Scan " + expected + " for " + currentOrder + ".");
+            beep("problem");
+            toteInput.focus();
+            return;
+          }
+          currentTote = expected;
+          toteInput.value = expected;
+          scanHint.textContent = "Tote confirmed. Scan a pick location for " + currentOrder + ".";
+          locationInput.focus();
+        }
+
+        function setLocation(value) {
+          if (!currentOrder || !currentTote) { toteInput.focus(); return; }
+          const scanned = value.trim().toUpperCase();
+          const context = ORDER_CONTEXT[currentOrder] || {};
+          const locations = (context.locations || []).map(function (v) { return String(v).toUpperCase(); });
+          if (locations.length && locations.indexOf(scanned) === -1) {
+            currentLocation = "";
+            locationInput.value = "";
+            showResult("problem", "Wrong location for " + currentOrder + ". Expected " + locations.join(", ") + ".");
+            beep("problem");
+            locationInput.focus();
+            return;
+          }
+          currentLocation = scanned;
+          locationInput.value = scanned;
+          scanHint.textContent = "Order, tote, and location confirmed. Scan serial or UPC.";
           scanInput.focus();
         }
 
@@ -245,6 +350,7 @@
           if (!line) return;
           const row = document.querySelector('tr[data-line-id="' + line.id + '"]');
           if (!row) return;
+          row.setAttribute("data-picked", line.picked_qty);
           const progress = row.querySelector("[data-progress-cell]");
           if (progress) progress.textContent = line.picked_qty + " / " + line.planned_qty;
           const cell = row.querySelector("[data-status-cell]");
@@ -254,6 +360,19 @@
               ? '<span class="pill audit-status status-verified">done</span>'
               : '<span class="pill audit-status status-misplaced">picking</span>';
           }
+          updateOrderCard(line.cust_order_id);
+        }
+
+        function updateOrderCard(orderId) {
+          const card = document.querySelector('[data-order-card="' + orderId + '"]');
+          if (!card) return;
+          const rows = Array.from(document.querySelectorAll('tr[data-order-id="' + orderId + '"]'));
+          const planned = rows.reduce(function (sum, row) { return sum + Number(row.getAttribute("data-planned") || 0); }, 0);
+          const picked = rows.reduce(function (sum, row) { return sum + Number(row.getAttribute("data-picked") || 0); }, 0);
+          const progress = card.querySelector("[data-order-progress]");
+          const button = card.querySelector("[data-complete-order]");
+          if (progress) progress.textContent = picked + " / " + planned + " units";
+          if (button) button.disabled = picked < planned;
         }
 
         async function submitScan(value) {
@@ -264,14 +383,49 @@
             orderInput.focus();
             return;
           }
+          if (!currentTote) {
+            showResult("problem", "Scan the assigned tote before the item.");
+            beep("problem");
+            toteInput.focus();
+            return;
+          }
+          if (!currentLocation) {
+            showResult("problem", "Scan the pick location before the item.");
+            beep("problem");
+            locationInput.focus();
+            return;
+          }
           submitting = true;
+          const scanContext = {
+            session: PICK.sessionId,
+            scan: value,
+            order: currentOrder,
+            tote: currentTote,
+            location: currentLocation,
+          };
+          let requestId = null;
+          try {
+            const pending = JSON.parse(sessionStorage.getItem("pendingPickScan") || "null");
+            if (pending && JSON.stringify(pending.context) === JSON.stringify(scanContext)) requestId = pending.requestId;
+          } catch (e) {}
+          requestId = requestId || (window.crypto && window.crypto.randomUUID
+            ? window.crypto.randomUUID()
+            : String(Date.now()) + "-" + Math.random().toString(16).slice(2));
+          try { sessionStorage.setItem("pendingPickScan", JSON.stringify({ requestId: requestId, context: scanContext })); } catch (e) {}
           try {
             const resp = await fetch(PICK.scanUrl, {
               method: "POST",
               headers: { "Content-Type": "application/json", "X-CSRF-Token": PICK.csrfToken },
-              body: JSON.stringify({ scan: value, order: currentOrder, operator: PICK.operator }),
+              body: JSON.stringify({
+                scan: value, order: currentOrder, tote: currentTote,
+                location: currentLocation, operator: PICK.operator,
+                request_id: requestId,
+              }),
             });
             const data = await resp.json();
+            if (resp.ok || resp.status < 500) {
+              try { sessionStorage.removeItem("pendingPickScan"); } catch (e) {}
+            }
             if (!resp.ok) {
               showResult("problem", "Error: " + (data.message || resp.status));
               beep("problem");
@@ -280,6 +434,8 @@
             const prefix = {
               ok: "✔ ", duplicate: "⚠ DUPLICATE ", overpick: "✖ OVERPICK ",
               wrong_order: "✖ WRONG ORDER ", wrong_item: "✖ WRONG ITEM ", unknown: "✖ UNKNOWN ",
+              wrong_location: "WRONG LOCATION ", wrong_tote: "WRONG TOTE ",
+              wrong_operator: "WRONG OPERATOR ",
             }[data.result] || "";
             showResult(data.result === "ok" ? "ok" : (data.result === "duplicate" ? "duplicate" : "problem"),
               prefix + value + " — " + data.message);
@@ -287,7 +443,7 @@
             updateLine(data.line);
             applyCounts(data.counts);
           } catch (err) {
-            showResult("problem", "Network error — scan " + value + " was NOT recorded. Try again.");
+            showResult("problem", "Network error — rescan " + value + ". The same request will be retried safely.");
             beep("problem");
           } finally {
             submitting = false;
@@ -303,9 +459,27 @@
           }
         });
 
+        toteInput.addEventListener("keydown", function (e) {
+          if (e.key === "Enter" || e.key === "Tab") {
+            e.preventDefault();
+            setTote(toteInput.value);
+          }
+        });
+
+        locationInput.addEventListener("keydown", function (e) {
+          if (e.key === "Enter" || e.key === "Tab") {
+            e.preventDefault();
+            setLocation(locationInput.value);
+          }
+        });
+
         document.getElementById("change-order").addEventListener("click", function () {
           currentOrder = "";
+          currentTote = "";
+          currentLocation = "";
           orderInput.value = "";
+          toteInput.value = "";
+          locationInput.value = "";
           scanHint.textContent = "Scan the sales order barcode to continue.";
           orderInput.focus();
         });
@@ -322,18 +496,65 @@
           }
         });
 
-        document.getElementById("complete-pick").addEventListener("click", async function () {
-          if (!confirm("Complete this pick session? Progress is saved as-is.")) return;
+        async function completeOrder(order) {
+          if (!confirm("Mark " + order + " complete and send it to packing?")) return;
           try {
             const resp = await fetch(PICK.completeUrl, {
               method: "POST",
               headers: { "Content-Type": "application/json", "X-CSRF-Token": PICK.csrfToken },
-              body: JSON.stringify({}),
+              body: JSON.stringify({ order: order }),
             });
             const data = await resp.json();
             if (resp.ok && data.redirect) { window.location.href = data.redirect; }
             else { alert(data.message || "Could not complete the pick session."); }
           } catch (err) { alert("Network error completing the pick session."); }
+        }
+
+        document.querySelectorAll("[data-complete-order]").forEach(function (button) {
+          button.addEventListener("click", function () {
+            if (!button.disabled) completeOrder(button.getAttribute("data-complete-order"));
+          });
+        });
+
+        document.querySelectorAll("[data-order-action]").forEach(function (button) {
+          button.addEventListener("click", async function () {
+            const action = button.getAttribute("data-order-action");
+            const order = button.getAttribute("data-order-id");
+            let reason = "";
+            let toOperator = "";
+            if (action === "transfer") {
+              toOperator = prompt("Transfer " + order + " to which operator?") || "";
+              if (!toOperator.trim()) return;
+            } else if (action === "resume") {
+              if (!confirm("Resume picking " + order + " after exception review?")) return;
+            } else {
+              reason = prompt(action === "release"
+                ? "Why are you releasing " + order + "?"
+                : "Describe the shortage, damage, or other issue for " + order + ":") || "";
+              if (!reason.trim()) return;
+            }
+            try {
+              const url = PICK.orderActionUrl.replace("__ORDER__", encodeURIComponent(order));
+              const resp = await fetch(url, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "X-CSRF-Token": PICK.csrfToken },
+                body: JSON.stringify({
+                  action: action, reason: reason, to_operator: toOperator,
+                  operator: PICK.operator,
+                }),
+              });
+              const data = await resp.json();
+              if (resp.ok && data.redirect) window.location.href = data.redirect;
+              else alert(data.message || "Could not update the order.");
+            } catch (err) {
+              alert("Network error updating " + order + ". No action was applied.");
+            }
+          });
+        });
+
+        const completePick = document.getElementById("complete-pick");
+        if (completePick) completePick.addEventListener("click", function () {
+          completeOrder("");
         });
 
         orderInput.focus();

@@ -166,7 +166,8 @@
         <h2>Open exceptions</h2>
         <p class="helper-text">
           Serials whose <strong>latest</strong> completed audit left them missing or misplaced.
-          They drop off automatically once a newer audit verifies them.
+          They drop off automatically once a newer audit verifies them, or when a resolution
+          is recorded on the session page (Requires Follow-Up stays here, badged).
         </p>
         {% if data.open_exceptions %}
         <div class="table-wrap">
@@ -185,7 +186,12 @@
             <tbody>
               {% for row in data.open_exceptions %}
               <tr>
-                <td><span class="pill audit-status status-{{ row.status }}">{{ row.status }}</span></td>
+                <td>
+                  <span class="pill audit-status status-{{ row.status }}">{{ row.status }}</span>
+                  {% if row.resolution == 'follow_up' %}
+                  <span class="pill audit-status status-follow-up"{% if row.resolution_note %} title="{{ row.resolution_note }}"{% endif %}>Follow-Up</span>
+                  {% endif %}
+                </td>
                 <td><strong>{{ row.serial }}</strong></td>
                 <td>{{ row.part_id or '' }}{% if row.part_description %} &middot; {{ row.part_description }}{% endif %}</td>
                 <td>{{ row.expected_warehouse or '' }}{% if row.expected_location %} / {{ row.expected_location }}{% endif %}</td>

@@ -47,10 +47,13 @@
       <section class="card">
         <h2>Scan</h2>
         <div class="audit-scan-grid">
-          <label class="audit-field">
-            <span>Current {{ loc_term }}</span>
-            <input type="text" id="location-input" placeholder="Scan {{ loc_term }} barcode" autocomplete="off" autocapitalize="characters" />
-          </label>
+          <div class="audit-field">
+            <label for="location-input">Current {{ loc_term }}</label>
+            <div class="audit-field-row">
+              <input type="text" id="location-input" placeholder="Scan {{ loc_term }} barcode" autocomplete="off" autocapitalize="characters" enterkeyhint="next" />
+              <button type="button" class="button" id="set-location">Set &rarr;</button>
+            </div>
+          </div>
           <label class="audit-field">
             <span>Scans</span>
             <textarea id="scan-batch" rows="6" placeholder="Scan the {{ loc_term }} barcode, then every serial — they collect here one per line." autocomplete="off" autocapitalize="characters" spellcheck="false"></textarea>
@@ -95,10 +98,12 @@
                 <th>Tied WO</th>
                 <th>Status</th>
                 <th>Scanned at</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
               {% for item in items %}
+              {% set res = resolutions.get(item.serial|upper) %}
               <tr data-serial="{{ item.serial|upper }}">
                 <td class="mono">{{ item.serial }}{% if not item.in_scope %} <span class="pill idle">elsewhere</span>{% endif %}</td>
                 <td>{{ item.part_id or '' }}</td>
@@ -110,6 +115,14 @@
                   <span class="pill audit-status status-{{ item.status }}">{{ item.status }}</span>
                 </td>
                 <td data-scanned-cell>{{ item.scanned_location or '' }}{% if item.scanned_at_display %} &middot; {{ item.scanned_at_display }}{% endif %}</td>
+                <td data-action-cell>
+                  {% if res %}
+                  <span class="pill audit-status status-resolved{% if res.resolution == 'follow_up' %} status-follow-up{% endif %}"{% if res.note %} title="{{ res.note }}"{% endif %}>{{ resolution_codes[res.resolution] }}</span>
+                  {% endif %}
+                  {% if item.status in ('misplaced', 'missing') and (not res or res.resolution == 'follow_up') %}
+                  <button type="button" class="button tertiary resolve-btn" data-serial="{{ item.serial|upper }}">Resolve</button>
+                  {% endif %}
+                </td>
               </tr>
               {% endfor %}
             </tbody>
@@ -123,21 +136,51 @@
         <div class="table-wrap">
           <table>
             <thead>
-              <tr><th>Serial</th><th>Scanned location</th><th>First scanned</th><th>Times</th></tr>
+              <tr><th>Serial</th><th>Scanned location</th><th>First scanned</th><th>Times</th><th></th></tr>
             </thead>
             <tbody id="unexpected-body">
               {% for row in unexpected %}
+              {% set res = resolutions.get(row.scanned_serial|upper) %}
               <tr data-serial="{{ row.scanned_serial|upper }}">
                 <td>{{ row.scanned_serial }}</td>
                 <td>{{ row.scanned_location or '' }}</td>
                 <td>{{ row.first_scanned_display or '' }}</td>
                 <td>{{ row.scan_count }}</td>
+                <td data-action-cell>
+                  {% if res %}
+                  <span class="pill audit-status status-resolved{% if res.resolution == 'follow_up' %} status-follow-up{% endif %}"{% if res.note %} title="{{ res.note }}"{% endif %}>{{ resolution_codes[res.resolution] }}</span>
+                  {% endif %}
+                  {% if not res or res.resolution == 'follow_up' %}
+                  <button type="button" class="button tertiary resolve-btn" data-serial="{{ row.scanned_serial|upper }}">Resolve</button>
+                  {% endif %}
+                </td>
               </tr>
               {% endfor %}
             </tbody>
           </table>
         </div>
       </section>
+
+      <dialog id="resolve-dialog" class="resolve-dialog">
+        <h2>Resolve <span id="resolve-serial" class="mono"></span></h2>
+        <p class="helper-text">This records how the exception was handled. The original detection stays in the audit history.</p>
+        <div class="resolve-options">
+          {% for code, label in resolution_codes.items() %}
+          <label class="resolve-option">
+            <input type="radio" name="resolve-status" value="{{ code }}" />
+            <span>{{ label }}</span>
+          </label>
+          {% endfor %}
+        </div>
+        <label class="audit-field">
+          <span>Note (optional)</span>
+          <textarea id="resolve-note" rows="2" placeholder="e.g. moved back to C2, label reprinted"></textarea>
+        </label>
+        <div class="actions">
+          <button type="button" class="button" id="resolve-confirm" disabled>Confirm resolution</button>
+          <button type="button" class="button tertiary" id="resolve-cancel">Cancel</button>
+        </div>
+      </dialog>
     </main>
 
     <script>
@@ -146,6 +189,8 @@
         csrfToken: {{ csrf_token()|tojson }},
         scanUrl: {{ url_for('api_audit_scan', session_id=session.id)|tojson }},
         completeUrl: {{ url_for('api_audit_complete', session_id=session.id)|tojson }},
+        resolveUrl: {{ url_for('api_audit_resolve', session_id=session.id)|tojson }},
+        resolutionLabels: {{ resolution_codes|tojson }},
         completed: {{ (session.status == 'completed')|tojson }},
         locTerm: {{ loc_term|tojson }},
         operator: null,
@@ -183,6 +228,101 @@
         });
       });
 
+      // ---- exception resolution (works on in-progress AND completed pages) --
+      (function () {
+        const dialog = document.getElementById("resolve-dialog");
+        const serialEl = document.getElementById("resolve-serial");
+        const noteEl = document.getElementById("resolve-note");
+        const confirmBtn = document.getElementById("resolve-confirm");
+        const radios = dialog.querySelectorAll('input[name="resolve-status"]');
+        let resolveSerial = "";
+        let resolving = false;
+
+        function selectedResolution() {
+          const checked = dialog.querySelector('input[name="resolve-status"]:checked');
+          return checked ? checked.value : "";
+        }
+
+        document.addEventListener("click", function (e) {
+          const btn = e.target.closest(".resolve-btn");
+          if (!btn) return;
+          resolveSerial = btn.getAttribute("data-serial") || "";
+          serialEl.textContent = resolveSerial;
+          radios.forEach(function (r) { r.checked = false; });
+          noteEl.value = "";
+          confirmBtn.disabled = true;
+          dialog.showModal();
+        });
+        radios.forEach(function (r) {
+          r.addEventListener("change", function () { confirmBtn.disabled = !selectedResolution(); });
+        });
+        document.getElementById("resolve-cancel").addEventListener("click", function () { dialog.close(); });
+
+        function rowsFor(serial) {
+          const sel = 'tr[data-serial="' + serial.replace(/"/g, "") + '"]';
+          return document.querySelectorAll(sel);
+        }
+
+        function applyResolutionToRows(serial, data) {
+          rowsFor(serial).forEach(function (row) {
+            const cell = row.querySelector("[data-action-cell]");
+            if (cell) {
+              const followUp = data.resolution === "follow_up";
+              cell.innerHTML = '<span class="pill audit-status status-resolved'
+                + (followUp ? " status-follow-up" : "") + '"></span>'
+                + (followUp ? ' <button type="button" class="button tertiary resolve-btn" data-serial="' + serial + '">Resolve</button>' : "");
+              cell.querySelector(".pill").textContent = data.resolution_label;
+            }
+            // Bad-scan revert while the audit is running: the row is scannable
+            // again, so reflect pending + cleared scan info.
+            if (data.item && data.item.status === "pending") {
+              const statusCell = row.querySelector("[data-status-cell]");
+              if (statusCell) statusCell.innerHTML = '<span class="pill audit-status status-pending">pending</span>';
+              const scannedCell = row.querySelector("[data-scanned-cell]");
+              if (scannedCell) scannedCell.textContent = "";
+            }
+          });
+          if (data.counts) {
+            document.querySelectorAll("[data-tile]").forEach(function (el) {
+              const key = el.getAttribute("data-tile");
+              if (data.counts[key] !== undefined) el.textContent = data.counts[key];
+            });
+          }
+        }
+
+        confirmBtn.addEventListener("click", async function () {
+          const resolution = selectedResolution();
+          if (!resolution || resolving) return;
+          resolving = true;
+          confirmBtn.disabled = true;
+          try {
+            const resp = await fetch(AUDIT.resolveUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "X-CSRF-Token": AUDIT.csrfToken },
+              body: JSON.stringify({
+                serial: resolveSerial,
+                resolution: resolution,
+                note: noteEl.value.trim() || null,
+                operator: AUDIT.operator,
+              }),
+            });
+            const data = await resp.json();
+            if (!resp.ok) {
+              alert(data.message || "Could not record the resolution (" + resp.status + ").");
+              confirmBtn.disabled = false;
+              return;
+            }
+            applyResolutionToRows(resolveSerial, data);
+            dialog.close();
+          } catch (err) {
+            alert("Network error recording the resolution — nothing was saved. Try again.");
+            confirmBtn.disabled = false;
+          } finally {
+            resolving = false;
+          }
+        });
+      })();
+
       if (!AUDIT.completed) {
         // Tokens in the scan stream that match one of these are treated as a
         // location switch, everything else is a serial. Union of every active
@@ -204,13 +344,13 @@
         let currentLocation = "";
         let verifying = false;
 
-        function setLocation(value) {
+        function setLocation(value, opts) {
           currentLocation = value.trim().toUpperCase();
           if (!currentLocation) return;
           locationInput.value = currentLocation;
           scanHint.textContent = AUDIT.locTerm.charAt(0).toUpperCase() + AUDIT.locTerm.slice(1)
             + " set to " + currentLocation + ". Scan serials, then press Verify.";
-          batchInput.focus();
+          if (!opts || opts.focus !== false) batchInput.focus();
           updateVerifyButton();
         }
 
@@ -251,6 +391,20 @@
         locationInput.addEventListener("keydown", function (e) {
           if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); setLocation(locationInput.value); }
         });
+        // Touchscreen path: a visible button for manual entry (scanners never
+        // need it — their Enter/Tab suffix hits the keydown handler above).
+        document.getElementById("set-location").addEventListener("click", function () {
+          setLocation(locationInput.value);
+          if (!currentLocation) locationInput.focus();
+        });
+        // Manual-entry fallback: tapping away from the field commits a typed
+        // value. Only when nothing is set yet, so it never fights the
+        // Change-location button, and without stealing focus from the tap target.
+        locationInput.addEventListener("blur", function () {
+          if (!currentLocation && locationInput.value.trim()) {
+            setLocation(locationInput.value, { focus: false });
+          }
+        });
         document.getElementById("change-location").addEventListener("click", function () {
           currentLocation = "";
           locationInput.value = "";
@@ -285,6 +439,12 @@
           if (cell) cell.innerHTML = '<span class="pill audit-status status-' + status + '">' + status + '</span>';
           const scanned = row.querySelector("[data-scanned-cell]");
           if (scanned) scanned.textContent = scannedLocation || "";
+          const action = row.querySelector("[data-action-cell]");
+          if (action) {
+            action.innerHTML = status === "misplaced"
+              ? '<button type="button" class="button tertiary resolve-btn" data-serial="' + serial.toUpperCase() + '">Resolve</button>'
+              : "";
+          }
         }
 
         function addUnexpectedRow(serial, location) {
@@ -294,7 +454,8 @@
           if (existing) return;
           const tr = document.createElement("tr");
           tr.setAttribute("data-serial", serial.toUpperCase());
-          tr.innerHTML = "<td>" + serial + "</td><td>" + (location || "") + "</td><td>just now</td><td>1</td>";
+          tr.innerHTML = "<td>" + serial + "</td><td>" + (location || "") + "</td><td>just now</td><td>1</td>"
+            + '<td data-action-cell><button type="button" class="button tertiary resolve-btn" data-serial="' + serial.toUpperCase() + '">Resolve</button></td>';
           body.prepend(tr);
         }
 
@@ -328,6 +489,11 @@
 
         async function verifyBatch() {
           if (verifying) return;
+          // Safety net: a location typed but never committed (no Enter, no
+          // blur, no Set tap) still counts — eliminates the dead-end loop.
+          if (!currentLocation && locationInput.value.trim()) {
+            setLocation(locationInput.value, { focus: false });
+          }
           const submittedText = batchInput.value;
           const parsed = parseBatch();
           if (!parsed.queue.length) return;

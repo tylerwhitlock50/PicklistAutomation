@@ -158,7 +158,33 @@ SCHEMA_STATEMENTS = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS ix_audit_scans_session ON audit_scans(session_id)",
+    """
+    CREATE TABLE IF NOT EXISTS audit_resolutions (
+        id             SERIAL PRIMARY KEY,
+        session_id     INTEGER NOT NULL REFERENCES audit_sessions(id) ON DELETE CASCADE,
+        serial         TEXT NOT NULL,
+        expected_id    INTEGER REFERENCES audit_expected(id) ON DELETE SET NULL,
+        exception_type TEXT NOT NULL,
+        resolution     TEXT NOT NULL,
+        note           TEXT,
+        resolved_by    TEXT,
+        resolved_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_audit_resolutions_session ON audit_resolutions(session_id)",
+    "CREATE INDEX IF NOT EXISTS ix_audit_resolutions_serial ON audit_resolutions(UPPER(serial))",
 ]
+
+# Resolution codes for audit exceptions. Append-only history: re-resolving a
+# serial inserts a new row and the latest resolved_at wins. 'follow_up' is the
+# one non-terminal code — the serial stays on the analytics punch list.
+RESOLUTION_CODES = {
+    "relocated": "Resolved — Item Relocated",
+    "bad_scan": "Resolved — Bad Barcode Scan",
+    "duplicate_scan": "Resolved — Duplicate Scan",
+    "not_an_issue": "Not an Issue",
+    "follow_up": "Requires Follow-Up",
+}
 
 
 def initialize() -> bool:
@@ -618,7 +644,8 @@ def current_exceptions(limit: int = 200) -> list[dict[str, Any]]:
     """Serials whose LATEST completed-audit result is missing or misplaced.
 
     This is the open punch list: a serial missing in an old audit that verified
-    in a newer one drops off automatically.
+    in a newer one drops off automatically. A resolution recorded against that
+    latest session also clears it — except 'follow_up', which stays (badged).
     """
     if not _available:
         return []
@@ -638,10 +665,20 @@ def current_exceptions(limit: int = 200) -> list[dict[str, Any]]:
                         WHERE s.status = 'completed' AND {_OBSERVED_ROW}
                         ORDER BY UPPER(e.serial), s.completed_at DESC
                     )
-                    SELECT * FROM latest
-                    WHERE status IN ('missing', 'misplaced')
-                    ORDER BY CASE status WHEN 'missing' THEN 0 ELSE 1 END,
-                             expected_warehouse NULLS LAST, expected_location, serial
+                    SELECT latest.*, res.resolution, res.note AS resolution_note
+                    FROM latest
+                    LEFT JOIN LATERAL (
+                        SELECT r.resolution, r.note
+                        FROM audit_resolutions r
+                        WHERE r.session_id = latest.session_id
+                          AND UPPER(r.serial) = UPPER(latest.serial)
+                        ORDER BY r.resolved_at DESC
+                        LIMIT 1
+                    ) res ON TRUE
+                    WHERE latest.status IN ('missing', 'misplaced')
+                      AND (res.resolution IS NULL OR res.resolution = 'follow_up')
+                    ORDER BY CASE latest.status WHEN 'missing' THEN 0 ELSE 1 END,
+                             latest.expected_warehouse NULLS LAST, latest.expected_location, latest.serial
                     LIMIT :limit
                     """
                 ),
@@ -1034,6 +1071,143 @@ def record_scan(
         "item": item_dict,
         "counts": compute_counts(session_id),
     }
+
+
+def record_resolution(
+    session_id: int,
+    serial: str,
+    resolution: str,
+    note: Optional[str],
+    operator: Optional[str],
+) -> dict[str, Any]:
+    """Resolve an audit exception (missing / misplaced / unexpected serial).
+
+    Appends to audit_resolutions — history is never rewritten. The one status
+    mutation: a bad_scan/duplicate_scan resolution on a misplaced row while the
+    session is still in progress reverts the row to pending so it can be
+    rescanned correctly; completed sessions are annotated, never rewritten.
+
+    Returns {resolution, exception_type, item, counts}. Raises ValueError when
+    the code is unknown or the serial has no open exception in this session.
+    """
+    if not _available:
+        raise RuntimeError("Audit store is not available.")
+    if resolution not in RESOLUTION_CODES:
+        raise ValueError(f"Unknown resolution code: {resolution}")
+
+    norm_serial = _norm(serial)
+    note = (note or "").strip() or None
+
+    with _engine.begin() as conn:
+        session_status = conn.execute(
+            text("SELECT status FROM audit_sessions WHERE id = :id"),
+            {"id": session_id},
+        ).scalar_one_or_none()
+        if session_status is None:
+            raise ValueError("Audit session not found.")
+
+        item = conn.execute(
+            text(
+                """
+                SELECT id, serial, expected_location, scope, tied_wo, status,
+                       part_description, scanned_location, in_scope
+                FROM audit_expected
+                WHERE session_id = :sid AND UPPER(serial) = :serial
+                ORDER BY id
+                LIMIT 1
+                """
+            ),
+            {"sid": session_id, "serial": norm_serial},
+        ).mappings().first()
+
+        item_dict: Optional[dict[str, Any]] = None
+        if item is not None and item["status"] in ("misplaced", "missing"):
+            exception_type = item["status"]
+            expected_id = item["id"]
+            item_dict = dict(item)
+            if (
+                resolution in ("bad_scan", "duplicate_scan")
+                and session_status == "in_progress"
+                and item["status"] == "misplaced"
+            ):
+                conn.execute(
+                    text(
+                        """
+                        UPDATE audit_expected
+                        SET status = 'pending', scanned_location = NULL, scanned_at = NULL
+                        WHERE id = :id
+                        """
+                    ),
+                    {"id": expected_id},
+                )
+                item_dict["status"] = "pending"
+                item_dict["scanned_location"] = None
+        else:
+            unexpected_scan = conn.execute(
+                text(
+                    "SELECT 1 FROM audit_scans "
+                    "WHERE session_id = :sid AND UPPER(scanned_serial) = :serial "
+                    "AND expected_id IS NULL LIMIT 1"
+                ),
+                {"sid": session_id, "serial": norm_serial},
+            ).first()
+            if unexpected_scan is None:
+                raise ValueError(
+                    f"{norm_serial} has no open exception in this session."
+                )
+            exception_type = "unexpected"
+            expected_id = None
+
+        conn.execute(
+            text(
+                """
+                INSERT INTO audit_resolutions
+                    (session_id, serial, expected_id, exception_type, resolution, note, resolved_by)
+                VALUES (:sid, :serial, :expected_id, :exception_type, :resolution, :note, :operator)
+                """
+            ),
+            {
+                "sid": session_id,
+                "serial": norm_serial,
+                "expected_id": expected_id,
+                "exception_type": exception_type,
+                "resolution": resolution,
+                "note": note,
+                "operator": operator,
+            },
+        )
+
+    invalidate_read_cache()
+    return {
+        "resolution": resolution,
+        "resolution_label": RESOLUTION_CODES[resolution],
+        "exception_type": exception_type,
+        "item": item_dict,
+        "counts": compute_counts(session_id),
+    }
+
+
+def get_resolutions(session_id: int) -> dict[str, dict[str, Any]]:
+    """Latest resolution per serial for a session, keyed by uppercased serial."""
+    if not _available:
+        return {}
+    with _engine.connect() as conn:
+        rows = _rows(
+            conn.execute(
+                text(
+                    """
+                    SELECT DISTINCT ON (UPPER(serial))
+                           UPPER(serial) AS serial_key, serial, exception_type,
+                           resolution, note, resolved_by, resolved_at
+                    FROM audit_resolutions
+                    WHERE session_id = :id
+                    ORDER BY UPPER(serial), resolved_at DESC
+                    """
+                ),
+                {"id": session_id},
+            )
+        )
+    return {row["serial_key"]: row for row in rows}
 
 
 def complete_session(session_id: int) -> Optional[dict[str, Any]]:

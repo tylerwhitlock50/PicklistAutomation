@@ -176,6 +176,7 @@ Allocations AS (
 SELECT
     p.PRODUCT_CODE     AS [Product code],
     a.PART_ID          AS [Part Id],
+    upc.USER_6         AS [UPC],
     a.LOCATION_ID      AS [Location],
     a.WAREHOUSE_ID     AS [Warehouse],
     a.CUST_ORDER_ID    AS [Cust Order ID],
@@ -189,6 +190,12 @@ SELECT
 FROM Allocations a
 JOIN dbo.PART p
   ON p.ID = a.PART_ID
+OUTER APPLY (
+    SELECT TOP (1) NULLIF(LTRIM(RTRIM(psv.USER_6)), '') AS USER_6
+    FROM dbo.PART_SITE_VIEW psv
+    WHERE psv.PART_ID = a.PART_ID
+      AND NULLIF(LTRIM(RTRIM(psv.USER_6)), '') IS NOT NULL
+) upc
 WHERE a.ALLOC_QTY > 0
 ORDER BY
     a.DESIRED_SHIP_DATE,
