@@ -1,0 +1,828 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Allocation &amp; priority</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <main class="page-shell">
+      {% set active_nav = 'allocation' %}
+      {% include '_topnav.html' %}
+      <section class="hero card">
+        <div class="hero-top">
+          <div>
+            <p class="eyebrow">Allocation</p>
+            <h1>SKU supply &amp; order priority</h1>
+          </div>
+        </div>
+        <p class="hero-copy">
+          See projected supply for a SKU, which open orders are ahead in line, and what
+          moving a Promise Del Date would do &mdash; before saving it back to VISUAL.
+          Dates shown are <strong>estimated availability</strong>, never promised ship dates.
+        </p>
+        <form id="part-form" class="serial-search alloc-search">
+          <label class="audit-field serial-search-field">
+            <span>Part number</span>
+            <input type="text" id="part-input" placeholder="Type a part number or description"
+                   autocomplete="off" autocapitalize="characters" maxlength="30" autofocus />
+            <div id="part-suggestions" class="alloc-suggestions" hidden></div>
+          </label>
+          <button type="submit" class="button" id="load-button">Load</button>
+        </form>
+        <p class="helper-text" id="load-hint" hidden></p>
+      </section>
+
+      <div id="flags" class="alerts" hidden></div>
+      <div id="preview-banner" class="flag-banner warning" hidden></div>
+
+      <details class="card alloc-overview" id="overview-card" hidden>
+        <summary>
+          <span class="alloc-overview-title">Supply overview</span>
+          <span class="helper-text" id="overview-summary-line"></span>
+        </summary>
+        <div class="alloc-summary" id="summary-pills"></div>
+        <h2>Projected supply</h2>
+        <p class="helper-text">
+          Chips in the order supply is expected. Colors show certainty:
+          <span class="pill alloc-chip chip-available">on hand</span>
+          <span class="pill alloc-chip chip-released">released WO</span>
+          <span class="pill alloc-chip chip-firmed">firmed WO</span>
+          <span class="pill alloc-chip chip-planned">master schedule</span>.
+          Master-scheduled supply is a plan, not production &mdash; treat those dates as soft.
+        </p>
+        <div class="alloc-rail" id="supply-rail"></div>
+        <p class="helper-text" id="supply-notes" hidden></p>
+      </details>
+
+      <section class="card" id="demand-card" hidden>
+        <h2>Open demand &mdash; allocation order</h2>
+        <p class="helper-text">
+          Priority = Promise Del Date (line overrides header, blanks last), then Promise
+          Ship, desired date, order date. Click a row to reprioritize it. Dimmed rows are
+          outside the picklist window; badged rows are not eligible for allocation.
+        </p>
+        <div id="demand-table"></div>
+      </section>
+
+      <section class="card alloc-drawer" id="drawer" hidden>
+        <div class="alloc-drawer-head">
+          <div>
+            <p class="eyebrow" id="drawer-eyebrow"></p>
+            <h2 id="drawer-title"></h2>
+          </div>
+          <button type="button" class="button button-ghost" id="drawer-close">Close</button>
+        </div>
+        <div class="alloc-drawer-grid">
+          <div>
+            <h3>Current</h3>
+            <dl class="alloc-facts" id="drawer-facts"></dl>
+          </div>
+          <div>
+            <h3>Change Promise Del Date</h3>
+            <label class="audit-field">
+              <span>New Promise Del Date (line level)</span>
+              <input type="date" id="drawer-date" />
+            </label>
+            <label class="checkbox-row" for="drawer-clear">
+              <input type="checkbox" id="drawer-clear" />
+              Clear the line date (falls back to the order header date)
+            </label>
+            <div class="alloc-target-row">
+              <label class="audit-field">
+                <span>...or target a position</span>
+                <input type="number" id="drawer-target" min="1" step="1" placeholder="e.g. 3" />
+              </label>
+              <button type="button" class="button button-ghost" id="drawer-suggest">Suggest date</button>
+            </div>
+            <p class="helper-text" id="drawer-suggest-hint" hidden></p>
+            <label class="audit-field">
+              <span>Operator name (audit trail)</span>
+              <input type="text" id="drawer-operator" placeholder="Your name" maxlength="60" />
+            </label>
+            <label class="audit-field">
+              <span>Reason (optional)</span>
+              <input type="text" id="drawer-reason" placeholder="e.g. customer expedite" maxlength="200" />
+            </label>
+            <div class="alloc-drawer-actions">
+              <button type="button" class="button button-ghost" id="drawer-preview">Preview</button>
+              <button type="button" class="button" id="drawer-save" disabled>Save to VISUAL</button>
+            </div>
+            <p class="helper-text" id="drawer-hint" hidden></p>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" id="history-card" hidden>
+        <h2>Promise Del Date change history</h2>
+        <div id="history-table"></div>
+      </section>
+    </main>
+
+    <script>
+      (function () {
+        const CONFIG = {
+          detailUrl: {{ url_for('api_allocation_detail', part_id='__PART__')|tojson }},
+          partsUrl: {{ url_for('api_allocation_parts')|tojson }},
+          previewUrl: {{ url_for('api_allocation_preview')|tojson }},
+          suggestUrl: {{ url_for('api_allocation_suggest')|tojson }},
+          historyUrl: {{ url_for('api_allocation_history')|tojson }},
+          saveUrl: {{ url_for('api_allocation_save')|tojson }},
+          csrfToken: {{ csrf_token()|tojson }},
+          prefillPart: {{ prefill_part|tojson }},
+        };
+
+        const partForm = document.getElementById("part-form");
+        const partInput = document.getElementById("part-input");
+        const suggestionsEl = document.getElementById("part-suggestions");
+        const loadButton = document.getElementById("load-button");
+        const loadHint = document.getElementById("load-hint");
+        const flagsEl = document.getElementById("flags");
+        const previewBanner = document.getElementById("preview-banner");
+        const overviewCard = document.getElementById("overview-card");
+        const overviewSummaryLine = document.getElementById("overview-summary-line");
+        const summaryPills = document.getElementById("summary-pills");
+        const supplyRail = document.getElementById("supply-rail");
+        const supplyNotes = document.getElementById("supply-notes");
+        const demandCard = document.getElementById("demand-card");
+        const demandTable = document.getElementById("demand-table");
+        const drawer = document.getElementById("drawer");
+        const historyCard = document.getElementById("history-card");
+        const historyTable = document.getElementById("history-table");
+
+        const CERTAINTY_CHIP = {
+          AVAILABLE: "chip-available",
+          RELEASED: "chip-released",
+          FIRMED: "chip-firmed",
+          PLANNED: "chip-planned",
+        };
+        const CERTAINTY_LABEL = {
+          AVAILABLE: "on hand",
+          RELEASED: "released",
+          FIRMED: "firmed",
+          PLANNED: "master sched",
+        };
+        const REASON_LABEL = {
+          order_not_released: "NOT RELEASED",
+          order_hold: "ORDER HOLD",
+          credit_hold: "CREDIT HOLD",
+          rma: "RMA",
+          excluded_class: "EXCLUDED",
+          excluded_customer: "EXCLUDED CUST",
+        };
+
+        let currentPart = null;
+        let currentPayload = null;
+        let selectedKey = null;   // "SO|line"
+        let previewMode = false;
+
+        function el(tag, className, text) {
+          const node = document.createElement(tag);
+          if (className) node.className = className;
+          if (text !== undefined && text !== null && text !== "") node.textContent = text;
+          return node;
+        }
+
+        function table(headers, rows) {
+          const wrap = el("div", "table-wrap");
+          const tbl = document.createElement("table");
+          const thead = document.createElement("thead");
+          const headRow = document.createElement("tr");
+          headers.forEach(function (h) { headRow.appendChild(el("th", null, h)); });
+          thead.appendChild(headRow);
+          tbl.appendChild(thead);
+          const tbody = document.createElement("tbody");
+          rows.forEach(function (row) {
+            tbody.appendChild(row);
+          });
+          tbl.appendChild(tbody);
+          wrap.appendChild(tbl);
+          return wrap;
+        }
+
+        function showError(message) {
+          flagsEl.textContent = "";
+          const banner = el("div", "flag-banner error");
+          banner.appendChild(el("strong", null, "ERROR"));
+          banner.appendChild(el("span", null, message));
+          flagsEl.appendChild(banner);
+          flagsEl.hidden = false;
+        }
+
+        function clearError() {
+          flagsEl.hidden = true;
+          flagsEl.textContent = "";
+        }
+
+        function setHint(message) {
+          loadHint.hidden = !message;
+          loadHint.textContent = message || "";
+        }
+
+        function fmtDate(iso) {
+          return iso || "—";
+        }
+
+        function lineKey(line) {
+          return line.so + "|" + line.line_no;
+        }
+
+        // ------------------------------------------------------------------
+        // Part autocomplete
+        // ------------------------------------------------------------------
+        let suggestTimer = null;
+        partInput.addEventListener("input", function () {
+          if (suggestTimer) clearTimeout(suggestTimer);
+          const term = partInput.value.trim();
+          if (term.length < 2) { suggestionsEl.hidden = true; return; }
+          suggestTimer = setTimeout(async function () {
+            try {
+              const resp = await fetch(CONFIG.partsUrl + "?q=" + encodeURIComponent(term));
+              if (!resp.ok) return;
+              const data = await resp.json();
+              suggestionsEl.textContent = "";
+              (data.parts || []).forEach(function (p) {
+                const item = el("button", "alloc-suggestion");
+                item.type = "button";
+                item.appendChild(el("span", "mono", p.part_id));
+                item.appendChild(el("span", "helper-text",
+                  (p.description || "") +
+                  " · on hand " + p.on_hand + " · open demand " + p.open_demand));
+                item.addEventListener("click", function () {
+                  suggestionsEl.hidden = true;
+                  partInput.value = p.part_id;
+                  loadPart(p.part_id);
+                });
+                suggestionsEl.appendChild(item);
+              });
+              suggestionsEl.hidden = !(data.parts || []).length;
+            } catch (e) { /* autocomplete is best-effort */ }
+          }, 250);
+        });
+        document.addEventListener("click", function (e) {
+          if (!suggestionsEl.contains(e.target) && e.target !== partInput) {
+            suggestionsEl.hidden = true;
+          }
+        });
+
+        // ------------------------------------------------------------------
+        // Rendering
+        // ------------------------------------------------------------------
+        function renderSummary(payload) {
+          summaryPills.textContent = "";
+          const supply = payload.supply;
+          const demand = payload.demand;
+          const items = [
+            ["On hand (allocatable)", supply.events.filter(function (e) { return e.class === "ON_HAND"; })
+              .reduce(function (a, e) { return a + e.qty; }, 0), "chip-available"],
+            ["Released WO units", supply.events.filter(function (e) { return e.class === "WO_RELEASED"; })
+              .reduce(function (a, e) { return a + e.qty; }, 0), "chip-released"],
+            ["Firmed WO units", supply.events.filter(function (e) { return e.class === "WO_FIRMED"; })
+              .reduce(function (a, e) { return a + e.qty; }, 0), "chip-firmed"],
+            ["Master-sched units (beyond fence)", supply.events.filter(function (e) { return e.class === "MPS"; })
+              .reduce(function (a, e) { return a + e.qty; }, 0), "chip-planned"],
+            ["Eligible demand units", demand.eligible_open_units, null],
+            ["Unallocated units", demand.unallocated_units,
+             demand.unallocated_units > 0 ? "chip-nosupply" : null],
+          ];
+          items.forEach(function (item) {
+            const pill = el("div", "alloc-summary-pill" + (item[2] ? " " + item[2] : ""));
+            pill.appendChild(el("span", "alloc-summary-num", String(item[1])));
+            pill.appendChild(el("span", "alloc-summary-label", item[0]));
+            summaryPills.appendChild(pill);
+          });
+          const windowPill = el("div", "alloc-summary-pill");
+          windowPill.appendChild(el("span", "alloc-summary-num",
+            payload.today + " → " + payload.picklist_through_date));
+          windowPill.appendChild(el("span", "alloc-summary-label", "picklist window"));
+          summaryPills.appendChild(windowPill);
+
+          // One-line digest so the collapsed card still tells the story.
+          const released = items[1][1];
+          const firmed = items[2][1];
+          const mps = items[3][1];
+          const onHand = items[0][1];
+          overviewSummaryLine.textContent =
+            onHand + " on hand · " + released + " released · " + firmed + " firmed · " +
+            mps + " planned · " + demand.unallocated_units + " unallocated";
+          overviewCard.hidden = false;
+        }
+
+        function groupSupplyEvents(events) {
+          // Serialized guns release as batches of qty-1 WOs on the same date:
+          // stack same class + date into one chip with a count.
+          const groups = [];
+          let current = null;
+          events.forEach(function (e) {
+            if (current && current.class === e.class && current.date === e.date
+                && e.class !== "ON_HAND") {
+              current.qty += e.qty;
+              current.allocated_qty += e.allocated_qty;
+              current.count += 1;
+              current.details.push(e.supply_id + (e.detail ? " (" + e.detail + ")" : ""));
+            } else {
+              current = {
+                class: e.class, date: e.date, certainty: e.certainty,
+                qty: e.qty, allocated_qty: e.allocated_qty, count: 1,
+                label: e.supply_id,
+                details: [e.supply_id + (e.detail ? " (" + e.detail + ")" : "")],
+              };
+              groups.push(current);
+            }
+          });
+          return groups;
+        }
+
+        function renderSupply(payload) {
+          supplyRail.textContent = "";
+          const supply = payload.supply;
+          if (!supply.events.length) {
+            supplyRail.appendChild(el("p", "helper-text",
+              "No allocatable supply: nothing on hand in the picklist racks and no open production."));
+          }
+          groupSupplyEvents(supply.events).forEach(function (g) {
+            const chip = el("div", "alloc-supply-chip " + (CERTAINTY_CHIP[g.certainty] || ""));
+            const title = g.count > 1
+              ? g.count + "× " + CERTAINTY_LABEL[g.certainty] + " WO"
+              : (g.class === "ON_HAND" ? "On hand" : g.label);
+            chip.appendChild(el("div", "alloc-chip-title", title));
+            chip.appendChild(el("div", "alloc-chip-qty",
+              g.qty + " unit" + (g.qty === 1 ? "" : "s") +
+              (g.allocated_qty ? " · " + g.allocated_qty + " claimed" : "")));
+            chip.appendChild(el("div", "alloc-chip-date mono", fmtDate(g.date)));
+            chip.title = g.details.join("\n");
+            supplyRail.appendChild(chip);
+          });
+          if (supply.netting_fence) {
+            const fence = el("div", "alloc-supply-chip chip-fence");
+            fence.appendChild(el("div", "alloc-chip-title", "Netting fence"));
+            fence.appendChild(el("div", "alloc-chip-qty",
+              supply.excluded_mps_qty + " master-sched units before " +
+              supply.netting_fence + " hidden (covered by open WOs)"));
+            supplyRail.appendChild(fence);
+          }
+          const notes = [];
+          (supply.informational || []).forEach(function (i) {
+            notes.push(i.location + " (" + i.qty + ")");
+          });
+          if (notes.length) {
+            supplyNotes.hidden = false;
+            supplyNotes.textContent =
+              "Also in the building but not allocatable from here: " + notes.join(", ");
+          } else {
+            supplyNotes.hidden = true;
+          }
+          overviewCard.hidden = false;
+        }
+
+        function allocationCell(line) {
+          const cell = el("div", "alloc-alloc-cell");
+          if (!line.eligible) {
+            (line.reasons || []).forEach(function (r) {
+              cell.appendChild(el("span", "pill failed alloc-badge", REASON_LABEL[r] || r));
+            });
+            return cell;
+          }
+          if (line.supply_status === "NO_SUPPLY") {
+            cell.appendChild(el("span", "pill failed alloc-badge", "NO SUPPLY"));
+            return cell;
+          }
+          (line.allocations || []).forEach(function (a) {
+            const chip = el("span",
+              "pill alloc-chip " + (CERTAINTY_CHIP[a.certainty] || ""),
+              a.qty + " · " + (a.class === "ON_HAND" ? "on hand" : a.supply_id) +
+              (a.date ? " · " + a.date : ""));
+            cell.appendChild(chip);
+          });
+          if (line.supply_status === "PARTIAL") {
+            cell.appendChild(el("span", "pill failed alloc-badge",
+              "PARTIAL — " + line.covered_qty + " of " + line.open_qty));
+          }
+          return cell;
+        }
+
+        function estCell(line) {
+          const cell = el("div", "alloc-alloc-cell");
+          if (line.est_available) {
+            cell.appendChild(el("span", "mono", line.est_available));
+            cell.appendChild(el("span", "helper-text",
+              "est. availability — " + (CERTAINTY_LABEL[line.est_certainty] || "")));
+          } else if (line.eligible) {
+            cell.appendChild(el("span", "helper-text", "no projected date"));
+          }
+          return cell;
+        }
+
+        function promiseDelCell(line) {
+          const cell = el("div", "alloc-alloc-cell");
+          const main = el("span", "mono", fmtDate(line.dates.eff_promise_del));
+          cell.appendChild(main);
+          if (line.dates.promise_del_source) {
+            cell.appendChild(el("span", "helper-text",
+              "from " + line.dates.promise_del_source +
+              (line.dates.overridden ? " (preview)" : "")));
+          }
+          cell.title = "Header: " + fmtDate(line.dates.hdr_promise_del) +
+                       "\nLine: " + fmtDate(line.dates.line_promise_del);
+          return cell;
+        }
+
+        function renderDemand(payload, moveInfo) {
+          demandTable.textContent = "";
+          const moved = moveInfo && moveInfo.movedKey;
+          const displacedByKey = {};
+          ((moveInfo && moveInfo.displaced) || []).forEach(function (d) {
+            displacedByKey[d.so + "|" + d.line_no] = d;
+          });
+
+          const rows = payload.demand.lines.map(function (line) {
+            const tr = document.createElement("tr");
+            const key = lineKey(line);
+            tr.className = "alloc-row";
+            if (!line.in_picklist_window) tr.classList.add("alloc-row-outside");
+            if (!line.eligible) tr.classList.add("alloc-row-ineligible");
+            if (key === selectedKey) tr.classList.add("alloc-row-selected");
+            if (moved && key === moved) tr.classList.add("alloc-row-moved");
+
+            const cells = [];
+            const posCell = el("div", "alloc-alloc-cell");
+            posCell.appendChild(el("span", "alloc-pos",
+              line.position === null ? "—" : String(line.position)));
+            const disp = displacedByKey[key];
+            if (disp) {
+              posCell.appendChild(el("span", "helper-text alloc-displaced",
+                disp.from + " → " + disp.to));
+            }
+            cells.push(posCell);
+            cells.push(el("span", "mono", line.so + " / " + line.line_no));
+            const custCell = el("div", "alloc-alloc-cell");
+            custCell.appendChild(el("span", null, line.customer_id || ""));
+            if (line.customer_name) custCell.appendChild(el("span", "helper-text", line.customer_name));
+            cells.push(custCell);
+            cells.push(fmtDate(line.order_date));
+            cells.push(line.open_qty + (line.shipped_qty
+              ? " (" + line.shipped_qty + " of " + line.order_qty + " shipped)" : ""));
+            cells.push(promiseDelCell(line));
+            cells.push(el("span", "mono", fmtDate(line.dates.eff_promise_ship)));
+            cells.push(el("span", "mono", fmtDate(line.dates.line_desired)));
+            cells.push(allocationCell(line));
+            cells.push(estCell(line));
+
+            cells.forEach(function (c) {
+              const td = document.createElement("td");
+              if (c instanceof Node) td.appendChild(c);
+              else td.textContent = c === null || c === undefined ? "" : c;
+              tr.appendChild(td);
+            });
+            tr.addEventListener("click", function () {
+              selectLine(line);
+            });
+            return tr;
+          });
+
+          demandTable.appendChild(table(
+            ["#", "Order / line", "Customer", "Ordered", "Open qty",
+             "Promise Del", "Promise Ship", "Prod Date", "Supply", "Est. available"],
+            rows));
+          demandCard.hidden = false;
+        }
+
+        function renderHistory(changes) {
+          historyTable.textContent = "";
+          if (!changes.length) {
+            historyTable.appendChild(el("p", "helper-text", "No changes recorded yet."));
+          } else {
+            const rows = changes.map(function (c) {
+              const tr = document.createElement("tr");
+              [c.changed_at ? c.changed_at.slice(0, 16).replace("T", " ") : "",
+               c.changed_by,
+               c.cust_order_id + " / " + c.line_no,
+               (c.old_value || "blank") + " → " + (c.new_value || "blank"),
+               (c.position_before === null ? "?" : c.position_before) + " → " +
+               (c.position_after === null ? "?" : c.position_after),
+               c.reason || ""].forEach(function (v) {
+                const td = document.createElement("td");
+                td.textContent = v === null || v === undefined ? "" : v;
+                tr.appendChild(td);
+              });
+              return tr;
+            });
+            historyTable.appendChild(table(
+              ["When (UTC)", "Who", "Order / line", "Promise Del", "Position", "Reason"],
+              rows));
+          }
+          historyCard.hidden = false;
+        }
+
+        async function loadHistory(partId) {
+          try {
+            const resp = await fetch(CONFIG.historyUrl + "?part_id=" + encodeURIComponent(partId));
+            if (!resp.ok) return;
+            const data = await resp.json();
+            renderHistory(data.changes || []);
+          } catch (e) { /* history is non-critical */ }
+        }
+
+        function renderAll(payload, moveInfo) {
+          currentPayload = payload;
+          renderSummary(payload);
+          renderSupply(payload);
+          renderDemand(payload, moveInfo);
+        }
+
+        function setPreviewMode(on, message) {
+          previewMode = on;
+          previewBanner.hidden = !on;
+          previewBanner.textContent = "";
+          if (on) {
+            previewBanner.appendChild(el("strong", null, "PREVIEW"));
+            previewBanner.appendChild(el("span", null, " " + message +
+              " Nothing has been saved — press Save to VISUAL to make it real."));
+          }
+        }
+
+        async function loadPart(partId) {
+          partId = (partId || "").trim().toUpperCase();
+          if (!partId) { partInput.focus(); return; }
+          loadButton.disabled = true;
+          setHint("Loading " + partId + "…");
+          clearError();
+          setPreviewMode(false);
+          closeDrawer();
+          try {
+            const resp = await fetch(CONFIG.detailUrl.replace("__PART__", encodeURIComponent(partId)));
+            let data = null;
+            try { data = await resp.json(); } catch (e) {}
+            if (!resp.ok) {
+              showError((data && data.message) || ("Lookup failed (HTTP " + resp.status + ")."));
+              setHint("");
+              return;
+            }
+            currentPart = partId;
+            try {
+              history.replaceState(null, "", "?part=" + encodeURIComponent(partId));
+            } catch (e) {}
+            renderAll(data, null);
+            loadHistory(partId);
+            setHint("");
+          } catch (err) {
+            showError("Network error — could not reach the server.");
+            setHint("");
+          } finally {
+            loadButton.disabled = false;
+          }
+        }
+
+        // ------------------------------------------------------------------
+        // Drawer: reprioritize one line
+        // ------------------------------------------------------------------
+        const drawerEyebrow = document.getElementById("drawer-eyebrow");
+        const drawerTitle = document.getElementById("drawer-title");
+        const drawerFacts = document.getElementById("drawer-facts");
+        const drawerDate = document.getElementById("drawer-date");
+        const drawerClear = document.getElementById("drawer-clear");
+        const drawerTarget = document.getElementById("drawer-target");
+        const drawerSuggest = document.getElementById("drawer-suggest");
+        const drawerSuggestHint = document.getElementById("drawer-suggest-hint");
+        const drawerOperator = document.getElementById("drawer-operator");
+        const drawerReason = document.getElementById("drawer-reason");
+        const drawerPreview = document.getElementById("drawer-preview");
+        const drawerSave = document.getElementById("drawer-save");
+        const drawerHint = document.getElementById("drawer-hint");
+        let selectedLine = null;
+
+        try {
+          drawerOperator.value = (localStorage.getItem("audit_operator_name") || "").trim();
+        } catch (e) {}
+
+        function fact(label, value) {
+          const div = el("div", "alloc-fact");
+          div.appendChild(el("dt", null, label));
+          div.appendChild(el("dd", "mono", value));
+          return div;
+        }
+
+        function updateSaveEnabled() {
+          const hasOperator = !!drawerOperator.value.trim();
+          const hasChange = drawerClear.checked || !!drawerDate.value;
+          drawerSave.disabled = !(hasOperator && hasChange && selectedLine);
+        }
+        drawerOperator.addEventListener("input", updateSaveEnabled);
+        drawerDate.addEventListener("input", function () {
+          if (drawerDate.value) drawerClear.checked = false;
+          updateSaveEnabled();
+        });
+        drawerClear.addEventListener("change", function () {
+          if (drawerClear.checked) drawerDate.value = "";
+          updateSaveEnabled();
+        });
+
+        function selectLine(line) {
+          selectedLine = line;
+          selectedKey = lineKey(line);
+          drawerEyebrow.textContent = line.customer_id +
+            (line.customer_name ? " — " + line.customer_name : "");
+          drawerTitle.textContent = line.so + " line " + line.line_no +
+            " · " + line.open_qty + " open";
+          drawerFacts.textContent = "";
+          drawerFacts.appendChild(fact("Current position",
+            line.position === null ? "not eligible" : "#" + line.position));
+          drawerFacts.appendChild(fact("Promise Del (effective)",
+            fmtDate(line.dates.eff_promise_del) +
+            (line.dates.promise_del_source ? " (" + line.dates.promise_del_source + ")" : "")));
+          drawerFacts.appendChild(fact("Promise Del (line raw)", fmtDate(line.dates.line_promise_del)));
+          drawerFacts.appendChild(fact("Promise Del (header)", fmtDate(line.dates.hdr_promise_del)));
+          drawerFacts.appendChild(fact("Promise Ship", fmtDate(line.dates.eff_promise_ship)));
+          drawerFacts.appendChild(fact("Prod Date (ops)", fmtDate(line.dates.line_desired)));
+          drawerFacts.appendChild(fact("Est. available",
+            line.est_available ? line.est_available + " (" +
+              (CERTAINTY_LABEL[line.est_certainty] || "") + ")" : "—"));
+          drawerDate.value = line.dates.line_promise_del || "";
+          drawerClear.checked = false;
+          drawerTarget.value = "";
+          drawerSuggestHint.hidden = true;
+          drawerHint.hidden = true;
+          drawer.hidden = false;
+          updateSaveEnabled();
+          if (currentPayload) renderDemand(currentPayload, null);
+          drawer.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        }
+
+        function closeDrawer() {
+          drawer.hidden = true;
+          selectedLine = null;
+          selectedKey = null;
+        }
+        document.getElementById("drawer-close").addEventListener("click", function () {
+          closeDrawer();
+          setPreviewMode(false);
+          if (currentPart) loadPart(currentPart);
+        });
+
+        function pendingNewValue() {
+          if (drawerClear.checked) return null;
+          return drawerDate.value || null;
+        }
+
+        drawerSuggest.addEventListener("click", async function () {
+          if (!selectedLine || !drawerTarget.value) return;
+          drawerSuggest.disabled = true;
+          drawerSuggestHint.hidden = true;
+          try {
+            const params = "?part_id=" + encodeURIComponent(currentPart) +
+              "&so=" + encodeURIComponent(selectedLine.so) +
+              "&line_no=" + selectedLine.line_no +
+              "&target_position=" + encodeURIComponent(drawerTarget.value);
+            const resp = await fetch(CONFIG.suggestUrl + params);
+            const data = await resp.json();
+            drawerSuggestHint.hidden = false;
+            if (!resp.ok) {
+              drawerSuggestHint.textContent = data.message || "No suggestion available.";
+              return;
+            }
+            drawerDate.value = data.suggested_date || "";
+            drawerClear.checked = false;
+            updateSaveEnabled();
+            drawerSuggestHint.textContent = data.predicted_position ===
+              parseInt(drawerTarget.value, 10)
+              ? "Setting " + data.suggested_date + " lands this order at position " +
+                data.predicted_position + "."
+              : "Closest achievable: " + data.suggested_date + " lands at position " +
+                data.predicted_position + " (exact target not reachable).";
+          } catch (e) {
+            drawerSuggestHint.hidden = false;
+            drawerSuggestHint.textContent = "Network error — could not get a suggestion.";
+          } finally {
+            drawerSuggest.disabled = false;
+          }
+        });
+
+        drawerPreview.addEventListener("click", async function () {
+          if (!selectedLine) return;
+          drawerPreview.disabled = true;
+          drawerHint.hidden = true;
+          try {
+            const resp = await fetch(CONFIG.previewUrl, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "X-CSRF-Token": CONFIG.csrfToken,
+              },
+              body: JSON.stringify({
+                part_id: currentPart,
+                so: selectedLine.so,
+                line_no: selectedLine.line_no,
+                new_value: pendingNewValue(),
+              }),
+            });
+            const data = await resp.json();
+            if (!resp.ok) {
+              drawerHint.hidden = false;
+              drawerHint.textContent = data.message || "Preview failed.";
+              return;
+            }
+            setPreviewMode(true,
+              selectedLine.so + " line " + selectedLine.line_no + " would move from position " +
+              (data.baseline_position === null ? "—" : data.baseline_position) + " to " +
+              (data.new_position === null ? "—" : data.new_position) + ".");
+            renderAll(data.result, {
+              movedKey: lineKey(selectedLine),
+              displaced: data.displaced,
+            });
+          } catch (e) {
+            drawerHint.hidden = false;
+            drawerHint.textContent = "Network error — preview failed.";
+          } finally {
+            drawerPreview.disabled = false;
+          }
+        });
+
+        drawerSave.addEventListener("click", async function () {
+          if (!selectedLine) return;
+          const operator = drawerOperator.value.trim();
+          if (!operator) return;
+          try { localStorage.setItem("audit_operator_name", operator); } catch (e) {}
+          drawerSave.disabled = true;
+          drawerHint.hidden = true;
+          try {
+            const resp = await fetch(CONFIG.saveUrl, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "X-CSRF-Token": CONFIG.csrfToken,
+              },
+              body: JSON.stringify({
+                part_id: currentPart,
+                so: selectedLine.so,
+                line_no: selectedLine.line_no,
+                new_value: pendingNewValue(),
+                expected_old_value: selectedLine.dates.line_promise_del,
+                changed_by: operator,
+                reason: drawerReason.value.trim() || null,
+              }),
+            });
+            const data = await resp.json();
+            if (resp.status === 409) {
+              drawerHint.hidden = false;
+              drawerHint.textContent = (data.message || "Edit conflict.") +
+                " Current value: " + (data.current_value || "blank") + ". Reloading…";
+              setTimeout(function () { loadPart(currentPart); }, 2500);
+              return;
+            }
+            if (!resp.ok) {
+              drawerHint.hidden = false;
+              drawerHint.textContent = data.message || "Save failed.";
+              updateSaveEnabled();
+              return;
+            }
+            const movedKey = lineKey(selectedLine);
+            setPreviewMode(false);
+            closeDrawer();
+            clearError();
+            if (data.result) {
+              renderAll(data.result, { movedKey: movedKey, displaced: [] });
+            }
+            const banner = el("div", "flag-banner info");
+            banner.appendChild(el("strong", null, "SAVED"));
+            banner.appendChild(el("span", null,
+              " Promise Del Date " + (data.new_value || "cleared (header date applies)") +
+              " saved. Position " +
+              (data.position_before === null ? "—" : data.position_before) + " → " +
+              (data.position_after === null ? "—" : data.position_after) +
+              (data.warning ? " — " + data.warning : "")));
+            flagsEl.textContent = "";
+            flagsEl.appendChild(banner);
+            flagsEl.hidden = false;
+            loadHistory(currentPart);
+            if (data.warning) loadPart(currentPart);
+          } catch (e) {
+            drawerHint.hidden = false;
+            drawerHint.textContent = "Network error — the save may not have completed. Reload before retrying.";
+          } finally {
+            updateSaveEnabled();
+          }
+        });
+
+        // ------------------------------------------------------------------
+        partForm.addEventListener("submit", function (e) {
+          e.preventDefault();
+          suggestionsEl.hidden = true;
+          loadPart(partInput.value);
+        });
+        partInput.addEventListener("keydown", function (e) {
+          if (e.key === "Tab" && partInput.value.trim()) {
+            e.preventDefault();
+            suggestionsEl.hidden = true;
+            loadPart(partInput.value);
+          }
+        });
+
+        if (CONFIG.prefillPart) {
+          partInput.value = CONFIG.prefillPart;
+          loadPart(CONFIG.prefillPart);
+        }
+      })();
+    </script>
+  </body>
+</html>

@@ -37,6 +37,8 @@ from flask import (
 )
 from sqlalchemy import create_engine, text
 
+import allocation
+import allocation_store
 import audit_store
 import audit_universe
 import pick_store
@@ -168,6 +170,18 @@ SHORTAGE_PRODUCT_CODES = [
 ]
 SHORTAGE_CACHE_MINUTES = float(os.getenv("SHORTAGE_CACHE_MINUTES", "5"))
 SHORTAGE_PRODUCT_CODES_TOKEN = "__SHORTAGE_PRODUCT_CODES__"
+# Allocation screen: per-SKU supply/demand model + Promise Del Date editing.
+ALLOC_SUPPLY_FILE = resolve_path_setting(
+    os.getenv("ALLOC_SUPPLY_FILE", "sql/alloc_supply.sql")
+)
+ALLOC_DEMAND_FILE = resolve_path_setting(
+    os.getenv("ALLOC_DEMAND_FILE", "sql/alloc_demand.sql")
+)
+ALLOC_PARTS_FILE = resolve_path_setting(
+    os.getenv("ALLOC_PARTS_FILE", "sql/alloc_parts.sql")
+)
+ALLOC_PART_SEARCH_MIN_CHARS = 2
+ALLOC_PART_ID_MAX_LENGTH = 30
 GUNS_DEFAULT_LOOKAHEAD_DAYS = 10
 GUNS_MAX_LOOKAHEAD_DAYS = 365
 GUNS_BASE_EXCLUDED_CUSTOMERS = ("CA MARK",)
@@ -196,6 +210,7 @@ SCHEDULER_LOCK_PATH = BASE_DIR / ".scheduler.lock"
 ENCRYPTED_SETTING_PREFIX = "enc:v1:"
 SENSITIVE_SETTING_KEYS = {
     "mssql_connection_string",
+    "mssql_write_connection_string",
     "telegram_bot_token",
     "smtp_password",
 }
@@ -854,6 +869,52 @@ def get_erp_engine():
             engine = create_engine(mssql_conn_string, pool_pre_ping=True, pool_recycle=1800)
             _erp_engines[mssql_conn_string] = engine
     return engine
+
+
+def get_erp_write_engine():
+    """Engine for the one ERP write path (Promise Del Date saves).
+
+    Uses mssql_write_connection_string / MSSQL_WRITE_CONNECTION_STRING when
+    configured — intended to be a dedicated login whose only write right is a
+    column-level UPDATE grant on CUST_ORDER_LINE.PROMISE_DEL_DATE — and falls
+    back to the read connection until that login exists. Shares the engine
+    cache, so a settings change takes effect without a restart.
+    """
+    write_conn_string = get_config_value(
+        setting_key="mssql_write_connection_string",
+        env_key="MSSQL_WRITE_CONNECTION_STRING",
+    )
+    if not write_conn_string:
+        return get_erp_engine()
+    with _erp_engines_lock:
+        engine = _erp_engines.get(write_conn_string)
+        if engine is None:
+            logger.info(
+                "Connecting to SQL Server (write) using %s",
+                mask_connection_string(write_conn_string),
+            )
+            engine = create_engine(write_conn_string, pool_pre_ping=True, pool_recycle=1800)
+            _erp_engines[write_conn_string] = engine
+    return engine
+
+
+# The app's only ERP write. UPDLOCK on the SELECT holds the row for the
+# duration of the transaction; the UPDATE's old-value predicate is the
+# optimistic-concurrency check against edits made before we loaded the screen.
+# CAST(... AS date): the UI only ever saw date precision, so a stray time
+# component in the column must not read as a conflict.
+ALLOC_SELECT_LINE_SQL = """
+SELECT PART_ID, CAST(PROMISE_DEL_DATE AS date) AS PROMISE_DEL_DATE
+FROM dbo.CUST_ORDER_LINE WITH (UPDLOCK, ROWLOCK)
+WHERE CUST_ORDER_ID = :so AND LINE_NO = :line
+"""
+ALLOC_UPDATE_SQL = """
+UPDATE dbo.CUST_ORDER_LINE
+SET PROMISE_DEL_DATE = :new_value
+WHERE CUST_ORDER_ID = :so AND LINE_NO = :line
+  AND ((CAST(PROMISE_DEL_DATE AS date) = :old_value)
+       OR (PROMISE_DEL_DATE IS NULL AND :old_value IS NULL))
+"""
 
 
 def fetch_picklist_from_mssql(
@@ -1787,6 +1848,11 @@ FEATURE_FLAGS = {
         "label": "Serial Lookup",
         "path_prefixes": ("/serial-history", "/api/serial-history"),
     },
+    "allocation": {
+        "setting_key": "feature_allocation_enabled",
+        "label": "Allocation",
+        "path_prefixes": ("/allocation", "/api/allocation"),
+    },
 }
 
 
@@ -1994,6 +2060,7 @@ migrate_sensitive_settings_encryption()
 audit_store.initialize()
 pick_store.initialize(get_sqlite_conn)
 verify_store.initialize(get_sqlite_conn)
+allocation_store.initialize(get_sqlite_conn)
 backfill_plan_snapshots()
 check_audit_universe_sql()
 start_scheduler()
@@ -2125,6 +2192,14 @@ def settings():
         elif mssql_connection_string:
             set_setting("mssql_connection_string", mssql_connection_string)
 
+        mssql_write_connection_string = (
+            request.form.get("mssql_write_connection_string") or ""
+        ).strip()
+        if request.form.get("clear_mssql_write_connection_string"):
+            delete_setting("mssql_write_connection_string")
+        elif mssql_write_connection_string:
+            set_setting("mssql_write_connection_string", mssql_write_connection_string)
+
         telegram_bot_token = (request.form.get("telegram_bot_token") or "").strip()
         if request.form.get("clear_telegram_bot_token"):
             delete_setting("telegram_bot_token")
@@ -2195,6 +2270,9 @@ def settings():
         )
 
     mssql_value = get_config_value("mssql_connection_string", "MSSQL_CONNECTION_STRING")
+    mssql_write_value = get_config_value(
+        "mssql_write_connection_string", "MSSQL_WRITE_CONNECTION_STRING"
+    )
     telegram_chat_id = get_config_value("telegram_chat_id", "TELEGRAM_CHAT_ID", "")
     smtp_host = get_config_value("smtp_host", "SMTP_HOST", "")
     smtp_port = get_config_value("smtp_port", "SMTP_PORT", "587")
@@ -2216,6 +2294,12 @@ def settings():
         if mssql_value
         else "Not configured",
         mssql_source=get_config_source("mssql_connection_string", "MSSQL_CONNECTION_STRING"),
+        mssql_write_connection_string_masked=mask_connection_string(mssql_write_value)
+        if mssql_write_value
+        else "Not configured (saves use the main connection)",
+        mssql_write_source=get_config_source(
+            "mssql_write_connection_string", "MSSQL_WRITE_CONNECTION_STRING"
+        ),
         telegram_bot_token_configured=bool(
             get_config_value("telegram_bot_token", "TELEGRAM_BOT_TOKEN")
         ),
@@ -3087,6 +3171,460 @@ def api_serial_history():
 
     payload = serial_history.build_serial_history(serial, trace_df, txns_df, shipments_df)
     return jsonify(payload), 200
+
+
+# ---------------------------------------------------------------------------
+# Allocation: per-SKU supply/demand model + Promise Del Date reprioritization
+# ---------------------------------------------------------------------------
+def _clean_part_id(value: Optional[str]) -> str:
+    return (value or "").strip().upper()[:ALLOC_PART_ID_MAX_LENGTH]
+
+
+def _allocation_options() -> dict[str, Any]:
+    """Lookahead + excluded-customer terms, same source as the guns picklist."""
+    options = get_default_guns_query_options()
+    return {
+        "lookahead_days": options["lookahead_days"],
+        "excluded_customers": tuple(options["excluded_customers"]),
+    }
+
+
+def _fetch_allocation_inputs(part_id: str) -> tuple[list[dict], list[dict]]:
+    supply_df = run_erp_query_file(
+        ALLOC_SUPPLY_FILE, {"part_id": part_id}, f"allocation supply for {part_id}"
+    )
+    demand_df = run_erp_query_file(
+        ALLOC_DEMAND_FILE, {"part_id": part_id}, f"allocation demand for {part_id}"
+    )
+    return (
+        supply_df.to_dict(orient="records"),
+        demand_df.to_dict(orient="records"),
+    )
+
+
+def _build_allocation_payload(
+    part_id: str,
+    overrides: Optional[dict] = None,
+) -> dict:
+    options = _allocation_options()
+    supply_rows, demand_rows = _fetch_allocation_inputs(part_id)
+    payload = allocation.build_allocation(
+        supply_rows,
+        demand_rows,
+        date.today(),
+        options["lookahead_days"],
+        excluded_customer_terms=options["excluded_customers"],
+        overrides=overrides,
+    )
+    payload["part_id"] = part_id
+    return payload
+
+
+@app.get("/allocation")
+@require_trusted_client
+def allocation_page():
+    prefill = _clean_part_id(request.args.get("part"))
+    return render_template("allocation.html", prefill_part=prefill)
+
+
+@app.get("/api/allocation/parts")
+@require_trusted_client
+def api_allocation_parts():
+    term = (request.args.get("q") or "").strip().upper()
+    if len(term) < ALLOC_PART_SEARCH_MIN_CHARS:
+        return jsonify({"parts": []}), 200
+    try:
+        df = run_erp_query_file(
+            ALLOC_PARTS_FILE,
+            {"pattern": f"%{term}%", "prefix": f"{term}%"},
+            f"allocation part search '{term}'",
+        )
+    except Exception:
+        logger.exception("Allocation part search failed for %s", term)
+        return (
+            jsonify(
+                {
+                    "error": "lookup_failed",
+                    "message": "The ERP lookup failed. Check the SQL Server connection and try again.",
+                }
+            ),
+            500,
+        )
+    parts = [
+        {
+            "part_id": str(row.get("PART_ID") or ""),
+            "description": row.get("DESCRIPTION") if row.get("DESCRIPTION") == row.get("DESCRIPTION") else None,
+            "on_hand": int(row.get("ON_HAND") or 0),
+            "open_demand": int(row.get("OPEN_DEMAND") or 0),
+        }
+        for row in df.to_dict(orient="records")
+    ]
+    return jsonify({"parts": parts}), 200
+
+
+@app.get("/api/allocation/history")
+@require_trusted_client
+def api_allocation_history():
+    part_id = _clean_part_id(request.args.get("part_id")) or None
+    so = (request.args.get("so") or "").strip() or None
+    if not part_id and not so:
+        return jsonify({"error": "invalid", "message": "part_id or so is required."}), 400
+    changes = allocation_store.recent_changes(part_id=part_id, cust_order_id=so)
+    return jsonify({"changes": changes}), 200
+
+
+@app.get("/api/allocation/<part_id>")
+@require_trusted_client
+def api_allocation_detail(part_id: str):
+    part_id = _clean_part_id(part_id)
+    if not part_id:
+        return jsonify({"error": "invalid", "message": "A part number is required."}), 400
+    try:
+        payload = _build_allocation_payload(part_id)
+    except Exception:
+        logger.exception("Allocation lookup failed for %s", part_id)
+        return (
+            jsonify(
+                {
+                    "error": "lookup_failed",
+                    "message": "The ERP lookup failed. Check the SQL Server connection and try again.",
+                }
+            ),
+            500,
+        )
+    if (
+        not payload["supply"]["events"]
+        and not payload["supply"]["informational"]
+        and not payload["demand"]["lines"]
+    ):
+        return (
+            jsonify(
+                {
+                    "error": "part_not_found",
+                    "message": f"No open demand, stock, or production found for {part_id}.",
+                }
+            ),
+            404,
+        )
+    return jsonify(payload), 200
+
+
+def _parse_iso_date_field(payload: dict, field: str) -> tuple[Optional[date], Optional[str]]:
+    """(value, error). None is a legal value for both promise-del fields."""
+    raw = payload.get(field)
+    if raw in (None, ""):
+        return None, None
+    try:
+        return date.fromisoformat(str(raw)), None
+    except ValueError:
+        return None, f"{field} must be a YYYY-MM-DD date."
+
+
+@app.post("/api/allocation/preview")
+@require_trusted_client
+@require_csrf
+def api_allocation_preview():
+    body = request.get_json(silent=True) or {}
+    part_id = _clean_part_id(body.get("part_id"))
+    so = (body.get("so") or "").strip()
+    line_no = body.get("line_no")
+    if not part_id or not so or not isinstance(line_no, int):
+        return (
+            jsonify({"error": "invalid", "message": "part_id, so, and line_no are required."}),
+            400,
+        )
+    new_value, error = _parse_iso_date_field(body, "new_value")
+    if error:
+        return jsonify({"error": "invalid", "message": error}), 400
+
+    options = _allocation_options()
+    try:
+        supply_rows, demand_rows = _fetch_allocation_inputs(part_id)
+    except Exception:
+        logger.exception("Allocation preview lookup failed for %s", part_id)
+        return (
+            jsonify(
+                {
+                    "error": "lookup_failed",
+                    "message": "The ERP lookup failed. Check the SQL Server connection and try again.",
+                }
+            ),
+            500,
+        )
+    preview = allocation.preview_change(
+        supply_rows,
+        demand_rows,
+        date.today(),
+        options["lookahead_days"],
+        options["excluded_customers"],
+        so,
+        line_no,
+        new_value,
+    )
+    preview["result"]["part_id"] = part_id
+    return jsonify(preview), 200
+
+
+@app.get("/api/allocation/suggest")
+@require_trusted_client
+def api_allocation_suggest():
+    part_id = _clean_part_id(request.args.get("part_id"))
+    so = (request.args.get("so") or "").strip()
+    try:
+        line_no = int(request.args.get("line_no", ""))
+        target_position = int(request.args.get("target_position", ""))
+    except ValueError:
+        return (
+            jsonify({"error": "invalid", "message": "line_no and target_position must be numbers."}),
+            400,
+        )
+    if not part_id or not so:
+        return jsonify({"error": "invalid", "message": "part_id and so are required."}), 400
+
+    options = _allocation_options()
+    try:
+        supply_rows, demand_rows = _fetch_allocation_inputs(part_id)
+    except Exception:
+        logger.exception("Allocation suggest lookup failed for %s", part_id)
+        return (
+            jsonify(
+                {
+                    "error": "lookup_failed",
+                    "message": "The ERP lookup failed. Check the SQL Server connection and try again.",
+                }
+            ),
+            500,
+        )
+    suggestion = allocation.suggest_promise_del(
+        supply_rows,
+        demand_rows,
+        date.today(),
+        options["lookahead_days"],
+        options["excluded_customers"],
+        so,
+        line_no,
+        target_position,
+    )
+    status = 400 if suggestion.get("error") else 200
+    return jsonify(suggestion), status
+
+
+class _AllocationSaveConflict(Exception):
+    def __init__(self, current_value: Optional[date]):
+        super().__init__("Promise Del Date changed since the screen was loaded.")
+        self.current_value = current_value
+
+
+@app.post("/api/allocation/promise-del")
+@require_trusted_client
+@require_csrf
+def api_allocation_save():
+    body = request.get_json(silent=True) or {}
+    part_id = _clean_part_id(body.get("part_id"))
+    so = (body.get("so") or "").strip()
+    line_no = body.get("line_no")
+    changed_by = (body.get("changed_by") or "").strip()
+    reason = (body.get("reason") or "").strip() or None
+    if not part_id or not so or not isinstance(line_no, int):
+        return (
+            jsonify({"error": "invalid", "message": "part_id, so, and line_no are required."}),
+            400,
+        )
+    if not changed_by:
+        return (
+            jsonify(
+                {
+                    "error": "invalid",
+                    "message": "Set your operator name before saving — the audit trail requires it.",
+                }
+            ),
+            400,
+        )
+    new_value, error = _parse_iso_date_field(body, "new_value")
+    if error:
+        return jsonify({"error": "invalid", "message": error}), 400
+    expected_old_value, error = _parse_iso_date_field(body, "expected_old_value")
+    if error:
+        return jsonify({"error": "invalid", "message": error}), 400
+
+    # Server-computed baseline: never trust the client's idea of its position.
+    try:
+        baseline = _build_allocation_payload(part_id)
+    except Exception:
+        logger.exception("Allocation save baseline failed for %s", part_id)
+        return (
+            jsonify(
+                {
+                    "error": "lookup_failed",
+                    "message": "The ERP lookup failed. Nothing was saved.",
+                }
+            ),
+            500,
+        )
+    position_before = None
+    line_found = False
+    for line in baseline["demand"]["lines"]:
+        if line["so"] == so and line["line_no"] == line_no:
+            position_before = line["position"]
+            line_found = True
+            break
+    if not line_found:
+        return (
+            jsonify(
+                {
+                    "error": "line_not_found",
+                    "message": f"{so} line {line_no} has no open demand for {part_id}.",
+                }
+            ),
+            404,
+        )
+
+    audit_id: Optional[int] = None
+    erp_updated = False
+    old_value_iso: Optional[str] = None
+    try:
+        engine = get_erp_write_engine()
+        with engine.begin() as conn:
+            row = (
+                conn.execute(text(ALLOC_SELECT_LINE_SQL), {"so": so, "line": line_no})
+                .mappings()
+                .first()
+            )
+            if row is None:
+                return (
+                    jsonify(
+                        {
+                            "error": "line_not_found",
+                            "message": f"{so} line {line_no} was not found in VISUAL.",
+                        }
+                    ),
+                    404,
+                )
+            row_part = str(row["PART_ID"] or "").strip().upper()
+            if row_part != part_id:
+                return (
+                    jsonify(
+                        {
+                            "error": "invalid",
+                            "message": f"{so} line {line_no} is {row_part}, not {part_id}.",
+                        }
+                    ),
+                    400,
+                )
+            current = row["PROMISE_DEL_DATE"]
+            if isinstance(current, datetime):
+                current = current.date()
+            old_value_iso = current.isoformat() if current else None
+
+            result = conn.execute(
+                text(ALLOC_UPDATE_SQL),
+                {
+                    "new_value": new_value,
+                    "so": so,
+                    "line": line_no,
+                    "old_value": expected_old_value,
+                },
+            )
+            if result.rowcount == 0:
+                raise _AllocationSaveConflict(current)
+            erp_updated = True
+
+            # Inside the ERP transaction on purpose: if the audit row cannot
+            # be written, the ERP change must not survive.
+            audit_id = allocation_store.record_change(
+                changed_by=changed_by,
+                cust_order_id=so,
+                line_no=line_no,
+                part_id=part_id,
+                old_value=old_value_iso,
+                new_value=new_value.isoformat() if new_value else None,
+                reason=reason,
+                position_before=position_before,
+                position_after=None,
+            )
+    except _AllocationSaveConflict as conflict:
+        return (
+            jsonify(
+                {
+                    "error": "conflict",
+                    "message": "Promise Del Date changed since this screen was loaded. Reloaded value shown — review and retry.",
+                    "current_value": conflict.current_value.isoformat()
+                    if conflict.current_value
+                    else None,
+                }
+            ),
+            409,
+        )
+    except Exception:
+        if erp_updated and audit_id is None:
+            logger.exception(
+                "Audit write failed for %s line %s; ERP update rolled back.", so, line_no
+            )
+            return (
+                jsonify(
+                    {
+                        "error": "audit_failed",
+                        "message": "The audit trail could not be written, so the change was rolled back.",
+                    }
+                ),
+                500,
+            )
+        if audit_id is not None:
+            # Commit itself failed after the audit insert: compensate.
+            try:
+                allocation_store.delete_change(audit_id)
+            except Exception:
+                logger.exception("Compensating audit delete failed for id %s", audit_id)
+        logger.exception("Promise Del save failed for %s line %s", so, line_no)
+        return (
+            jsonify(
+                {
+                    "error": "save_failed",
+                    "message": "The save failed. Nothing was changed in VISUAL.",
+                }
+            ),
+            500,
+        )
+
+    logger.info(
+        "Promise Del Date for %s line %s (%s) changed %s -> %s by %s.",
+        so,
+        line_no,
+        part_id,
+        old_value_iso or "blank",
+        new_value.isoformat() if new_value else "blank",
+        changed_by,
+    )
+
+    fresh_payload: Optional[dict] = None
+    position_after = None
+    warning = None
+    try:
+        fresh_payload = _build_allocation_payload(part_id)
+        for line in fresh_payload["demand"]["lines"]:
+            if line["so"] == so and line["line_no"] == line_no:
+                position_after = line["position"]
+                break
+        allocation_store.set_position_after(audit_id, position_after)
+    except Exception:
+        logger.exception("Post-save allocation rebuild failed for %s", part_id)
+        warning = "Saved, but the refreshed allocation could not be loaded. Reload the page."
+
+    return (
+        jsonify(
+            {
+                "status": "saved",
+                "audit_id": audit_id,
+                "old_value": old_value_iso,
+                "new_value": new_value.isoformat() if new_value else None,
+                "position_before": position_before,
+                "position_after": position_after,
+                "result": fresh_payload,
+                "warning": warning,
+            }
+        ),
+        200,
+    )
 
 
 # ---------------------------------------------------------------------------

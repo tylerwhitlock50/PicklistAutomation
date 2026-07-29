@@ -18,6 +18,9 @@
     {% if feature_flags.serial %}
     <a class="topnav-tab {% if active_nav == 'serial' %}is-active{% endif %}" href="{{ url_for('serial_history_page') }}">Serial Lookup</a>
     {% endif %}
+    {% if feature_flags.allocation %}
+    <a class="topnav-tab {% if active_nav == 'allocation' %}is-active{% endif %}" href="{{ url_for('allocation_page') }}" data-loading-message="Loading allocation&hellip;">Allocation</a>
+    {% endif %}
   </nav>
 
   <div class="topnav-user">

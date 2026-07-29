@@ -115,6 +115,10 @@
               <input id="feature_serial" name="feature_serial" type="checkbox" {% if feature_flags.serial %}checked{% endif %} />
               Show Serial Lookup
             </label>
+            <label class="checkbox-row" for="feature_allocation">
+              <input id="feature_allocation" name="feature_allocation" type="checkbox" {% if feature_flags.allocation %}checked{% endif %} />
+              Show Allocation (SKU supply/demand priority + Promise Del Date editing)
+            </label>
           </section>
 
           <section class="settings-section">
@@ -137,6 +141,28 @@
             <label class="checkbox-row" for="clear_mssql_connection_string">
               <input id="clear_mssql_connection_string" name="clear_mssql_connection_string" type="checkbox" />
               Clear saved database connection string
+            </label>
+            {% endif %}
+
+            <p class="helper-text" style="margin-top: 1rem;">
+              Write source: <strong>{{ mssql_write_source }}</strong> —
+              <code>{{ mssql_write_connection_string_masked }}</code><br />
+              Optional dedicated login for Promise Del Date saves (should hold only a
+              column-level UPDATE grant on CUST_ORDER_LINE.PROMISE_DEL_DATE). Saves fall
+              back to the main connection while unset.
+            </p>
+            <label for="mssql_write_connection_string">MSSQL Write Connection String (optional)</label>
+            <input
+              id="mssql_write_connection_string"
+              name="mssql_write_connection_string"
+              type="password"
+              autocomplete="off"
+              placeholder="Enter only to set or replace"
+            />
+            {% if mssql_write_source == 'database' %}
+            <label class="checkbox-row" for="clear_mssql_write_connection_string">
+              <input id="clear_mssql_write_connection_string" name="clear_mssql_write_connection_string" type="checkbox" />
+              Clear saved write connection string
             </label>
             {% endif %}
           </section>

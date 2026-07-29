@@ -1,0 +1,62 @@
+/*
+===============================================================================
+  ALLOCATION SCREEN — ALL OPEN DEMAND FOR ONE SKU
+===============================================================================
+  Every open customer-order line for :part_id, with the raw header- and
+  line-level dates and the facts the eligibility rules need. Deliberately
+  broader than the picklist:
+
+    * no horizon cut — the screen shows everything and marks what falls
+      inside the picklist window;
+    * minimal eligibility filtering — credit-held / firmed-not-released /
+      RMA / excluded lines come back too, with the facts (ORDER_STATUS,
+      CREDIT_STATUS, ...) as columns so allocation.py can badge the reason
+      instead of hiding the line. Closed and cancelled orders are NOT open
+      backlog and are excluded here: VISUAL leaves LINE_STATUS = 'A' on
+      lines of closed orders (35k+ such lines back to 2011), so the header
+      status is the real open-order test. 'R' released / 'F' firmed (same
+      rule as sql-toolbox so_header_and_lines_open_orders.sql) plus 'H'
+      held — held orders are open backlog Inside Sales must see, badged;
+    * no COALESCE on dates — allocation.py owns the line->header fallback so
+      what-if previews can override the line value.
+
+  Bind parameters:  :part_id
+  SQL Server / Infor VISUAL (VECA). Read-only.
+===============================================================================
+*/
+
+SELECT
+    co.ID                                   AS CUST_ORDER_ID,
+    col.LINE_NO,
+    co.CUSTOMER_ID,
+    c.NAME                                  AS CUSTOMER_NAME,
+    CAST(co.ORDER_DATE AS date)             AS ORDER_DATE,
+    CAST(col.ORDER_QTY AS int)              AS ORDER_QTY,
+    CAST(col.TOTAL_SHIPPED_QTY AS int)      AS SHIPPED_QTY,
+    CAST(col.ORDER_QTY - col.TOTAL_SHIPPED_QTY AS int) AS OPEN_QTY,
+
+    CAST(co.DESIRED_SHIP_DATE AS date)      AS HDR_DESIRED_SHIP_DATE,
+    CAST(col.DESIRED_SHIP_DATE AS date)     AS LINE_DESIRED_SHIP_DATE,
+    CAST(co.PROMISE_DATE AS date)           AS HDR_PROMISE_SHIP_DATE,
+    CAST(col.PROMISE_DATE AS date)          AS LINE_PROMISE_SHIP_DATE,
+    CAST(co.PROMISE_DEL_DATE AS date)       AS HDR_PROMISE_DEL_DATE,
+    CAST(col.PROMISE_DEL_DATE AS date)      AS LINE_PROMISE_DEL_DATE,
+
+    co.STATUS                               AS ORDER_STATUS,
+    col.LINE_STATUS,
+    ce.CREDIT_STATUS,
+    co.SALESREP_ID,
+    co.CUSTOMER_PO_REF,
+    c.DISCOUNT_CODE
+FROM dbo.CUST_ORDER_LINE col
+JOIN dbo.CUSTOMER_ORDER co
+    ON col.CUST_ORDER_ID = co.ID
+JOIN dbo.CUSTOMER c
+    ON c.ID = co.CUSTOMER_ID
+LEFT JOIN dbo.CUSTOMER_ENTITY ce
+    ON ce.CUSTOMER_ID = c.ID
+WHERE col.PART_ID = :part_id
+  AND co.STATUS IN ('R', 'F', 'H')
+  AND col.LINE_STATUS = 'A'
+  AND (col.ORDER_QTY - col.TOTAL_SHIPPED_QTY) > 0
+ORDER BY co.ORDER_DATE, co.ID, col.LINE_NO;

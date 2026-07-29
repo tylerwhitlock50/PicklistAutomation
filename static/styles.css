@@ -1895,3 +1895,257 @@ details.detail-section > .table-wrap {
     min-width: 0;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Allocation screen
+--------------------------------------------------------------------------- */
+.alloc-search .serial-search-field {
+  position: relative;
+}
+
+.alloc-suggestions {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 30;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-card);
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.alloc-suggestion {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  padding: 9px 12px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--ink);
+}
+
+.alloc-suggestion:hover {
+  background: var(--success-bg);
+}
+
+.alloc-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.alloc-summary-pill {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  min-width: 120px;
+}
+
+.alloc-summary-num {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 18px;
+}
+
+.alloc-summary-label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.alloc-rail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.alloc-supply-chip {
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line);
+  padding: 10px 12px;
+  min-width: 130px;
+  background: var(--panel);
+}
+
+.alloc-chip-title {
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.alloc-chip-qty {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.alloc-chip-date {
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+/* Certainty colors: green on hand, blue released, amber firmed,
+   purple dashed master schedule, grey fence, red no-supply. */
+.chip-available { background: #dff2e7; border-color: #7fc7a0; }
+.chip-released  { background: #e2ecf9; border-color: #8fb3e0; }
+.chip-firmed    { background: #fdf0dc; border-color: #e8bd7f; }
+.chip-planned   { background: #efe6f7; border-color: #bd9bd8; border-style: dashed; }
+.chip-fence     { background: #f0ede6; border-color: #c9c2b2; border-style: dotted; }
+.chip-nosupply  { background: var(--error-bg); border-color: #e39f92; }
+
+.pill.alloc-chip {
+  border: 1px solid var(--line);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.alloc-badge {
+  font-size: 11px;
+}
+
+.alloc-row {
+  cursor: pointer;
+}
+
+.alloc-row:hover td {
+  background: #f7f3ea;
+}
+
+.alloc-row-outside td {
+  opacity: 0.55;
+}
+
+.alloc-row-ineligible td {
+  opacity: 0.65;
+}
+
+.alloc-row-selected td {
+  background: #eef6f1;
+}
+
+.alloc-row-moved td {
+  background: #dff2e7;
+  animation: alloc-flash 1.2s ease;
+}
+
+@keyframes alloc-flash {
+  0% { background: #9fd8ba; }
+  100% { background: #dff2e7; }
+}
+
+.alloc-pos {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.alloc-displaced {
+  color: #a04a2e;
+}
+
+.alloc-alloc-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  align-items: flex-start;
+}
+
+.alloc-drawer-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.alloc-drawer-grid {
+  display: grid;
+  grid-template-columns: 1fr 1.2fr;
+  gap: 22px;
+  margin-top: 10px;
+}
+
+@media (max-width: 860px) {
+  .alloc-drawer-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.alloc-facts {
+  margin: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.alloc-fact dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.alloc-fact dd {
+  margin: 0;
+  font-size: 14px;
+}
+
+.alloc-target-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  margin: 8px 0;
+}
+
+.alloc-drawer-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.button-ghost {
+  background: transparent;
+  color: var(--primary);
+  border: 1px solid var(--primary);
+}
+
+.button-ghost:hover {
+  background: var(--success-bg);
+  color: var(--primary-hover);
+}
+
+/* Collapsible supply overview: closed by default — the demand table is the meat. */
+.alloc-overview > summary {
+  cursor: pointer;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-weight: 700;
+  font-size: 16px;
+  list-style-position: outside;
+}
+
+.alloc-overview > summary::marker {
+  color: var(--primary);
+}
+
+.alloc-overview[open] > summary {
+  margin-bottom: 12px;
+}
+
+.alloc-overview .alloc-summary {
+  margin-bottom: 14px;
+}
+
+.alloc-overview-title {
+  color: var(--ink);
+}
