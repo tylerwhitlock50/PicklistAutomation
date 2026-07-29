@@ -62,9 +62,12 @@ DemandBase AS (
       AND (col.ORDER_QTY - col.TOTAL_SHIPPED_QTY) > 0
 ),
 
--- Determine Demand horizon: desired ship date is either past due OR within next N days
--- DESIRED_SHIP_DATE drives MRP, so the picklist plans against the same date.
--- NULL desired ship dates are included by treating them as TODAY.
+-- Determine Demand horizon: same fallback chain as the priority sort —
+-- promise del -> promise ship -> desired ship. A line is in scope when the
+-- first date anyone has claimed is past due OR within the next N days, so
+-- orders customers will accept now are never hidden by a slipped desired
+-- date, and orders customers won't take yet don't consume near-term supply.
+-- Lines with no dates at all are included by treating them as TODAY.
 Demand AS (
     SELECT
         d.*,
@@ -74,7 +77,7 @@ Demand AS (
     FROM DemandBase d
     CROSS JOIN Params p
     WHERE EXISTS (SELECT 1 FROM Supply s WHERE s.PART_ID = d.PART_ID)
-      AND COALESCE(d.DESIRED_SHIP_DATE, p.TODAY) <= p.THROUGH_DATE
+      AND COALESCE(d.PROMISE_DEL_DATE, d.PROMISE_SHIP_DATE, d.DESIRED_SHIP_DATE, p.TODAY) <= p.THROUGH_DATE
 ),
 
 -- Supply ranges per part (location order is arbitrary but deterministic)
@@ -96,7 +99,7 @@ SupplyRanges AS (
     FROM Supply s
 ),
 
--- Demand ranges per part, FIFO by desired ship date (overdue first), then tie-breakers
+-- Demand ranges per part, FIFO by promise del -> promise ship -> desired ship, then tie-breakers
 DemandRanges AS (
     SELECT
         d.ORDER_DATE,
@@ -112,7 +115,10 @@ DemandRanges AS (
         SUM(d.OPEN_QTY) OVER (
             PARTITION BY d.PART_ID
             ORDER BY
-                CASE WHEN d.DESIRED_SHIP_DATE_NORM < d.TODAY THEN 0 ELSE 1 END,
+                CASE WHEN d.PROMISE_DEL_DATE IS NULL THEN 1 ELSE 0 END,
+                d.PROMISE_DEL_DATE,
+                CASE WHEN d.PROMISE_SHIP_DATE IS NULL THEN 1 ELSE 0 END,
+                d.PROMISE_SHIP_DATE,
                 d.DESIRED_SHIP_DATE_NORM,
                 d.ORDER_DATE,
                 d.CUST_ORDER_ID,
@@ -123,7 +129,10 @@ DemandRanges AS (
         SUM(d.OPEN_QTY) OVER (
             PARTITION BY d.PART_ID
             ORDER BY
-                CASE WHEN d.DESIRED_SHIP_DATE_NORM < d.TODAY THEN 0 ELSE 1 END,
+                CASE WHEN d.PROMISE_DEL_DATE IS NULL THEN 1 ELSE 0 END,
+                d.PROMISE_DEL_DATE,
+                CASE WHEN d.PROMISE_SHIP_DATE IS NULL THEN 1 ELSE 0 END,
+                d.PROMISE_SHIP_DATE,
                 d.DESIRED_SHIP_DATE_NORM,
                 d.ORDER_DATE,
                 d.CUST_ORDER_ID,
