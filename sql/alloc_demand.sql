@@ -47,7 +47,33 @@ SELECT
     ce.CREDIT_STATUS,
     co.SALESREP_ID,
     co.CUSTOMER_PO_REF,
-    c.DISCOUNT_CODE
+    c.DISCOUNT_CODE,
+
+    /* Make-to-order pegging: WOs tied to this line via DEMAND_SUPPLY_LINK.
+       alloc_supply.sql drops those WOs from the shared pool, so the pegged
+       qty must also come out of this line's pool demand or the line would
+       double-dip (consume a shared unit it does not need). Open WOs only —
+       a closed linked WO means the unit was received/shipped already. */
+    lw.LINKED_WO_QTY,
+    lw.LINKED_WO_DATE,
+    lw.LINKED_WO_UNRELEASED,
+    STUFF((
+        SELECT ', ' + dsl2.SUPPLY_BASE_ID + '/' + dsl2.SUPPLY_LOT_ID
+               + ' (' + wo2.STATUS + ')'
+        FROM dbo.DEMAND_SUPPLY_LINK dsl2
+        JOIN dbo.WORK_ORDER wo2
+            ON  wo2.TYPE     = 'W'
+            AND wo2.BASE_ID  = dsl2.SUPPLY_BASE_ID
+            AND wo2.LOT_ID   = dsl2.SUPPLY_LOT_ID
+            AND wo2.SPLIT_ID = dsl2.SUPPLY_SPLIT_ID
+            AND wo2.SUB_ID   = dsl2.SUPPLY_SUB_ID
+        WHERE dsl2.SUPPLY_TYPE    = 'WO'
+          AND dsl2.DEMAND_BASE_ID = col.CUST_ORDER_ID
+          AND dsl2.DEMAND_SEQ_NO  = col.LINE_NO
+          AND wo2.STATUS IN ('U', 'F', 'R')
+        ORDER BY dsl2.SUPPLY_BASE_ID, dsl2.SUPPLY_LOT_ID
+        FOR XML PATH('')
+    ), 1, 2, '')                            AS LINKED_WO_IDS
 FROM dbo.CUST_ORDER_LINE col
 JOIN dbo.CUSTOMER_ORDER co
     ON col.CUST_ORDER_ID = co.ID
@@ -55,6 +81,24 @@ JOIN dbo.CUSTOMER c
     ON c.ID = co.CUSTOMER_ID
 LEFT JOIN dbo.CUSTOMER_ENTITY ce
     ON ce.CUSTOMER_ID = c.ID
+OUTER APPLY (
+    SELECT
+        CAST(SUM(dsl.ALLOCATED_QTY) AS int)                     AS LINKED_WO_QTY,
+        MIN(CAST(COALESCE(wo.SCHED_FINISH_DATE,
+                          wo.DESIRED_WANT_DATE) AS date))       AS LINKED_WO_DATE,
+        SUM(CASE WHEN wo.STATUS = 'R' THEN 0 ELSE 1 END)        AS LINKED_WO_UNRELEASED
+    FROM dbo.DEMAND_SUPPLY_LINK dsl
+    JOIN dbo.WORK_ORDER wo
+        ON  wo.TYPE     = 'W'
+        AND wo.BASE_ID  = dsl.SUPPLY_BASE_ID
+        AND wo.LOT_ID   = dsl.SUPPLY_LOT_ID
+        AND wo.SPLIT_ID = dsl.SUPPLY_SPLIT_ID
+        AND wo.SUB_ID   = dsl.SUPPLY_SUB_ID
+    WHERE dsl.SUPPLY_TYPE    = 'WO'
+      AND dsl.DEMAND_BASE_ID = col.CUST_ORDER_ID
+      AND dsl.DEMAND_SEQ_NO  = col.LINE_NO
+      AND wo.STATUS IN ('U', 'F', 'R')
+) lw
 WHERE col.PART_ID = :part_id
   AND co.STATUS IN ('R', 'F', 'H')
   AND col.LINE_STATUS = 'A'

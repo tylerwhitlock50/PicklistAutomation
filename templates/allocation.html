@@ -378,6 +378,15 @@
 
         function allocationCell(line) {
           const cell = el("div", "alloc-alloc-cell");
+          if (line.linked_qty) {
+            // Dedicated make-to-order supply: pegged WO(s), outside the pool.
+            const chip = el("span", "pill alloc-chip chip-released",
+              "LINKED WO " + (line.linked_wos || "") +
+              (line.linked_wo_date ? " · " + line.linked_wo_date : ""));
+            chip.title = line.linked_qty + " unit" + (line.linked_qty === 1 ? "" : "s") +
+              " pegged to dedicated work order(s); not competing for shared supply";
+            cell.appendChild(chip);
+          }
           if (!line.eligible) {
             (line.reasons || []).forEach(function (r) {
               cell.appendChild(el("span", "pill failed alloc-badge", REASON_LABEL[r] || r));

@@ -230,6 +230,17 @@ def _coerce_demand(demand_rows: list[dict], excluded_terms: tuple[str, ...],
             "discount_code": _text(row.get("DISCOUNT_CODE")),
         }
 
+        # Make-to-order pegging: linked-WO qty is served by dedicated supply
+        # that alloc_supply.sql already keeps out of the shared pool, so only
+        # the remainder (pool_qty) competes for pool units.
+        linked_qty = max(0, _int(row.get("LINKED_WO_QTY")))
+        line["linked_qty"] = min(open_qty, linked_qty)
+        line["pool_qty"] = open_qty - line["linked_qty"]
+        line["linked_wo_ids"] = _text(row.get("LINKED_WO_IDS"))
+        line["linked_wo_date"] = _as_date(row.get("LINKED_WO_DATE"))
+        line["linked_wo_released"] = (line["linked_qty"] > 0
+                                      and _int(row.get("LINKED_WO_UNRELEASED")) == 0)
+
         key = (so, line_no)
         line["overridden"] = key in overrides
         line_del = overrides[key] if line["overridden"] else line["line_promise_del"]
@@ -293,7 +304,16 @@ def build_allocation(
     event_idx = 0
     for position, line in enumerate(eligible, start=1):
         line["position"] = position
-        need = line["open_qty"]
+        if line["pool_qty"] == 0 and line["linked_qty"] > 0:
+            # Fully pegged to its own WO(s): nothing to take from the pool.
+            line["allocations"] = []
+            line["supply_status"] = "LINKED"
+            line["est_available"] = _iso(line["linked_wo_date"])
+            line["est_certainty"] = ("RELEASED" if line["linked_wo_released"]
+                                     else "FIRMED")
+            line["covered_qty"] = line["open_qty"]
+            continue
+        need = line["pool_qty"]
         allocations: list[dict] = []
         while need > 0 and event_idx < len(events):
             event = events[event_idx]
@@ -394,6 +414,9 @@ def build_allocation(
                 },
                 "eligible": l["eligible"],
                 "reasons": l["reasons"],
+                "linked_qty": l["linked_qty"],
+                "linked_wos": l["linked_wo_ids"],
+                "linked_wo_date": _iso(l["linked_wo_date"]),
                 "in_picklist_window": l["in_picklist_window"],
                 "allocations": l["allocations"],
                 "supply_status": l["supply_status"],

@@ -29,7 +29,9 @@ def demand(so, line_no=1, order_qty=1, shipped_qty=0, customer="CUST",
            hdr_promise_ship=None, line_promise_ship=None,
            hdr_promise_del=None, line_promise_del=None,
            order_status="R", line_status="A", credit_status="A",
-           salesrep_id=None, customer_po_ref=None, discount_code=None):
+           salesrep_id=None, customer_po_ref=None, discount_code=None,
+           linked_wo_qty=None, linked_wo_ids=None, linked_wo_date=None,
+           linked_wo_unreleased=0):
     return {
         "CUST_ORDER_ID": so,
         "LINE_NO": line_no,
@@ -51,6 +53,10 @@ def demand(so, line_no=1, order_qty=1, shipped_qty=0, customer="CUST",
         "SALESREP_ID": salesrep_id,
         "CUSTOMER_PO_REF": customer_po_ref,
         "DISCOUNT_CODE": discount_code,
+        "LINKED_WO_QTY": linked_wo_qty,
+        "LINKED_WO_IDS": linked_wo_ids,
+        "LINKED_WO_DATE": linked_wo_date,
+        "LINKED_WO_UNRELEASED": linked_wo_unreleased,
     }
 
 
@@ -197,6 +203,66 @@ class EligibilityTests(unittest.TestCase):
         self.assertEqual(line["open_qty"], 2)
         self.assertEqual(line["covered_qty"], 2)
         self.assertEqual(sum(a["qty"] for a in line["allocations"]), 2)
+
+
+class LinkedWoTests(unittest.TestCase):
+    def test_fully_linked_line_takes_nothing_from_pool(self):
+        # Make-to-order: the linked WO is filtered out of alloc_supply.sql, so
+        # the pegged line must not also consume a shared unit.
+        rows = [
+            demand("SO-LINKED", hdr_promise_del=date(2026, 8, 1),
+                   linked_wo_qty=1, linked_wo_ids="701597/1 (R)",
+                   linked_wo_date=date(2026, 8, 20)),
+            demand("SO-POOL", hdr_promise_del=date(2026, 8, 15)),
+        ]
+        result = build([supply("ON_HAND", 1, supply_id="SHIPPING/R01-A")], rows)
+        linked = line_of(result, "SO-LINKED")
+        pool = line_of(result, "SO-POOL")
+        self.assertEqual(linked["supply_status"], "LINKED")
+        self.assertEqual(linked["allocations"], [])
+        self.assertEqual(linked["covered_qty"], 1)
+        self.assertEqual(linked["linked_qty"], 1)
+        self.assertEqual(linked["linked_wos"], "701597/1 (R)")
+        self.assertEqual(linked["est_available"], "2026-08-20")
+        self.assertEqual(linked["est_certainty"], "RELEASED")
+        # The earlier-dated linked line did not steal the on-hand unit.
+        self.assertEqual(pool["supply_status"], "ALLOCATED")
+        self.assertEqual(result["demand"]["unallocated_units"], 0)
+
+    def test_unreleased_linked_wo_is_firmed_certainty(self):
+        result = build([], [demand("SO-LINKED", linked_wo_qty=1,
+                                   linked_wo_ids="701597/1 (F)",
+                                   linked_wo_date=date(2026, 8, 20),
+                                   linked_wo_unreleased=1)])
+        self.assertEqual(line_of(result, "SO-LINKED")["est_certainty"], "FIRMED")
+
+    def test_partially_linked_line_pools_only_the_remainder(self):
+        result = build([supply("ON_HAND", 5, supply_id="SHIPPING/R01-A")],
+                       [demand("SO-MIX", order_qty=3, linked_wo_qty=1,
+                               linked_wo_ids="700001/1 (R)")])
+        line = line_of(result, "SO-MIX")
+        self.assertEqual(line["linked_qty"], 1)
+        self.assertEqual(sum(a["qty"] for a in line["allocations"]), 2)
+        self.assertEqual(line["covered_qty"], 3)
+        self.assertEqual(line["supply_status"], "ALLOCATED")
+
+    def test_ineligible_linked_line_keeps_reasons_and_link_badge(self):
+        # Holly's case: firmed SO with a released linked WO.
+        result = build([], [demand("SO-VIP", order_status="F", linked_wo_qty=1,
+                                   linked_wo_ids="701597/1 (R)")])
+        line = line_of(result, "SO-VIP")
+        self.assertIn("order_not_released", line["reasons"])
+        self.assertIsNone(line["position"])
+        self.assertEqual(line["linked_qty"], 1)
+        self.assertEqual(line["linked_wos"], "701597/1 (R)")
+
+    def test_linked_qty_capped_at_open_qty(self):
+        # Stale over-pegging must not create negative pool demand.
+        result = build([], [demand("SO-CAP", order_qty=1, linked_wo_qty=3,
+                                   linked_wo_ids="700002/1 (R)")])
+        line = line_of(result, "SO-CAP")
+        self.assertEqual(line["linked_qty"], 1)
+        self.assertEqual(line["supply_status"], "LINKED")
 
 
 class SupplyTests(unittest.TestCase):

@@ -182,6 +182,13 @@ ORDER BY
   **displayed with explicit reason badges but excluded from allocation**.
 - Open units = `ORDER_QTY − TOTAL_SHIPPED_QTY` (handles partial shipments); a multi-unit
   line may span supply events and shows one row per contributing event.
+- Make-to-order pegging (mirror of supply case 16): qty pegged to this line via
+  `DEMAND_SUPPLY_LINK` (open WOs only) is netted out of the line's pool demand — the
+  pegged WO is already excluded from the shared pool, so without the net-out a released
+  linked line would double-dip and steal a shared unit. Fully pegged lines get
+  `supply_status = LINKED`, est. availability from the WO finish date, and a
+  `LINKED WO <base/lot> (<status>)` badge; the badge also shows on ineligible lines
+  (e.g. firmed SO with a released linked WO) so the "not released" question answers itself.
 
 ### Allocation
 Single pass, cumulative ranges: demand line occupies units `[cumStart, cumEnd)` of the
