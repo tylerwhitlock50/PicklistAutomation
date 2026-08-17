@@ -176,14 +176,26 @@ SCHEMA_STATEMENTS = [
 ]
 
 # Resolution codes for audit exceptions. Append-only history: re-resolving a
-# serial inserts a new row and the latest resolved_at wins. 'follow_up' is the
-# one non-terminal code — the serial stays on the analytics punch list.
+# serial inserts a new row and the latest resolved_at wins. 'follow_up' and
+# 'needs_transfer' are non-terminal — the serial stays on the analytics punch
+# list until a later resolution or a clean audit clears it. 'erp_synced' is
+# recorded automatically by the ERP re-check, never offered in the dialog.
 RESOLUTION_CODES = {
     "relocated": "Resolved — Item Relocated",
     "bad_scan": "Resolved — Bad Barcode Scan",
     "duplicate_scan": "Resolved — Duplicate Scan",
     "not_an_issue": "Not an Issue",
+    "needs_transfer": "Needs System Transfer",
     "follow_up": "Requires Follow-Up",
+    "erp_synced": "Resolved — ERP Caught Up",
+}
+
+# Codes that keep the exception open (badged) instead of clearing it.
+OPEN_RESOLUTION_CODES = ("follow_up", "needs_transfer")
+
+# Codes an operator can pick in the resolve dialog (erp_synced is system-only).
+MANUAL_RESOLUTION_CODES = {
+    code: label for code, label in RESOLUTION_CODES.items() if code != "erp_synced"
 }
 
 
@@ -645,7 +657,8 @@ def current_exceptions(limit: int = 200) -> list[dict[str, Any]]:
 
     This is the open punch list: a serial missing in an old audit that verified
     in a newer one drops off automatically. A resolution recorded against that
-    latest session also clears it — except 'follow_up', which stays (badged).
+    latest session also clears it — except the open codes ('follow_up',
+    'needs_transfer'), which stay (badged).
     """
     if not _available:
         return []
@@ -676,7 +689,7 @@ def current_exceptions(limit: int = 200) -> list[dict[str, Any]]:
                         LIMIT 1
                     ) res ON TRUE
                     WHERE latest.status IN ('missing', 'misplaced')
-                      AND (res.resolution IS NULL OR res.resolution = 'follow_up')
+                      AND (res.resolution IS NULL OR res.resolution IN ('follow_up', 'needs_transfer'))
                     ORDER BY CASE latest.status WHEN 'missing' THEN 0 ELSE 1 END,
                              latest.expected_warehouse NULLS LAST, latest.expected_location, latest.serial
                     LIMIT :limit
@@ -935,6 +948,195 @@ def get_unexpected_scans(session_id: int) -> list[dict[str, Any]]:
         )
 
 
+def _edit_distance_at_most(a: str, b: str, limit: int = 1) -> bool:
+    """True when Levenshtein(a, b) <= limit. Banded DP, early exit."""
+    if a == b:
+        return True
+    la, lb = len(a), len(b)
+    if abs(la - lb) > limit:
+        return False
+    if la > lb:  # keep a as the shorter string
+        a, b, la, lb = b, a, lb, la
+    prev = list(range(lb + 1))
+    for i in range(1, la + 1):
+        cur = [i] + [0] * lb
+        row_min = i
+        for j in range(1, lb + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+            row_min = min(row_min, cur[j])
+        if row_min > limit:
+            return False
+        prev = cur
+    return prev[lb] <= limit
+
+
+def _is_adjacent_transposition(a: str, b: str) -> bool:
+    """True when b is a with exactly one pair of adjacent characters swapped."""
+    if len(a) != len(b) or a == b:
+        return False
+    diffs = [i for i in range(len(a)) if a[i] != b[i]]
+    return (
+        len(diffs) == 2
+        and diffs[1] == diffs[0] + 1
+        and a[diffs[0]] == b[diffs[1]]
+        and a[diffs[1]] == b[diffs[0]]
+    )
+
+
+def find_near_matches(session_id: int, serial: str, limit: int = 3) -> list[dict[str, Any]]:
+    """Snapshot serials one typo away from an unexpected scan.
+
+    Catches the classic ERP typos: a missing/extra/wrong character in the
+    trace ID (e.g. A94M3750 recorded for physical A94M03750) or two adjacent
+    characters swapped. Searches the FULL session snapshot — including
+    out-of-scope rows — because the typo'd twin can live anywhere.
+    """
+    if not _available:
+        return []
+    norm = _norm(serial)
+    if not norm:
+        return []
+    with _engine.connect() as conn:
+        rows = _rows(
+            conn.execute(
+                text(
+                    """
+                    SELECT serial, part_id, expected_warehouse, expected_location,
+                           scope, status
+                    FROM audit_expected
+                    WHERE session_id = :sid
+                    """
+                ),
+                {"sid": session_id},
+            )
+        )
+    matches = []
+    for row in rows:
+        candidate = _norm(row.get("serial") or "")
+        if candidate and candidate != norm and (
+            _edit_distance_at_most(candidate, norm, 1)
+            or _is_adjacent_transposition(candidate, norm)
+        ):
+            matches.append(row)
+            if len(matches) >= limit:
+                break
+    return matches
+
+
+def day_export_rows(day: str, tz_name: str) -> dict[str, Any]:
+    """Everything scanned/expected across ALL sessions on one local calendar day.
+
+    Returns {sessions, expected, unexpected}. A session belongs to the day when
+    its started_at falls on `day` in `tz_name`. Expected rows are the observed
+    ones (in-scope, or touched by a scan); each carries its latest resolution.
+    """
+    if not _available:
+        return {"sessions": [], "expected": [], "unexpected": []}
+    params = {"day": day, "tz": tz_name}
+    with _engine.connect() as conn:
+        sessions = _rows(
+            conn.execute(
+                text(
+                    """
+                    SELECT id, scope, label, status, operator, started_at, completed_at,
+                           expected_count, verified_count, misplaced_count,
+                           missing_count, unexpected_count, accuracy_pct
+                    FROM audit_sessions
+                    WHERE (started_at AT TIME ZONE :tz)::date = CAST(:day AS date)
+                    ORDER BY started_at
+                    """
+                ),
+                params,
+            )
+        )
+        expected = _rows(
+            conn.execute(
+                text(
+                    f"""
+                    SELECT s.id AS session_id, s.label AS session_label, s.operator,
+                           e.serial, e.part_id, e.part_description, e.scope,
+                           e.tied_wo, e.cust_order_id,
+                           e.expected_warehouse, e.expected_location,
+                           e.status, e.scanned_location, e.scanned_at, e.in_scope,
+                           res.resolution, res.note AS resolution_note, res.resolved_by
+                    FROM audit_expected e
+                    JOIN audit_sessions s ON s.id = e.session_id
+                    LEFT JOIN LATERAL (
+                        SELECT r.resolution, r.note, r.resolved_by
+                        FROM audit_resolutions r
+                        WHERE r.session_id = s.id AND UPPER(r.serial) = UPPER(e.serial)
+                        ORDER BY r.resolved_at DESC
+                        LIMIT 1
+                    ) res ON TRUE
+                    WHERE (s.started_at AT TIME ZONE :tz)::date = CAST(:day AS date)
+                      AND {_OBSERVED_ROW}
+                    ORDER BY s.id, e.scope, e.expected_location, e.serial
+                    """
+                ),
+                params,
+            )
+        )
+        unexpected = _rows(
+            conn.execute(
+                text(
+                    """
+                    SELECT s.id AS session_id, s.label AS session_label, s.operator,
+                           sc.scanned_serial AS serial, sc.scanned_location,
+                           MIN(sc.scanned_at) AS scanned_at, COUNT(*) AS scan_count,
+                           res.resolution, res.note AS resolution_note, res.resolved_by
+                    FROM audit_scans sc
+                    JOIN audit_sessions s ON s.id = sc.session_id
+                    LEFT JOIN LATERAL (
+                        SELECT r.resolution, r.note, r.resolved_by
+                        FROM audit_resolutions r
+                        WHERE r.session_id = s.id AND UPPER(r.serial) = UPPER(sc.scanned_serial)
+                        ORDER BY r.resolved_at DESC
+                        LIMIT 1
+                    ) res ON TRUE
+                    WHERE sc.expected_id IS NULL
+                      AND (s.started_at AT TIME ZONE :tz)::date = CAST(:day AS date)
+                    GROUP BY s.id, s.label, s.operator, sc.scanned_serial, sc.scanned_location,
+                             res.resolution, res.note, res.resolved_by
+                    ORDER BY s.id, MIN(sc.scanned_at)
+                    """
+                ),
+                params,
+            )
+        )
+    return {"sessions": sessions, "expected": expected, "unexpected": unexpected}
+
+
+def auto_resolve_unexpected(session_id: int, serial: str, note: str) -> bool:
+    """Record a system 'erp_synced' resolution for an unexpected scan, unless the
+    serial already has a resolution in this session. Returns True when recorded."""
+    if not _available:
+        return False
+    norm_serial = _norm(serial)
+    with _engine.begin() as conn:
+        existing = conn.execute(
+            text(
+                "SELECT 1 FROM audit_resolutions "
+                "WHERE session_id = :sid AND UPPER(serial) = :serial LIMIT 1"
+            ),
+            {"sid": session_id, "serial": norm_serial},
+        ).first()
+        if existing:
+            return False
+        conn.execute(
+            text(
+                """
+                INSERT INTO audit_resolutions
+                    (session_id, serial, expected_id, exception_type, resolution, note, resolved_by)
+                VALUES (:sid, :serial, NULL, 'unexpected', 'erp_synced', :note, 'system (ERP re-check)')
+                """
+            ),
+            {"sid": session_id, "serial": norm_serial, "note": note},
+        )
+    invalidate_read_cache()
+    return True
+
+
 def compute_counts(session_id: int) -> dict[str, int]:
     """Live counts derived from expected statuses + unexpected scans.
 
@@ -985,8 +1187,9 @@ def record_scan(
 ) -> dict[str, Any]:
     """Classify a (serial, location) scan against the session snapshot and persist it.
 
-    Returns {result, is_duplicate, item, counts}. result is one of
-    verified | misplaced | unexpected.
+    Returns {result, is_duplicate, item, counts, near_matches}. result is one
+    of verified | misplaced | unexpected. near_matches (unexpected only) lists
+    snapshot serials within edit distance 1 — likely ERP/label typos.
     """
     if not _available:
         raise RuntimeError("Audit store is not available.")
@@ -1065,11 +1268,19 @@ def record_scan(
             },
         )
 
+    near_matches: list[dict[str, Any]] = []
+    if result == "unexpected":
+        try:
+            near_matches = find_near_matches(session_id, norm_serial)
+        except Exception:  # noqa: BLE001 — a hint must never fail the scan
+            logger.warning("Near-match lookup failed for %s", norm_serial, exc_info=True)
+
     return {
         "result": result,
         "is_duplicate": is_duplicate,
         "item": item_dict,
         "counts": compute_counts(session_id),
+        "near_matches": near_matches,
     }
 
 

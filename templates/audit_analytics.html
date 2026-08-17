@@ -190,6 +190,8 @@
                   <span class="pill audit-status status-{{ row.status }}">{{ row.status }}</span>
                   {% if row.resolution == 'follow_up' %}
                   <span class="pill audit-status status-follow-up"{% if row.resolution_note %} title="{{ row.resolution_note }}"{% endif %}>Follow-Up</span>
+                  {% elif row.resolution == 'needs_transfer' %}
+                  <span class="pill audit-status status-follow-up"{% if row.resolution_note %} title="{{ row.resolution_note }}"{% endif %}>Needs Transfer</span>
                   {% endif %}
                 </td>
                 <td><strong>{{ row.serial }}</strong></td>

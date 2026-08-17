@@ -117,9 +117,9 @@
                 <td data-scanned-cell>{{ item.scanned_location or '' }}{% if item.scanned_at_display %} &middot; {{ item.scanned_at_display }}{% endif %}</td>
                 <td data-action-cell>
                   {% if res %}
-                  <span class="pill audit-status status-resolved{% if res.resolution == 'follow_up' %} status-follow-up{% endif %}"{% if res.note %} title="{{ res.note }}"{% endif %}>{{ resolution_codes[res.resolution] }}</span>
+                  <span class="pill audit-status status-resolved{% if res.resolution in open_resolution_codes %} status-follow-up{% endif %}"{% if res.note %} title="{{ res.note }}"{% endif %}>{{ resolution_codes[res.resolution] }}</span>
                   {% endif %}
-                  {% if item.status in ('misplaced', 'missing') and (not res or res.resolution == 'follow_up') %}
+                  {% if item.status in ('misplaced', 'missing') and (not res or res.resolution in open_resolution_codes) %}
                   <button type="button" class="button tertiary resolve-btn" data-serial="{{ item.serial|upper }}">Resolve</button>
                   {% endif %}
                 </td>
@@ -131,12 +131,20 @@
       </section>
 
       <section class="card" id="unexpected-card" {% if not unexpected %}hidden{% endif %}>
-        <h2>Unexpected scans</h2>
-        <p class="helper-text">Serials scanned that were not expected in this audit &mdash; need review.</p>
+        <div class="table-controls">
+          <h2>Unexpected scans</h2>
+          <button type="button" class="button tertiary" id="recheck-erp" data-no-loading>Re-check ERP</button>
+        </div>
+        <p class="helper-text">
+          Serials scanned that were not expected in this audit &mdash; need review.
+          <strong>Re-check ERP</strong> looks these up in VISUAL again: a gun receipted
+          after this audit started resolves itself.
+        </p>
+        <div id="recheck-result" class="audit-scan-result" hidden></div>
         <div class="table-wrap">
           <table>
             <thead>
-              <tr><th>Serial</th><th>Scanned location</th><th>First scanned</th><th>Times</th><th></th></tr>
+              <tr><th>Serial</th><th>Scanned location</th><th>First scanned</th><th>Times</th><th>Possible match</th><th></th></tr>
             </thead>
             <tbody id="unexpected-body">
               {% for row in unexpected %}
@@ -146,11 +154,16 @@
                 <td>{{ row.scanned_location or '' }}</td>
                 <td>{{ row.first_scanned_display or '' }}</td>
                 <td>{{ row.scan_count }}</td>
+                <td>
+                  {% for match in row.near_matches or [] %}
+                  <span class="pill idle" title="Expected {{ match.expected_warehouse or '' }}{% if match.expected_location %}/{{ match.expected_location }}{% endif %} — possible serial typo in the ERP or on the label">&asymp; {{ match.serial }}</span>
+                  {% endfor %}
+                </td>
                 <td data-action-cell>
                   {% if res %}
-                  <span class="pill audit-status status-resolved{% if res.resolution == 'follow_up' %} status-follow-up{% endif %}"{% if res.note %} title="{{ res.note }}"{% endif %}>{{ resolution_codes[res.resolution] }}</span>
+                  <span class="pill audit-status status-resolved{% if res.resolution in open_resolution_codes %} status-follow-up{% endif %}"{% if res.note %} title="{{ res.note }}"{% endif %}>{{ resolution_codes[res.resolution] }}</span>
                   {% endif %}
-                  {% if not res or res.resolution == 'follow_up' %}
+                  {% if not res or res.resolution in open_resolution_codes %}
                   <button type="button" class="button tertiary resolve-btn" data-serial="{{ row.scanned_serial|upper }}">Resolve</button>
                   {% endif %}
                 </td>
@@ -165,7 +178,7 @@
         <h2>Resolve <span id="resolve-serial" class="mono"></span></h2>
         <p class="helper-text">This records how the exception was handled. The original detection stays in the audit history.</p>
         <div class="resolve-options">
-          {% for code, label in resolution_codes.items() %}
+          {% for code, label in manual_resolution_codes.items() %}
           <label class="resolve-option">
             <input type="radio" name="resolve-status" value="{{ code }}" />
             <span>{{ label }}</span>
@@ -190,7 +203,9 @@
         scanUrl: {{ url_for('api_audit_scan', session_id=session.id)|tojson }},
         completeUrl: {{ url_for('api_audit_complete', session_id=session.id)|tojson }},
         resolveUrl: {{ url_for('api_audit_resolve', session_id=session.id)|tojson }},
+        recheckUrl: {{ url_for('api_audit_recheck', session_id=session.id)|tojson }},
         resolutionLabels: {{ resolution_codes|tojson }},
+        openResolutions: {{ open_resolution_codes|list|tojson }},
         completed: {{ (session.status == 'completed')|tojson }},
         locTerm: {{ loc_term|tojson }},
         operator: null,
@@ -267,7 +282,7 @@
           rowsFor(serial).forEach(function (row) {
             const cell = row.querySelector("[data-action-cell]");
             if (cell) {
-              const followUp = data.resolution === "follow_up";
+              const followUp = AUDIT.openResolutions.indexOf(data.resolution) !== -1;
               cell.innerHTML = '<span class="pill audit-status status-resolved'
                 + (followUp ? " status-follow-up" : "") + '"></span>'
                 + (followUp ? ' <button type="button" class="button tertiary resolve-btn" data-serial="' + serial + '">Resolve</button>' : "");
@@ -319,6 +334,60 @@
             confirmBtn.disabled = false;
           } finally {
             resolving = false;
+          }
+        });
+      })();
+
+      // ---- ERP re-check of unexpected scans (in-progress AND completed) ----
+      (function () {
+        const btn = document.getElementById("recheck-erp");
+        if (!btn) return;
+        const resultEl = document.getElementById("recheck-result");
+        btn.addEventListener("click", async function () {
+          btn.disabled = true;
+          btn.textContent = "Checking ERP…";
+          try {
+            const resp = await fetch(AUDIT.recheckUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "X-CSRF-Token": AUDIT.csrfToken },
+              body: JSON.stringify({}),
+            });
+            const data = await resp.json();
+            if (!resp.ok) {
+              resultEl.hidden = false;
+              resultEl.className = "audit-scan-result result-unexpected";
+              resultEl.textContent = "Re-check failed: " + (data.message || resp.status);
+              return;
+            }
+            if (data.auto_resolved > 0) {
+              // Resolutions were recorded server-side; reload to show them.
+              window.location.reload();
+              return;
+            }
+            resultEl.hidden = false;
+            resultEl.className = "audit-scan-result result-misplaced";
+            const stillUnknown = (data.rows || []).filter(function (r) { return !r.erp_locations.length; });
+            const elsewhere = (data.rows || []).filter(function (r) { return r.erp_locations.length && !r.now_in_scanned_location; });
+            const caughtUp = (data.rows || []).filter(function (r) { return r.now_in_scanned_location; });
+            let msg = "Checked " + data.checked + " serial" + (data.checked === 1 ? "" : "s") + " against VISUAL — nothing new to auto-resolve.";
+            if (caughtUp.length) {
+              msg += " Already in the scanned location per VISUAL (resolved earlier): "
+                + caughtUp.map(function (r) { return r.serial; }).join(", ") + ".";
+            }
+            if (elsewhere.length) {
+              msg += " On hand elsewhere: " + elsewhere.map(function (r) { return r.serial + " (" + r.erp_locations.join(", ") + ")"; }).join("; ") + ".";
+            }
+            if (stillUnknown.length) {
+              msg += " Not on hand anywhere in VISUAL: " + stillUnknown.map(function (r) { return r.serial; }).join(", ") + " — check for a serial typo or an unreceipted return.";
+            }
+            resultEl.textContent = msg;
+          } catch (err) {
+            resultEl.hidden = false;
+            resultEl.className = "audit-scan-result result-unexpected";
+            resultEl.textContent = "Network error during the ERP re-check.";
+          } finally {
+            btn.disabled = false;
+            btn.textContent = "Re-check ERP";
           }
         });
       })();
@@ -447,15 +516,29 @@
           }
         }
 
-        function addUnexpectedRow(serial, location) {
+        function addUnexpectedRow(serial, location, nearMatches) {
           const body = document.getElementById("unexpected-body");
           document.getElementById("unexpected-card").hidden = false;
           const existing = body.querySelector('tr[data-serial="' + serial.toUpperCase().replace(/"/g, '') + '"]');
           if (existing) return;
           const tr = document.createElement("tr");
           tr.setAttribute("data-serial", serial.toUpperCase());
-          tr.innerHTML = "<td>" + serial + "</td><td>" + (location || "") + "</td><td>just now</td><td>1</td>"
-            + '<td data-action-cell><button type="button" class="button tertiary resolve-btn" data-serial="' + serial.toUpperCase() + '">Resolve</button></td>';
+          const hintCell = document.createElement("td");
+          (nearMatches || []).forEach(function (m) {
+            const pill = document.createElement("span");
+            pill.className = "pill idle";
+            pill.title = "Expected " + (m.expected_warehouse || "") + (m.expected_location ? "/" + m.expected_location : "")
+              + " — possible serial typo in the ERP or on the label";
+            pill.textContent = "≈ " + m.serial;
+            hintCell.appendChild(pill);
+            hintCell.appendChild(document.createTextNode(" "));
+          });
+          tr.innerHTML = "<td>" + serial + "</td><td>" + (location || "") + "</td><td>just now</td><td>1</td>";
+          tr.appendChild(hintCell);
+          const actionCell = document.createElement("td");
+          actionCell.setAttribute("data-action-cell", "");
+          actionCell.innerHTML = '<button type="button" class="button tertiary resolve-btn" data-serial="' + serial.toUpperCase() + '">Resolve</button>';
+          tr.appendChild(actionCell);
           body.prepend(tr);
         }
 
@@ -477,8 +560,14 @@
             const expLoc = data.item && data.item.expected_location ? data.item.expected_location : "another location";
             showResult("misplaced", "⚠ MISPLACED " + scan.serial + " — belongs in " + expLoc + dup);
           } else {
-            showResult("unexpected", "✖ UNEXPECTED " + scan.serial + " — not in this audit, review" + dup);
-            addUnexpectedRow(scan.serial, scan.location);
+            let msg = "✖ UNEXPECTED " + scan.serial + " — not in this audit, review" + dup;
+            if (data.near_matches && data.near_matches.length) {
+              msg += ". Did you mean " + data.near_matches.map(function (m) {
+                return m.serial + (m.expected_location ? " (expected @ " + m.expected_location + ")" : "");
+              }).join(" or ") + "? Possible serial typo in the ERP.";
+            }
+            showResult("unexpected", msg);
+            addUnexpectedRow(scan.serial, scan.location, data.near_matches);
           }
           if (data.item && data.result !== "unexpected") {
             updateRow(scan.serial, data.result, scan.location);

@@ -1,4 +1,5 @@
 import atexit
+import csv
 import fcntl
 import ipaddress
 import io
@@ -975,6 +976,92 @@ def run_erp_query_file(query_file: Path, params: dict, description: str) -> pd.D
 def fetch_audit_expected() -> pd.DataFrame:
     """Full serialized expected-inventory universe (all locations + tied WOs)."""
     return run_audit_sql_file(AUDIT_QUERY_FILE, "serialized audit expected query")
+
+
+def fetch_serial_onhand_locations(serials: list[str]) -> dict[str, list[dict]]:
+    """Live ERP on-hand balances for a set of serials.
+
+    Returns {SERIAL: [{warehouse, location, qty, last_txn_at}, ...]} keeping
+    only positive net balances — the same inference the expected-list query
+    uses, but at request time instead of snapshot time.
+    """
+    serials = sorted({(s or "").strip().upper() for s in serials if (s or "").strip()})
+    if not serials:
+        return {}
+    binds = {f"s{i}": s for i, s in enumerate(serials)}
+    placeholders = ", ".join(f":{k}" for k in binds)
+    query = text(
+        f"""
+        SELECT UPPER(tit.TRACE_ID) AS SERIAL_NO,
+               it.WAREHOUSE_ID, it.LOCATION_ID,
+               SUM(tit.QTY) AS NET_QTY,
+               MAX(it.CREATE_DATE) AS LAST_TXN_AT
+        FROM dbo.TRACE_INV_TRANS tit
+        INNER JOIN dbo.INVENTORY_TRANS it
+            ON it.TRANSACTION_ID = tit.TRANSACTION_ID
+           AND it.PART_ID        = tit.PART_ID
+        WHERE UPPER(tit.TRACE_ID) IN ({placeholders})
+        GROUP BY UPPER(tit.TRACE_ID), it.WAREHOUSE_ID, it.LOCATION_ID
+        HAVING SUM(tit.QTY) > 0
+        """
+    )
+    engine = get_erp_engine()
+    result: dict[str, list[dict]] = {}
+    with engine.connect() as connection:
+        for row in connection.execute(query, binds).mappings():
+            result.setdefault(row["SERIAL_NO"], []).append(
+                {
+                    "warehouse": row["WAREHOUSE_ID"],
+                    "location": row["LOCATION_ID"],
+                    "qty": float(row["NET_QTY"]),
+                    "last_txn_at": row["LAST_TXN_AT"],
+                }
+            )
+    return result
+
+
+def recheck_unexpected_scans(session_id: int) -> list[dict]:
+    """Re-query the ERP for a session's unexpected serials.
+
+    The snapshot is point-in-time: a WO receipt posted after the session
+    started makes a perfectly-placed gun scan as "unexpected". For each
+    unexpected serial now on hand in the scanned location, record an automatic
+    'erp_synced' resolution. Returns one summary row per unexpected serial.
+    """
+    unexpected = audit_store.get_unexpected_scans(session_id)
+    if not unexpected:
+        return []
+    onhand = fetch_serial_onhand_locations([r["scanned_serial"] for r in unexpected])
+    summary = []
+    for row in unexpected:
+        serial = (row.get("scanned_serial") or "").strip().upper()
+        scanned_loc = (row.get("scanned_location") or "").strip().upper()
+        balances = onhand.get(serial, [])
+        matched = next(
+            (b for b in balances if (b["location"] or "").strip().upper() == scanned_loc),
+            None,
+        )
+        auto_resolved = False
+        if matched:
+            posted = matched["last_txn_at"]
+            posted_str = posted.strftime("%Y-%m-%d %H:%M") if hasattr(posted, "strftime") else str(posted)
+            note = (
+                f"ERP re-check: now on hand in {matched['warehouse']}/{matched['location']} "
+                f"(last transaction {posted_str} ERP time) — receipt posted after the audit snapshot."
+            )
+            auto_resolved = audit_store.auto_resolve_unexpected(session_id, serial, note)
+        summary.append(
+            {
+                "serial": serial,
+                "scanned_location": scanned_loc,
+                "erp_locations": [
+                    f"{b['warehouse']}/{b['location']}" for b in balances
+                ],
+                "now_in_scanned_location": matched is not None,
+                "auto_resolved": auto_resolved,
+            }
+        )
+    return summary
 
 
 # Guards against overlapping background syncs when several dashboard requests
@@ -2570,6 +2657,7 @@ def audit_dashboard():
         due_locations=due_locations,
         sync_error=sync_error,
         last_synced_display=_audit_dt_display(audit_store.last_synced_at()),
+        today_iso=datetime.now(resolve_timezone()).date().isoformat(),
     )
 
 
@@ -2642,6 +2730,12 @@ def audit_session_page(session_id: int):
     unexpected = audit_store.get_unexpected_scans(session_id)
     for row in unexpected:
         row["first_scanned_display"] = _audit_dt_display(row.get("first_scanned_at"))
+        try:
+            row["near_matches"] = audit_store.find_near_matches(
+                session_id, row.get("scanned_serial") or ""
+            )
+        except Exception:  # noqa: BLE001 — hints are best-effort
+            row["near_matches"] = []
     counts = audit_store.compute_counts(session_id)
 
     return render_template(
@@ -2657,6 +2751,8 @@ def audit_session_page(session_id: int):
         counts=counts,
         resolutions=audit_store.get_resolutions(session_id),
         resolution_codes=audit_store.RESOLUTION_CODES,
+        manual_resolution_codes=audit_store.MANUAL_RESOLUTION_CODES,
+        open_resolution_codes=audit_store.OPEN_RESOLUTION_CODES,
         known_location_ids=audit_store.list_active_location_ids(),
         ui_refresh_interval_seconds=UI_REFRESH_INTERVAL_SECONDS,
     )
@@ -2694,6 +2790,7 @@ def api_audit_scan(session_id: int):
             "is_duplicate": result["is_duplicate"],
             "item": result["item"],
             "counts": result["counts"],
+            "near_matches": result.get("near_matches") or [],
             "serial": serial,
             "location": location,
         }
@@ -2754,6 +2851,20 @@ def api_audit_complete(session_id: int):
     if not session_row:
         return jsonify({"error": "not_found", "message": "Audit session not found."}), 404
 
+    # Best-effort: annotate unexpected scans the ERP has since caught up with
+    # (e.g. a WO receipt posted after the snapshot). Never blocks completion.
+    try:
+        recheck = recheck_unexpected_scans(session_id)
+        resolved = sum(1 for r in recheck if r["auto_resolved"])
+        if resolved:
+            logger.info(
+                "Audit session #%s: ERP re-check auto-resolved %d unexpected scan(s).",
+                session_id,
+                resolved,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ERP re-check of unexpected scans failed for session #%s: %s", session_id, exc)
+
     try:
         completed = audit_store.complete_session(session_id)
     except Exception as exc:  # noqa: BLE001
@@ -2794,6 +2905,127 @@ def api_audit_state(session_id: int):
             "counts": audit_store.compute_counts(session_id),
         }
     ), 200
+
+
+@app.post("/api/audit/session/<int:session_id>/recheck")
+@require_trusted_client
+@require_csrf
+def api_audit_recheck(session_id: int):
+    """Re-query the ERP for this session's unexpected serials on demand."""
+    if not audit_store.is_available():
+        return jsonify({"error": "audit_unavailable", "message": AUDIT_UNAVAILABLE_MESSAGE}), 503
+
+    session_row = audit_store.get_session(session_id)
+    if not session_row:
+        return jsonify({"error": "not_found", "message": "Audit session not found."}), 404
+
+    try:
+        summary = recheck_unexpected_scans(session_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("ERP re-check failed for session #%s: %s", session_id, exc)
+        return jsonify({"error": "recheck_failed", "message": str(exc)}), 500
+
+    return jsonify(
+        {
+            "checked": len(summary),
+            "auto_resolved": sum(1 for r in summary if r["auto_resolved"]),
+            "rows": summary,
+        }
+    ), 200
+
+
+@app.get("/audit/export")
+@require_trusted_client
+def audit_day_export():
+    """One CSV covering every audit session on a local calendar day.
+
+    Answers "what was scanned today and what were the issues in each area"
+    without opening each location's session: expected rows (verified /
+    misplaced / missing) and unexpected scans, unioned, with resolutions.
+    """
+    if not audit_store.is_available():
+        flash(AUDIT_UNAVAILABLE_MESSAGE, "error")
+        return redirect(url_for("audit_dashboard"))
+
+    tz = resolve_timezone()
+    day_param = (request.args.get("date") or "").strip()
+    if day_param:
+        try:
+            day = date.fromisoformat(day_param)
+        except ValueError:
+            flash(f"Invalid date '{day_param}' — use YYYY-MM-DD.", "error")
+            return redirect(url_for("audit_dashboard"))
+    else:
+        day = datetime.now(tz).date()
+
+    try:
+        data = audit_store.day_export_rows(day.isoformat(), str(tz))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Audit day export failed: %s", exc)
+        flash(f"Could not build the audit export: {exc}", "error")
+        return redirect(url_for("audit_dashboard"))
+
+    if not data["sessions"]:
+        flash(f"No audit sessions were started on {day.isoformat()}.", "error")
+        return redirect(url_for("audit_dashboard"))
+
+    columns = [
+        "session_id", "session_label", "operator", "result", "serial",
+        "part_id", "part_description", "location_scope", "expected_location",
+        "scanned_location", "scanned_at", "tied_wo", "sales_order",
+        "resolution", "resolution_note", "resolved_by",
+    ]
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=columns, extrasaction="ignore")
+    writer.writeheader()
+
+    def resolution_label(code):
+        return audit_store.RESOLUTION_CODES.get(code, code) if code else ""
+
+    for row in data["expected"]:
+        writer.writerow(
+            {
+                "session_id": row["session_id"],
+                "session_label": row.get("session_label") or "",
+                "operator": row.get("operator") or "",
+                "result": row.get("status") or "",
+                "serial": row.get("serial") or "",
+                "part_id": row.get("part_id") or "",
+                "part_description": row.get("part_description") or "",
+                "location_scope": row.get("scope") or "",
+                "expected_location": row.get("expected_location") or "",
+                "scanned_location": row.get("scanned_location") or "",
+                "scanned_at": _audit_dt_display(row.get("scanned_at")) or "",
+                "tied_wo": "yes" if row.get("tied_wo") else "",
+                "sales_order": row.get("cust_order_id") or "",
+                "resolution": resolution_label(row.get("resolution")),
+                "resolution_note": row.get("resolution_note") or "",
+                "resolved_by": row.get("resolved_by") or "",
+            }
+        )
+    for row in data["unexpected"]:
+        writer.writerow(
+            {
+                "session_id": row["session_id"],
+                "session_label": row.get("session_label") or "",
+                "operator": row.get("operator") or "",
+                "result": "unexpected",
+                "serial": row.get("serial") or "",
+                "scanned_location": row.get("scanned_location") or "",
+                "scanned_at": _audit_dt_display(row.get("scanned_at")) or "",
+                "resolution": resolution_label(row.get("resolution")),
+                "resolution_note": row.get("resolution_note") or "",
+                "resolved_by": row.get("resolved_by") or "",
+            }
+        )
+
+    payload = output.getvalue().encode("utf-8-sig")  # BOM so Excel opens it cleanly
+    return send_file(
+        io.BytesIO(payload),
+        as_attachment=True,
+        download_name=f"audit_{day.isoformat()}.csv",
+        mimetype="text/csv",
+    )
 
 
 @app.get("/audit/session/<int:session_id>/export")

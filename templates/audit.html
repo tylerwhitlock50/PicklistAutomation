@@ -176,7 +176,17 @@
       </section>
 
       <section class="card">
-        <h2>Recent audits</h2>
+        <div class="hero-top">
+          <h2>Recent audits</h2>
+          <form method="get" action="{{ url_for('audit_day_export') }}" class="audit-start-form" data-no-loading>
+            <input type="date" name="date" value="{{ today_iso }}" aria-label="Export date" />
+            <button type="submit" class="button tertiary">Export day (CSV)</button>
+          </form>
+        </div>
+        <p class="helper-text">
+          The day export is one CSV across <strong>every</strong> location audited that day
+          &mdash; what was scanned, what the issues were in each area, and how they were resolved.
+        </p>
         {% if recent_sessions %}
         <div class="table-wrap">
           <table>
