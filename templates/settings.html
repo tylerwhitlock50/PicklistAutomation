@@ -141,6 +141,21 @@
               budget refills 24 hours after the first counted run. The scheduled morning run counts;
               failed runs do not. Blank or 0 = unlimited.
             </p>
+
+            <label for="excess_packlist_cost_usd">Excess packlist cost ($ per extra box)</label>
+            <input
+              id="excess_packlist_cost_usd"
+              name="excess_packlist_cost_usd"
+              type="number"
+              min="0"
+              step="0.01"
+              value="{{ '%g'|format(excess_packlist_cost_usd) }}"
+            />
+            <p class="helper-text">
+              What one avoidable duplicate shipment costs. Drives the dashboard scoreboard and the
+              Shipping &rsaquo; Excess packlists dollar figures (source: <strong>{{ excess_cost_source }}</strong>).
+              Blank restores the default ($51).
+            </p>
           </section>
 
           <section class="settings-section">

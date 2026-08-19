@@ -177,7 +177,7 @@ SHORTAGE_PRODUCT_CODES_TOKEN = "__SHORTAGE_PRODUCT_CODES__"
 EXCESS_PACKLISTS_FILE = resolve_path_setting(
     os.getenv("EXCESS_PACKLISTS_FILE", "sql/excess_packlists.sql")
 )
-EXCESS_PACKLIST_COST_USD = float(os.getenv("EXCESS_PACKLIST_COST_USD", "51"))
+EXCESS_PACKLIST_COST_DEFAULT = 51.0
 EXCESS_CACHE_MINUTES = float(os.getenv("EXCESS_CACHE_MINUTES", "5"))
 # Allocation screen: per-SKU supply/demand model + Promise Del Date editing.
 ALLOC_SUPPLY_FILE = resolve_path_setting(
@@ -1132,6 +1132,18 @@ def prune_old_runs(conn: sqlite3.Connection) -> None:
     placeholders = ",".join("?" for _ in ids)
     conn.execute(f"DELETE FROM run_rows WHERE run_id IN ({placeholders})", ids)
     conn.execute(f"DELETE FROM runs WHERE id IN ({placeholders})", ids)
+
+
+def get_excess_packlist_cost() -> float:
+    """$ per avoidable extra packlist; settings page overrides env."""
+    raw = get_config_value(
+        "excess_packlist_cost_usd", "EXCESS_PACKLIST_COST_USD", str(EXCESS_PACKLIST_COST_DEFAULT)
+    )
+    try:
+        value = float(str(raw).strip() or EXCESS_PACKLIST_COST_DEFAULT)
+    except (TypeError, ValueError):
+        return EXCESS_PACKLIST_COST_DEFAULT
+    return value if value >= 0 else EXCESS_PACKLIST_COST_DEFAULT
 
 
 def get_max_runs_per_day() -> int:
@@ -2424,6 +2436,19 @@ def settings():
         else:
             delete_setting("max_runs_per_day")
 
+        excess_cost = (request.form.get("excess_packlist_cost_usd") or "").strip()
+        if excess_cost:
+            try:
+                excess_cost_value = float(excess_cost)
+                if excess_cost_value < 0:
+                    raise ValueError
+            except ValueError:
+                flash("Excess packlist cost must be a dollar amount of 0 or more.", "error")
+                return redirect(url_for("settings"))
+            set_setting("excess_packlist_cost_usd", f"{excess_cost_value:g}")
+        else:
+            delete_setting("excess_packlist_cost_usd")
+
         set_setting("smtp_use_tls", "true" if request.form.get("smtp_use_tls") else "false")
 
         for feature_name, feature_def in FEATURE_FLAGS.items():
@@ -2496,6 +2521,10 @@ def settings():
         smtp_use_tls=smtp_use_tls,
         max_runs_per_day=get_max_runs_per_day(),
         max_runs_source=get_config_source("max_runs_per_day", "MAX_RUNS_PER_DAY"),
+        excess_packlist_cost_usd=get_excess_packlist_cost(),
+        excess_cost_source=get_config_source(
+            "excess_packlist_cost_usd", "EXCESS_PACKLIST_COST_USD"
+        ),
     )
 
 
@@ -4133,14 +4162,18 @@ def _fetch_excess_rows(today: date) -> list[dict]:
 
 def build_excess_packlist_payload(force: bool = False) -> dict[str, Any]:
     """Cached excess-packlist payload; degrades to an error message when ERP is down."""
+    cost = get_excess_packlist_cost()
+    cached = _excess_cache["payload"]
     cached_at = _excess_cache["fetched_at"]
     if (
         not force
-        and _excess_cache["payload"] is not None
+        and cached is not None
         and cached_at is not None
         and datetime.now() - cached_at < timedelta(minutes=EXCESS_CACHE_MINUTES)
+        # A cost change in settings invalidates the cache immediately.
+        and (cached.get("summary") or {}).get("cost_per_excess") == round(cost, 2)
     ):
-        return _excess_cache["payload"]
+        return cached
     today = _today_local()
     try:
         rows = _fetch_excess_rows(today)
@@ -4152,7 +4185,7 @@ def build_excess_packlist_payload(force: bool = False) -> dict[str, Any]:
             "fixable": [],
             "groups": [],
         }
-    payload = excess.build_excess(rows, today, EXCESS_PACKLIST_COST_USD)
+    payload = excess.build_excess(rows, today, cost)
     payload["error"] = None
     payload["as_of"] = datetime.now(timezone.utc)
     _excess_cache["payload"] = payload
