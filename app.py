@@ -1134,6 +1134,58 @@ def prune_old_runs(conn: sqlite3.Connection) -> None:
     conn.execute(f"DELETE FROM runs WHERE id IN ({placeholders})", ids)
 
 
+def get_max_runs_per_day() -> int:
+    """Per-list generation budget; 0 = unlimited. Settings page overrides env."""
+    raw = get_config_value("max_runs_per_day", "MAX_RUNS_PER_DAY", "0")
+    try:
+        return max(0, int(str(raw).strip() or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def get_run_budget(query_type: str) -> dict[str, Any]:
+    """Successful runs this list has used in the rolling 24-hour window.
+
+    The window rolls rather than resetting at midnight: with a limit of 1,
+    the next run unlocks 24 hours after the first one. Failed runs are free —
+    an ERP hiccup should not burn the day's generation. Scheduled runs count
+    the same as button presses.
+    """
+    limit = get_max_runs_per_day()
+    budget: dict[str, Any] = {
+        "limit": limit,
+        "used": 0,
+        "remaining": None,
+        "exhausted": False,
+        "resets_at": None,
+        "resets_at_display": None,
+    }
+    if limit <= 0:
+        return budget
+    cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat()
+    with get_sqlite_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT run_timestamp FROM runs
+            WHERE query_type = ? AND status = 'success' AND run_timestamp > ?
+            ORDER BY run_timestamp
+            """,
+            (query_type, cutoff),
+        ).fetchall()
+    budget["used"] = len(rows)
+    budget["remaining"] = max(0, limit - len(rows))
+    if len(rows) >= limit:
+        budget["exhausted"] = True
+        # The oldest counted run ages out of the window first.
+        overflow = rows[len(rows) - limit]
+        resets_at = datetime.fromisoformat(overflow["run_timestamp"]).replace(
+            tzinfo=timezone.utc
+        ) + timedelta(hours=24)
+        budget["resets_at"] = resets_at
+        budget["resets_at_display"] = format_datetime_for_display(resets_at)
+    return budget
+
+
 def save_run(
     df: pd.DataFrame,
     status: str,
@@ -1774,6 +1826,15 @@ def execute_picklist_run(
     query_options: Optional[dict[str, Any]] = None,
 ) -> Optional[Path]:
     normalized_query_type = get_query_type(query_type)
+    budget = get_run_budget(normalized_query_type)
+    if budget["exhausted"]:
+        logger.info(
+            "Skipped picklist run for %s: daily run limit reached (%d used, resets %s).",
+            normalized_query_type,
+            budget["used"],
+            budget["resets_at_display"],
+        )
+        return None
     if not try_mark_run_started(normalized_query_type):
         logger.info(
             "Skipped picklist run for %s because another run is already active.",
@@ -1795,6 +1856,15 @@ def start_picklist_run_async(
     query_options: Optional[dict[str, Any]] = None,
 ) -> bool:
     normalized_query_type = get_query_type(query_type)
+    budget = get_run_budget(normalized_query_type)
+    if budget["exhausted"]:
+        logger.info(
+            "Skipped background picklist run for %s: daily run limit reached (%d used, resets %s).",
+            normalized_query_type,
+            budget["used"],
+            budget["resets_at_display"],
+        )
+        return False
     if not try_mark_run_started(normalized_query_type):
         logger.info(
             "Skipped background picklist run for %s because another run is already active.",
@@ -2205,6 +2275,7 @@ def index():
     time_diagnostics = build_time_diagnostics(next_run)
     run_state_by_type = get_run_state_snapshot()
     guns_query_defaults = get_default_guns_query_options()
+    run_budget_by_type = {qt: get_run_budget(qt) for qt in query_types}
     return render_template(
         "index.html",
         latest_run=formatted_latest_run,
@@ -2225,6 +2296,7 @@ def index():
         run_state_by_type=run_state_by_type,
         ui_refresh_interval_seconds=UI_REFRESH_INTERVAL_SECONDS,
         guns_query_defaults=guns_query_defaults,
+        run_budget_by_type=run_budget_by_type,
     )
 
 
@@ -2339,6 +2411,19 @@ def settings():
         else:
             delete_setting("smtp_recipient")
 
+        max_runs_per_day = (request.form.get("max_runs_per_day") or "").strip()
+        if max_runs_per_day:
+            try:
+                max_runs_value = int(max_runs_per_day)
+                if max_runs_value < 0:
+                    raise ValueError
+            except ValueError:
+                flash("Max runs per day must be a whole number (0 = unlimited).", "error")
+                return redirect(url_for("settings"))
+            set_setting("max_runs_per_day", str(max_runs_value))
+        else:
+            delete_setting("max_runs_per_day")
+
         set_setting("smtp_use_tls", "true" if request.form.get("smtp_use_tls") else "false")
 
         for feature_name, feature_def in FEATURE_FLAGS.items():
@@ -2409,6 +2494,8 @@ def settings():
         smtp_sender=smtp_sender,
         smtp_recipient=smtp_recipient,
         smtp_use_tls=smtp_use_tls,
+        max_runs_per_day=get_max_runs_per_day(),
+        max_runs_source=get_config_source("max_runs_per_day", "MAX_RUNS_PER_DAY"),
     )
 
 
@@ -2421,6 +2508,16 @@ def run_picklist():
         query_options = parse_query_run_options(query_type, request.form)
     except ValueError as exc:
         flash(str(exc), "error")
+        return redirect(url_for("index", query_type=query_type))
+
+    budget = get_run_budget(query_type)
+    if budget["exhausted"]:
+        flash(
+            f"{query_type.capitalize()} has used its {budget['limit']} run"
+            f"{'' if budget['limit'] == 1 else 's'} for the day. "
+            f"Export the existing list instead — the next run unlocks {budget['resets_at_display']}.",
+            "error",
+        )
         return redirect(url_for("index", query_type=query_type))
 
     if start_picklist_run_async(query_type=query_type, query_options=query_options):
@@ -2448,6 +2545,10 @@ def run_both_picklists():
     all_succeeded = True
 
     for query_type in QUERY_FILES:
+        if get_run_budget(query_type)["exhausted"]:
+            all_succeeded = False
+            results.append(f"{query_type}: skipped (daily run limit)")
+            continue
         export_path = execute_picklist_run(query_type=query_type)
         status = "success" if export_path else "failed"
         if status == "failed":

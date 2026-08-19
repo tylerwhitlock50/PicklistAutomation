@@ -38,6 +38,7 @@
           <div class="pl-grid">
           {% for option in query_options %}
           {% set run_state = run_state_by_type.get(option, {}) %}
+          {% set run_budget = run_budget_by_type.get(option, {}) %}
           {% set latest_summary = latest_runs_by_type.get(option) %}
           {% set can_export_latest = latest_summary and latest_summary['status'] == 'success' and (latest_summary.get('export_path') or latest_summary['row_count'] > 0) and not run_state.get('running') %}
           <section class="pl-card" data-quick-action data-query-type="{{ option }}">
@@ -104,14 +105,26 @@
                 data-guns-hidden-customers
               />
               {% endif %}
-              <button type="submit" class="pl-primary" data-run-submit {% if run_state.get('running') %}disabled{% endif %}>
+              <button type="submit" class="pl-primary" data-run-submit {% if run_state.get('running') or run_budget.get('exhausted') %}disabled{% endif %}>
                 {% if run_state.get('running') %}
                 Running {{ option|capitalize }}...
+                {% elif run_budget.get('exhausted') %}
+                Daily run limit reached
                 {% else %}
                 1. Run {{ option|capitalize }}
                 {% endif %}
               </button>
             </form>
+            {% if run_budget.get('limit') %}
+            <p class="helper-text pl-run-budget">
+              {% if run_budget.exhausted %}
+              All {{ run_budget.limit }} run{{ '' if run_budget.limit == 1 else 's' }} for the day used &mdash;
+              export the existing list. Next run unlocks {{ run_budget.resets_at_display }}.
+              {% else %}
+              {{ run_budget.remaining }} of {{ run_budget.limit }} run{{ '' if run_budget.limit == 1 else 's' }} left in the next 24h.
+              {% endif %}
+            </p>
+            {% endif %}
             <a
               class="button secondary pl-secondary"
               data-busy-label="Preparing..."

@@ -123,6 +123,28 @@
 
           <section class="settings-section">
             <div class="settings-section-header">
+              <h2>Run Limit</h2>
+              <p class="helper-text">Current source: <strong>{{ max_runs_source }}</strong></p>
+            </div>
+            <label for="max_runs_per_day">Max picklist runs per day (per list)</label>
+            <input
+              id="max_runs_per_day"
+              name="max_runs_per_day"
+              type="number"
+              min="0"
+              step="1"
+              value="{{ max_runs_per_day or '' }}"
+              placeholder="0 = unlimited"
+            />
+            <p class="helper-text">
+              Guns and Components each get this many generations per rolling 24 hours &mdash; the
+              budget refills 24 hours after the first counted run. The scheduled morning run counts;
+              failed runs do not. Blank or 0 = unlimited.
+            </p>
+          </section>
+
+          <section class="settings-section">
+            <div class="settings-section-header">
               <h2>Database</h2>
               <p class="helper-text">Current source: <strong>{{ mssql_source }}</strong></p>
             </div>
