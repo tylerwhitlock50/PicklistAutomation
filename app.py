@@ -42,6 +42,7 @@ import allocation
 import allocation_store
 import audit_store
 import audit_universe
+import excess
 import pick_store
 import recon
 import serial_history
@@ -171,6 +172,13 @@ SHORTAGE_PRODUCT_CODES = [
 ]
 SHORTAGE_CACHE_MINUTES = float(os.getenv("SHORTAGE_CACHE_MINUTES", "5"))
 SHORTAGE_PRODUCT_CODES_TOKEN = "__SHORTAGE_PRODUCT_CODES__"
+# Excess packlist cost report: what one avoidable extra shipment costs and
+# how long to cache the ERP pull (short, so "still fixable" stays actionable).
+EXCESS_PACKLISTS_FILE = resolve_path_setting(
+    os.getenv("EXCESS_PACKLISTS_FILE", "sql/excess_packlists.sql")
+)
+EXCESS_PACKLIST_COST_USD = float(os.getenv("EXCESS_PACKLIST_COST_USD", "51"))
+EXCESS_CACHE_MINUTES = float(os.getenv("EXCESS_CACHE_MINUTES", "5"))
 # Allocation screen: per-SKU supply/demand model + Promise Del Date editing.
 ALLOC_SUPPLY_FILE = resolve_path_setting(
     os.getenv("ALLOC_SUPPLY_FILE", "sql/alloc_supply.sql")
@@ -4001,6 +4009,56 @@ def _today_local() -> date:
     return datetime.now(timezone.utc).astimezone(resolve_timezone()).date()
 
 
+_excess_cache: dict[str, Any] = {"payload": None, "fetched_at": None}
+
+
+def _fetch_excess_rows(today: date) -> list[dict]:
+    """SHIPPER headers shipped since the month containing (today - 34 days),
+    plus anything created today that has not shipped yet. Starting at a month
+    boundary keeps calendar month-to-date fully inside the window even when
+    the rolling 34 days would start mid-month."""
+    anchor = today - timedelta(days=34)
+    df = run_erp_query_file(
+        EXCESS_PACKLISTS_FILE,
+        {
+            "start_date": anchor.replace(day=1).isoformat(),
+            "end_date": (today + timedelta(days=1)).isoformat(),
+            "today_start": today.isoformat(),
+        },
+        "excess packlists",
+    )
+    return df.to_dict(orient="records")
+
+
+def build_excess_packlist_payload(force: bool = False) -> dict[str, Any]:
+    """Cached excess-packlist payload; degrades to an error message when ERP is down."""
+    cached_at = _excess_cache["fetched_at"]
+    if (
+        not force
+        and _excess_cache["payload"] is not None
+        and cached_at is not None
+        and datetime.now() - cached_at < timedelta(minutes=EXCESS_CACHE_MINUTES)
+    ):
+        return _excess_cache["payload"]
+    today = _today_local()
+    try:
+        rows = _fetch_excess_rows(today)
+    except Exception as exc:  # noqa: BLE001 — degrade like the other ERP panels
+        logger.exception("Excess packlist query failed")
+        return {
+            "error": str(exc),
+            "summary": None,
+            "fixable": [],
+            "groups": [],
+        }
+    payload = excess.build_excess(rows, today, EXCESS_PACKLIST_COST_USD)
+    payload["error"] = None
+    payload["as_of"] = datetime.now(timezone.utc)
+    _excess_cache["payload"] = payload
+    _excess_cache["fetched_at"] = datetime.now()
+    return payload
+
+
 def _resolve_recon_date(requested: Optional[str], available: list[str]) -> Optional[str]:
     """Requested date if we have a plan for it; else the newest date before
     today (the 'how did yesterday go' default); else the newest we have."""
@@ -4251,6 +4309,7 @@ SHIPPING_VIEWS = {
     "stage": "Staged shipments",
     "shortages": "Shortages",
     "recon": "Reconciliation",
+    "excess": "Excess packlists",
 }
 
 
@@ -4325,6 +4384,7 @@ def shipping_page():
     recon_payload = None
     stage = None
     shortages = None
+    excess_payload = None
     verify_daily = None
     pick_sessions: list[dict[str, Any]] = []
     verify_sessions: list[dict[str, Any]] = []
@@ -4336,6 +4396,8 @@ def shipping_page():
         recon_payload = _audit_json_safe(build_recon_payload(request.args.get("date")))
     elif view == "shortages":
         shortages = _audit_json_safe(build_shortage_payload())
+    elif view == "excess":
+        excess_payload = _audit_json_safe(build_excess_packlist_payload())
     elif view == "stage":
         stage = _audit_json_safe(build_stage_aging())
     elif view == "verify":
@@ -4378,6 +4440,7 @@ def shipping_page():
         recon=recon_payload,
         stage=stage,
         shortages=shortages,
+        excess=excess_payload,
         verify_daily=verify_daily,
         pick_sessions=pick_sessions,
         verify_sessions=verify_sessions,
@@ -4395,6 +4458,13 @@ def shipping_page():
 def api_shipping_shortages():
     force = request.args.get("refresh") == "1"
     return jsonify(_audit_json_safe(build_shortage_payload(force=force))), 200
+
+
+@app.get("/api/shipping/excess-packlists")
+@require_trusted_client
+def api_shipping_excess_packlists():
+    force = request.args.get("refresh") == "1"
+    return jsonify(_audit_json_safe(build_excess_packlist_payload(force=force))), 200
 
 
 @app.get("/shipping/shortages/export")

@@ -1683,6 +1683,44 @@ button.analytics-window {
   background: #eaf6ef;
 }
 
+/* Excess-packlist scoreboard banner: green when the day is clean, loud red
+   when duplicate packlists are burning shipping dollars. */
+.excess-banner .excess-face {
+  font-size: 42px;
+  line-height: 1;
+  flex: 0 0 auto;
+}
+
+.excess-banner.excess-bad {
+  background: #983a2f;
+}
+
+.excess-banner.excess-bad .audit-cta-sub {
+  color: #f7d8d1;
+}
+
+.excess-banner.excess-bad .audit-cta-btn {
+  color: #983a2f;
+}
+
+.excess-banner.excess-bad .audit-cta-btn:hover {
+  background: #fdeeea;
+}
+
+/* "Still fixable today" callout on the excess packlists view */
+.excess-fixable {
+  border: 2px solid #983a2f;
+  background: #fdeeea;
+  border-radius: var(--radius-card);
+  padding: 16px 20px;
+  margin: 12px 0 18px;
+}
+
+.excess-fixable h3 {
+  color: #983a2f;
+  margin-top: 0;
+}
+
 /* Monospace utility for scanned codes / serials */
 .mono {
   font-family: var(--font-mono);

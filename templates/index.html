@@ -148,6 +148,15 @@
           {% endif %}
 
           {% if feature_flags.shipping %}
+          <section class="audit-cta excess-banner" data-excess-banner hidden>
+            <div class="excess-face" data-excess-face aria-hidden="true">&#128512;</div>
+            <div class="audit-cta-copy">
+              <div class="audit-cta-title" data-excess-title>Excess packlists</div>
+              <div class="audit-cta-sub" data-excess-text>Checking today's shipments&hellip;</div>
+            </div>
+            <a class="audit-cta-btn" href="{{ url_for('shipping_page', view='excess') }}">See the cost &rarr;</a>
+          </section>
+
           <section class="audit-cta" data-transfer-banner hidden>
             <div class="audit-cta-icon"><span></span></div>
             <div class="audit-cta-copy">
@@ -1109,6 +1118,52 @@
             if (text) {
               text.textContent = units + " open units are waiting on a MAIN transfer ("
                 + parts + " part" + (parts === 1 ? "" : "s") + ") before they can print on a picklist.";
+            }
+            banner.hidden = false;
+          })
+          .catch(function () { /* banner is best-effort */ });
+      })();
+    </script>
+    <script>
+      // Excess-packlist scoreboard: same best-effort post-load fetch as the
+      // transfer banner. Shown even when clean — a hidden banner can't
+      // reinforce good behavior.
+      (function () {
+        var banner = document.querySelector("[data-excess-banner]");
+        if (!banner) return;
+        function dollars(value) { return "$" + Math.round(value || 0); }
+        fetch("/api/shipping/excess-packlists")
+          .then(function (resp) { return resp.ok ? resp.json() : null; })
+          .then(function (data) {
+            if (!data || data.error || !data.summary) return;
+            var s = data.summary;
+            var todayCount = (s.today && s.today.excess_count) || 0;
+            var monthCost = (s.month && s.month.excess_cost) || 0;
+            var face = banner.querySelector("[data-excess-face]");
+            var title = banner.querySelector("[data-excess-title]");
+            var text = banner.querySelector("[data-excess-text]");
+            if (todayCount > 0 || s.fixable_count > 0) {
+              banner.classList.add("excess-bad");
+              if (face) face.textContent = "☹️";
+              if (title) title.textContent = "Duplicate packlists today";
+              if (text) {
+                var msg = todayCount + " excess packlist" + (todayCount === 1 ? "" : "s")
+                  + " shipped today (" + dollars(s.today.excess_cost) + " wasted)";
+                if (s.fixable_count > 0) {
+                  msg += " · " + s.fixable_count + " still fixable — consolidate before pickup and save "
+                    + dollars(s.fixable_savings);
+                }
+                msg += ". " + dollars(monthCost) + " wasted this month.";
+                text.textContent = msg;
+              }
+            } else {
+              banner.classList.add("excess-good");
+              if (face) face.textContent = "😀";
+              if (title) title.textContent = "No duplicate packlists today";
+              if (text) {
+                text.textContent = "One box per order per day — keep it up. "
+                  + dollars(monthCost) + " wasted month-to-date.";
+              }
             }
             banner.hidden = false;
           })

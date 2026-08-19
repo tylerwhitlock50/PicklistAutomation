@@ -27,6 +27,7 @@
         'stage': 'Staged shipments',
         'pick': 'Pick orders',
         'verify': 'Packlist verification',
+        'excess': 'Excess packlists',
       } %}
       {% set view_copy = {
         'work': 'Start or resume today’s shipping work. Reports and historical checks are available after the operational steps.',
@@ -35,6 +36,7 @@
         'stage': 'Serialized units sitting in SHIPPING stage bins — staged goods should be gone within the target window.',
         'pick': 'Scan-verify every pull against the correct sales order before it reaches the packing bench.',
         'verify': 'Enter a packlist, scan the guns in the box, and confirm the physical contents match what the ERP says shipped.',
+        'excess': 'Every extra packlist on an order that already shipped a box the same day is an avoidable carrier charge. This view prices the habit and lists the orders to consolidate.',
       } %}
 
       <section class="hero card">
@@ -383,6 +385,125 @@
         {% endif %}
         {% else %}
         <p class="empty-state">No shortages &mdash; every open component line inside the horizon is covered by picklist stock.</p>
+        {% endif %}
+        {% endif %}
+      </section>
+      {% endif %}
+
+      {% if view == 'excess' %}
+      <section class="card">
+        <h2>Excess packlist cost</h2>
+        <p class="helper-text">
+          Same order, same day, more than one packlist &mdash; each extra box costs about
+          <strong>${{ '%.0f'|format(excess.summary.cost_per_excess if excess.summary else 51) }}</strong> in avoidable shipping.
+          Legitimate splits (backorders, hazmat) are not detected; use the line/serial counts to judge
+          {%- if excess.as_of %} &middot; as of {{ excess.as_of[:16]|replace('T', ' ') }} UTC{% endif %}.
+        </p>
+        {% if excess.error %}
+        <p class="empty-state">Excess packlist data unavailable &mdash; the ERP query failed: {{ excess.error }}</p>
+        {% else %}
+        {% set ex = excess.summary %}
+
+        {% if excess.fixable %}
+        <div class="excess-fixable">
+          <h3>Still fixable today &mdash; consolidate before pickup</h3>
+          <p class="helper-text">
+            These orders already have a packlist today plus at least one <strong>unshipped</strong> duplicate.
+            Merging them now saves <strong>${{ '%.0f'|format(ex.fixable_savings) }}</strong>.
+          </p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Order</th><th>Customer</th><th>Packlists today</th><th>Savings if merged</th></tr>
+              </thead>
+              <tbody>
+                {% for g in excess.fixable %}
+                <tr>
+                  <td class="mono"><strong>{{ g.order_id }}</strong></td>
+                  <td>{{ g.customer_name or g.customer_id or '' }}</td>
+                  <td>
+                    {% for p in g.packlists %}
+                    <span class="mono">{{ p.packlist_id }}</span>
+                    <span class="helper-text">({{ p.line_count }} line{{ '' if p.line_count == 1 else 's' }},
+                      {{ p.serial_count }} serial{{ '' if p.serial_count == 1 else 's' }}{{ ', not shipped yet' if not p.shipped }})</span>{{ '' if loop.last else ', ' }}
+                    {% endfor %}
+                  </td>
+                  <td><strong>${{ '%.0f'|format(g.fixable_savings) }}</strong></td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        {% else %}
+        <p class="work-clear">Nothing to consolidate right now &mdash; no unshipped duplicates today.</p>
+        {% endif %}
+
+        <div class="audit-tiles analytics-tiles">
+          <div class="audit-tile {{ 'tile-missing' if ex.today.excess_count else 'tile-verified' }}">
+            <span class="audit-tile-num">${{ '%.0f'|format(ex.today.excess_cost) }}</span>
+            <span class="audit-tile-label">Today</span>
+            <span class="audit-tile-sub">{{ ex.today.excess_count }} excess &middot; {{ ex.today.orders }} order{{ '' if ex.today.orders == 1 else 's' }}</span>
+          </div>
+          <div class="audit-tile {{ 'tile-missing' if ex.week.excess_count else 'tile-verified' }}">
+            <span class="audit-tile-num">${{ '%.0f'|format(ex.week.excess_cost) }}</span>
+            <span class="audit-tile-label">Last 7 days</span>
+            <span class="audit-tile-sub">{{ ex.week.excess_count }} excess &middot; {{ ex.week.orders }} order{{ '' if ex.week.orders == 1 else 's' }}</span>
+          </div>
+          <div class="audit-tile {{ 'tile-missing' if ex.month.excess_count else 'tile-verified' }}">
+            <span class="audit-tile-num">${{ '%.0f'|format(ex.month.excess_cost) }}</span>
+            <span class="audit-tile-label">Month to date</span>
+            <span class="audit-tile-sub">{{ ex.month.excess_count }} excess &middot; {{ ex.month.orders }} order{{ '' if ex.month.orders == 1 else 's' }}</span>
+          </div>
+        </div>
+
+        <div class="table-controls">
+          <h3>Orders that shipped in multiple boxes the same day</h3>
+          <input type="search" data-table-filter placeholder="Filter orders, customers, packlists..." aria-label="Filter excess packlists" />
+          <div class="density-toggle">
+            <button type="button" class="button tertiary" data-density-value="comfortable">Comfortable</button>
+            <button type="button" class="button tertiary" data-density-value="compact">Compact</button>
+          </div>
+        </div>
+        {% if excess.groups %}
+        <div class="table-wrap">
+          <table id="excess-groups-table" data-filterable-table>
+            <thead>
+              <tr>
+                <th>Ship date</th>
+                <th>Order</th>
+                <th>Customer</th>
+                <th>Packlists</th>
+                <th>Excess boxes</th>
+                <th>Excess cost</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for g in excess.groups %}
+              <tr{% if loop.index > row_cap %} class="row-capped"{% endif %}>
+                <td>{{ g.ship_date }}</td>
+                <td class="mono">{{ g.order_id }}</td>
+                <td>{{ g.customer_name or g.customer_id or '' }}</td>
+                <td>
+                  {% for p in g.packlists %}
+                  <span class="mono">{{ p.packlist_id }}</span>
+                  <span class="helper-text">({{ p.line_count }}L/{{ p.serial_count }}S{% if p.ship_via %} {{ p.ship_via }}{% endif %})</span>{{ '' if loop.last else ', ' }}
+                  {% endfor %}
+                </td>
+                <td>{{ g.excess_count }}</td>
+                <td><strong>${{ '%.0f'|format(g.excess_cost) }}</strong></td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% if excess.groups|length > row_cap %}
+        <button type="button" class="button tertiary show-all-button" data-show-all="excess-groups-table">
+          Show all {{ excess.groups|length }} rows ({{ excess.groups|length - row_cap }} more)
+        </button>
+        {% endif %}
+        {% else %}
+        <p class="empty-state">No excess packlists in the window &mdash; every order shipped in a single box per day. &#128512;</p>
         {% endif %}
         {% endif %}
       </section>
