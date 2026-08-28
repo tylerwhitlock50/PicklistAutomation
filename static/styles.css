@@ -2372,7 +2372,7 @@ details.detail-section > .table-wrap {
 
 .gate-summary {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
   gap: 10px;
   margin: 14px 0;
 }
@@ -2461,4 +2461,60 @@ details.detail-section > .table-wrap {
   .gate-summary { grid-template-columns: 1fr 1fr; }
   .gate-exception-form { grid-template-columns: 1fr; }
   .release-gate-filter { width: 100%; min-width: 0; }
+}
+
+.release-policy-heading,
+.release-policy-row-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.release-policy-heading h3 {
+  margin: 0 0 0.25rem;
+}
+
+.release-policy-list {
+  display: grid;
+  gap: 0.9rem;
+  margin-top: 0.8rem;
+}
+
+.release-policy-row {
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 0.85rem;
+  background: var(--panel);
+}
+
+.release-policy-row-header > label:first-child {
+  flex: 1 1 18rem;
+}
+
+.release-policy-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10.5rem, 1fr));
+  gap: 0.75rem;
+  margin-top: 0.8rem;
+}
+
+.release-policy-grid label,
+.release-policy-row-header label {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.release-policy-grid .checkbox-row {
+  align-content: end;
+  grid-template-columns: auto 1fr;
+  min-height: 2.65rem;
+}
+
+@media (max-width: 720px) {
+  .release-policy-heading,
+  .release-policy-row-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
 }

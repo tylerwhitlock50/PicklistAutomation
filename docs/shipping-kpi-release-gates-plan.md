@@ -13,12 +13,16 @@ The engineering scope in this plan is now implemented:
 - `release_gate.py` produces one deterministic `RELEASE`, `ACCUMULATING`, `HOLD`, or `BLOCKED`
   decision per candidate order. The existing guns and components queries consume the
   same released order set before supply allocation when enforcement is enabled.
-- Configured accumulating customers receive logical, auditable protection for shelf
-  inventory. Protected units remain in their located shelves, cannot be consumed by
-  later normal-order release decisions, and enter picklists only when their configured
-  completion-only, customer gun target, sweep-day, or approved-exception condition is met. At-risk
-  accumulating orders are escalated for review rather than fragmented automatically.
-- Versioned policies, evaluations, decisions, expiring exceptions, and metric
+- Configured accumulating accounts receive serial-level, auditable protection for shelf
+  inventory. Protected serials remain in their ERP shelf locations, stay attached to the
+  same order across evaluations, cannot be consumed by later decisions, and are rechecked
+  against live ERP immediately before picklist allocation.
+- Major accounts can prohibit sales-order mixing, use a configurable 42-gun-style target,
+  release a complete remainder below target, and release aged reservations after seven
+  days. Standard accounts can use one daily customer/ship-to batch while retaining
+  separate sales orders and packlists. A per-policy ship-to cooldown prevents another
+  picklist for a recently shipped destination until its next eligible calendar date.
+- Versioned policies, evaluations, decisions, sticky serial assignments, expiring exceptions, and metric
   snapshots are persisted in SQLite. The default remains `advisory` and enforced-mode
   evaluation failures stop the picklist run rather than bypassing the policy.
 - The Shipping Scorecard displays JP's six measures, comparisons, service and volume
@@ -31,12 +35,11 @@ The engineering scope in this plan is now implemented:
 - Desktop and 375px responsive browser QA passed with no console errors or page-level
   horizontal overflow. The first 100 prioritized release decisions are rendered while
   summary counts continue to cover every candidate.
-- Final automated result: **104 passed** (the original 60 plus 44 new KPI, gate,
-  persistence, SQL-filter, API, and route/render checks).
+- Automated coverage includes KPI, major-account isolation, standard daily batching,
+  seven-day aging, sticky serial persistence, SQL filtering, API, and route/render checks.
 
-The remaining items are governance gates, not missing software: Shipping must review
-advisory decisions; JP must approve the official targets, customer-specific batch/sweep
-rules, and enforcement date. No Lipsey's rule or invented target has been enabled.
+The remaining items are governance gates: Shipping must review advisory decisions and JP
+must approve the final account list, cutoff time, per-account targets, and enforcement date.
 
 ## Goal
 
@@ -141,21 +144,23 @@ Evaluate rules in this precedence order:
 2. **Approved exception / ordinary commitment protection** - an approved exception may
    release available units; non-accumulating orders may release when the commitment
    horizon is at risk.
-3. **Protected accumulation** - for customers explicitly configured with
-   `accumulate: true`, assign available shelf inventory logically in promise priority and
-   remove it from the supply seen by later normal orders. Do not expose the order to a
-   picklist until its release condition is met. If its commitment is at risk, show an
-   escalation and require an approved exception to fragment it.
-4. **Ship complete** - release when all physical shippable lines can be covered from the
+3. **Sticky protected accumulation** - for accounts configured with `accumulate: true`,
+   assign eligible ERP serials in promise priority, preserve each serial's first-assigned
+   timestamp, and remove it from the supply seen by later orders. Revalidate every sticky
+   assignment from live ERP immediately before picklist allocation.
+4. **Ship-to cooldown** - unless an approved exception applies, a destination with a
+   recent shipment cannot release again until `last shipment + ship_to_cooldown_days`.
+   Accumulating orders may keep protecting serials during the cooldown; ordinary held
+   orders do not consume supply.
+5. **Ship complete** - release when all physical shippable lines can be covered from the
    currently allocatable supply and no conflicting pick/packlist already exists.
-5. **Customer consolidation rule** - for configured high-volume customers, release only
-   when the minimum batch/pallet threshold or designated sweep day is reached. The
-   Lipsey's example (pallet threshold Friday-Wednesday, remainder Thursday) is a candidate
-   policy, not an approved hard-coded rule.
-6. **Default small-order rule** - distinguish a legitimate one-gun customer order from a
-   one-gun partial shipment on a larger order. Hold avoidable partials; do not automatically
-   penalize a genuinely complete one-gun order.
-7. **Manual exception audit** - require a reason,
+6. **Major-account consolidation** - when sales-order mixing is disabled, expose only the
+   oldest sticky sales order for that customer. Release at its configured gun target, when
+   its remainder is complete below target, at the maximum hold age, or by exception.
+7. **Default store batch** - optionally combine ready orders only for the same customer and
+   ship-to, then release that group at one daily cutoff. Sales orders and packlists remain
+   distinct even though the physical outbound shipment may be consolidated.
+8. **Manual exception audit** - require a reason,
    actor, timestamp, and expiration. Typical categories: customer expedite, commitment at
    risk, compliance/ATF, carrier cutoff, backorder authorization, or manager approval.
 8. **Otherwise hold** - show why it is held, guns ready, total open guns, missing items,
@@ -163,9 +168,10 @@ Evaluate rules in this precedence order:
 
 The released set is then allocated deterministically using the existing priority order.
 A held order must not consume supply ahead of released orders. An accumulating order may
-protect supply, but the physical units remain on the shelf and the logical reservation is
-recomputed from current source data on every evaluation. Re-running the picklist throughout
-the day may add newly eligible orders, but it must not bypass the gate.
+protect supply while physical units remain on the shelf. Valid serial assignments persist
+across evaluations; they are removed only when the serial leaves eligible ERP inventory or
+the order/policy no longer permits the assignment. Re-running the picklist may add newly
+eligible orders, but it must revalidate and cannot bypass the gate.
 
 ### Operator experience
 

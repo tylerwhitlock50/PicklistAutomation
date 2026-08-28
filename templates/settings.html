@@ -152,21 +152,86 @@
               of being split automatically; an approved exception can release them. Default: 1 day.
             </p>
 
-            <label for="release_gate_customer_policies_json">Customer consolidation policies (JSON)</label>
+            <div class="release-policy-heading">
+              <div>
+                <h3>Account consolidation policies</h3>
+                <p class="helper-text">
+                  <code>DEFAULT</code> applies to every account not listed separately. Add major
+                  accounts by their exact VISUAL customer ID.
+                </p>
+              </div>
+              <button type="button" class="button tertiary" id="add-release-policy">Add account</button>
+            </div>
+            <div id="release-policy-rows" class="release-policy-list">
+              {% for customer_id, policy in release_gate_customer_policies.items() %}
+              <section class="release-policy-row" data-policy-row>
+                <div class="release-policy-row-header">
+                  <label>Customer ID
+                    <input data-policy-field="customer_id" type="text" value="{{ customer_id }}" maxlength="30" />
+                  </label>
+                  <label>Account type
+                    {% set account_type = policy.get('account_type', 'major' if policy.get('accumulate') else 'standard') %}
+                    <select data-policy-field="account_type">
+                      <option value="major" {% if account_type == 'major' %}selected{% endif %}>Major account</option>
+                      <option value="standard" {% if account_type == 'standard' %}selected{% endif %}>Standard store</option>
+                    </select>
+                  </label>
+                  <button type="button" class="button tertiary release-policy-remove" data-remove-policy>Remove</button>
+                </div>
+                <div class="release-policy-grid">
+                  <label class="checkbox-row">
+                    <input data-policy-field="accumulate" type="checkbox" {% if policy.get('accumulate') %}checked{% endif %} />
+                    Protect assigned serials
+                  </label>
+                  <label>Target guns
+                    <input data-policy-field="target_guns" type="number" min="0" max="10000" value="{{ policy.get('target_guns', policy.get('min_guns', 0)) }}" />
+                  </label>
+                  <label>Mix sales orders
+                    <select data-policy-field="mix_orders">
+                      {% set mix_orders = policy.get('mix_orders', account_type != 'major') %}
+                      <option value="false" {% if not mix_orders %}selected{% endif %}>No</option>
+                      <option value="true" {% if mix_orders %}selected{% endif %}>Yes</option>
+                    </select>
+                  </label>
+                  <label>Release cadence
+                    {% set cadence = policy.get('release_cadence', 'threshold' if account_type == 'major' else 'daily') %}
+                    <select data-policy-field="release_cadence">
+                      <option value="threshold" {% if cadence == 'threshold' %}selected{% endif %}>Target / completion</option>
+                      <option value="daily" {% if cadence == 'daily' %}selected{% endif %}>Daily batch</option>
+                      <option value="completion" {% if cadence == 'completion' %}selected{% endif %}>Complete order</option>
+                    </select>
+                  </label>
+                  <label>Daily cutoff
+                    <input data-policy-field="daily_release_time" type="time" value="{{ policy.get('daily_release_time', '14:00') }}" />
+                  </label>
+                  <label>Maximum hold days
+                    <input data-policy-field="max_hold_days" type="number" min="0" max="90" value="{{ policy.get('max_hold_days', 7) }}" />
+                  </label>
+                  <label>Ship-to cooldown days
+                    <input data-policy-field="ship_to_cooldown_days" type="number" min="0" max="30" value="{{ policy.get('ship_to_cooldown_days', 0) }}" />
+                  </label>
+                  <label>Optional sweep weekday
+                    <select data-policy-field="sweep_weekday">
+                      <option value="">None</option>
+                      {% for day_number, day_name in [(0,'Monday'),(1,'Tuesday'),(2,'Wednesday'),(3,'Thursday'),(4,'Friday'),(5,'Saturday'),(6,'Sunday')] %}
+                      <option value="{{ day_number }}" {% if policy.get('sweep_weekday') == day_number %}selected{% endif %}>{{ day_name }}</option>
+                      {% endfor %}
+                    </select>
+                  </label>
+                </div>
+              </section>
+              {% endfor %}
+            </div>
             <textarea
               id="release_gate_customer_policies_json"
               name="release_gate_customer_policies_json"
-              rows="8"
-              spellcheck="false"
-              class="mono"
+              hidden
             >{{ release_gate_customer_policies_json }}</textarea>
             <p class="helper-text">
-              Key by customer ID. Example:
-              <code>{"LIPSEYS":{"accumulate":true,"min_guns":100,"sweep_weekday":3}}</code>.
-              <code>accumulate</code> protects available shelf inventory from later orders. With no
-              target or sweep it releases at full-order availability; otherwise the gun target,
-              sweep day, or an approved exception releases the protected batch.
-              Weekdays are 0=Monday through 6=Sunday. Values must be approved before enforcement.
+              Major accounts default to one active sales order at a time. Standard daily batches
+              may combine sales orders only when customer and ship-to match. A ship-to cooldown of
+              1 prevents another picklist for that destination until tomorrow; 3 holds it for three
+              calendar days. Every protected serial keeps its first-assigned timestamp.
             </p>
           </section>
 
@@ -408,6 +473,99 @@
           ["#telegram_bot_token", "#clear_telegram_bot_token"],
           ["#smtp_password", "#clear_smtp_password"],
         ];
+        const releasePolicyRows = document.getElementById("release-policy-rows");
+        const releasePolicyJson = document.getElementById("release_gate_customer_policies_json");
+        const addReleasePolicyButton = document.getElementById("add-release-policy");
+
+        function releasePolicyMarkup() {
+          return `
+            <div class="release-policy-row-header">
+              <label>Customer ID
+                <input data-policy-field="customer_id" type="text" maxlength="30" placeholder="VISUAL customer ID" />
+              </label>
+              <label>Account type
+                <select data-policy-field="account_type">
+                  <option value="major">Major account</option>
+                  <option value="standard">Standard store</option>
+                </select>
+              </label>
+              <button type="button" class="button tertiary release-policy-remove" data-remove-policy>Remove</button>
+            </div>
+            <div class="release-policy-grid">
+              <label class="checkbox-row"><input data-policy-field="accumulate" type="checkbox" checked />Protect assigned serials</label>
+              <label>Target guns<input data-policy-field="target_guns" type="number" min="0" max="10000" value="42" /></label>
+              <label>Mix sales orders<select data-policy-field="mix_orders"><option value="false">No</option><option value="true">Yes</option></select></label>
+              <label>Release cadence<select data-policy-field="release_cadence"><option value="threshold">Target / completion</option><option value="daily">Daily batch</option><option value="completion">Complete order</option></select></label>
+              <label>Daily cutoff<input data-policy-field="daily_release_time" type="time" value="14:00" /></label>
+              <label>Maximum hold days<input data-policy-field="max_hold_days" type="number" min="0" max="90" value="7" /></label>
+              <label>Ship-to cooldown days<input data-policy-field="ship_to_cooldown_days" type="number" min="0" max="30" value="0" /></label>
+              <label>Optional sweep weekday<select data-policy-field="sweep_weekday"><option value="">None</option><option value="0">Monday</option><option value="1">Tuesday</option><option value="2">Wednesday</option><option value="3">Thursday</option><option value="4">Friday</option><option value="5">Saturday</option><option value="6">Sunday</option></select></label>
+            </div>`;
+        }
+
+        function serializeReleasePolicies() {
+          if (!releasePolicyRows || !releasePolicyJson) return;
+          const policies = {};
+          releasePolicyRows.querySelectorAll("[data-policy-row]").forEach(function (row) {
+            const value = function (field) {
+              const node = row.querySelector("[data-policy-field='" + field + "']");
+              return node ? node.value : "";
+            };
+            const customerId = value("customer_id").trim().toUpperCase();
+            if (!customerId) return;
+            const policy = {
+              account_type: value("account_type"),
+              accumulate: Boolean(row.querySelector("[data-policy-field='accumulate']").checked),
+              target_guns: Number(value("target_guns") || 0),
+              mix_orders: value("mix_orders") === "true",
+              release_cadence: value("release_cadence"),
+              daily_release_time: value("daily_release_time") || "14:00",
+              max_hold_days: Number(value("max_hold_days") || 7),
+              ship_to_cooldown_days: Number(value("ship_to_cooldown_days") || 0),
+            };
+            const sweep = value("sweep_weekday");
+            if (sweep !== "") policy.sweep_weekday = Number(sweep);
+            policies[customerId] = policy;
+          });
+          releasePolicyJson.value = JSON.stringify(policies);
+        }
+
+        function bindReleasePolicyRow(row) {
+          const removeButton = row.querySelector("[data-remove-policy]");
+          if (removeButton) {
+            removeButton.addEventListener("click", function () {
+              row.remove();
+              serializeReleasePolicies();
+              updateDirtyState();
+            });
+          }
+        }
+
+        if (releasePolicyRows) {
+          releasePolicyRows.querySelectorAll("[data-policy-row]").forEach(bindReleasePolicyRow);
+          releasePolicyRows.addEventListener("input", function () {
+            serializeReleasePolicies();
+            updateDirtyState();
+          });
+          releasePolicyRows.addEventListener("change", function () {
+            serializeReleasePolicies();
+            updateDirtyState();
+          });
+        }
+        if (addReleasePolicyButton && releasePolicyRows) {
+          addReleasePolicyButton.addEventListener("click", function () {
+            const row = document.createElement("section");
+            row.className = "release-policy-row";
+            row.dataset.policyRow = "";
+            row.innerHTML = releasePolicyMarkup();
+            releasePolicyRows.appendChild(row);
+            bindReleasePolicyRow(row);
+            row.querySelector("[data-policy-field='customer_id']").focus();
+            serializeReleasePolicies();
+            updateDirtyState();
+          });
+        }
+        serializeReleasePolicies();
 
         function getFormSnapshot() {
           const fields = form.querySelectorAll("input, textarea, select");
@@ -446,6 +604,21 @@
         function validateForm() {
           clearValidation();
           let isValid = true;
+
+          if (releasePolicyRows) {
+            const seenCustomers = new Set();
+            releasePolicyRows.querySelectorAll("[data-policy-row]").forEach(function (row) {
+              const customerField = row.querySelector("[data-policy-field='customer_id']");
+              const customerId = (customerField.value || "").trim().toUpperCase();
+              let message = "";
+              if (!customerId) message = "Customer ID is required.";
+              else if (seenCustomers.has(customerId)) message = "Customer ID must be unique.";
+              customerField.setCustomValidity(message);
+              if (message) isValid = false;
+              seenCustomers.add(customerId);
+            });
+            serializeReleasePolicies();
+          }
 
           const chatId = (form.querySelector("#telegram_chat_id").value || "").trim();
           if (chatId && !/^-?\d+$/.test(chatId)) {

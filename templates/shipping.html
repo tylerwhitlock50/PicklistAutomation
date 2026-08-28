@@ -164,7 +164,15 @@
           <div><strong>{{ release_gate.summary.protected_guns }}</strong><span>Protected guns</span></div>
           <div><strong>{{ release_gate.summary.release_units }}</strong><span>Units released</span></div>
           <div><strong>{{ release_gate.summary.held_ready_units }}</strong><span>Ready but held</span></div>
+          <div><strong>{{ release_gate.summary.tracked_serials or 0 }}</strong><span>Sticky serials</span></div>
+          <div><strong>{{ release_gate.summary.ship_to_cooldown or 0 }}</strong><span>Ship-to cooldowns</span></div>
         </div>
+        {% if not release_gate.serial_tracking_available %}
+        <p class="scorecard-advisory"><strong>Serial tracking fallback:</strong> quantity decisions are visible, but no serial assignments will be changed until the live ERP serial check succeeds.</p>
+        {% endif %}
+        {% if not release_gate.ship_to_tracking_available %}
+        <p class="scorecard-advisory"><strong>Ship-to history fallback:</strong> cooldown decisions are unavailable until the live ERP shipment check succeeds.</p>
+        {% endif %}
         {% if release_gate.mode == 'advisory' %}
         <p class="scorecard-advisory"><strong>Advisory only:</strong> current picklists are unchanged. Validate these rules with Shipping before enforcement.</p>
         {% elif release_gate.mode == 'enforced' %}
@@ -178,10 +186,10 @@
           <thead><tr><th>Decision</th><th>Order</th><th>Customer</th><th>Reason</th><th>Promise ship</th><th>Protected or ready / open</th><th>Next release</th></tr></thead>
           <tbody>{% for row in release_gate.decisions[:decision_limit] %}<tr>
             <td><span class="pill gate-{{ row.decision|lower }}">{{ row.decision }}</span></td>
-            <td class="mono"><strong>{{ row.order_id }}</strong></td><td>{{ row.customer_name or row.customer_id or '' }}</td><td>{{ row.label }}{% if row.release_condition %}<span class="helper-text">{{ row.release_condition }}</span>{% endif %}</td>
+            <td class="mono"><strong>{{ row.order_id }}</strong></td><td>{{ row.customer_name or row.customer_id or '' }}{% if row.ship_to_id %}<br /><span class="helper-text">Ship-to {{ row.ship_to_id }}</span>{% endif %}</td><td>{{ row.label }}{% if row.release_condition %}<br /><span class="helper-text">{{ row.release_condition }}</span>{% endif %}{% if row.last_ship_to_shipment_date %}<br /><span class="helper-text">Last ship-to shipment {{ row.last_ship_to_shipment_date }}{% if row.ship_to_cooldown_days %} &middot; {{ row.ship_to_cooldown_days }}d cooldown{% endif %}</span>{% endif %}</td>
             <td>{{ row.promise_ship or '&mdash;'|safe }}</td>
-            <td>{% if row.decision == 'ACCUMULATING' %}<strong>{{ row.protected_qty }}</strong> protected{% else %}{{ row.ready_qty }} ready{% endif %} / {{ row.open_qty }} open{% if row.open_guns %}<span class="helper-text"> &middot; {{ row.ready_guns }}/{{ row.open_guns }} guns</span>{% endif %}</td>
-            <td>{{ row.next_release_date or '' }}</td>
+            <td>{% if row.decision == 'ACCUMULATING' %}<strong>{{ row.protected_qty }}</strong> protected{% else %}{{ row.ready_qty }} ready{% endif %} / {{ row.open_qty }} open{% if row.open_guns %}<span class="helper-text"> &middot; {{ row.ready_guns }}/{{ row.open_guns }} guns</span>{% endif %}{% if row.serial_assignments %}<span class="helper-text"> &middot; {{ row.serial_assignments|length }} sticky serial{{ '' if row.serial_assignments|length == 1 else 's' }}{% if row.reservation_age_days is not none %}, oldest {{ row.reservation_age_days }}d{% endif %}</span>{% endif %}</td>
+            <td>{{ row.next_release_date or '' }}{% if row.ship_to_cooldown_active and row.next_ship_to_eligible_date and row.next_ship_to_eligible_date != row.next_release_date %}<br /><span class="helper-text">Ship-to {{ row.next_ship_to_eligible_date }}</span>{% endif %}</td>
           </tr>{% endfor %}</tbody>
         </table></div>
         {% else %}<p class="empty-state">No open physical orders are inside the release horizon.</p>{% endif %}

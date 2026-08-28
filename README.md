@@ -73,25 +73,40 @@ The scorecard uses VISUAL packlists as shipment grain and serialized trace units
 
 ## Order release gate
 
-Configure the gate from Settings. New installs start in `advisory`, so Shipping can validate the queue without changing picklists. After sign-off, `enforced` injects only released order IDs into both picklist queries before supply allocation. If the release evaluation fails while enforced, the run stops instead of bypassing the policy.
+Configure the gate from Settings using the account-policy editor. New installs start in `advisory`, so Shipping can validate the queue without changing picklists. After sign-off, `enforced` rechecks live ERP serial availability, reconciles sticky assignments, and injects only released order IDs into both picklist queries before supply allocation. If the release or serial validation fails while enforced, the run stops instead of bypassing the policy.
 
-Rule precedence is: hard blocks; approved temporary exceptions and ordinary commitment protection; configured protected accumulation; complete-order release; customer batch/sweep policies; then wait for completion. `HOLD` does not reserve inventory. `ACCUMULATING` does: allocatable units remain in their shelf locations but are subtracted before later normal orders are evaluated. Every evaluation recomputes that logical protection from current supply, and every policy version, decision, allocation, and temporary exception is retained in SQLite.
+Rule precedence is: hard blocks; approved temporary exceptions and ordinary commitment protection; existing sticky serial reservations; configured protected accumulation; complete-order release; account batch policies; then wait for completion. `HOLD` does not reserve inventory. `ACCUMULATING` does: serials remain in their ERP shelf locations but stay tied to the same order locally and are subtracted before later orders are evaluated. Every evaluation revalidates those assignments against current read-only ERP inventory, and every policy version, decision, serial assignment, and temporary exception is retained in SQLite.
 
-Example customer-policy JSON (Thursday is weekday `3`):
+The Settings screen writes the policy JSON. `DEFAULT` controls stores not explicitly listed; major-account entries override it:
 
 ```json
 {
-  "LIPSEYS": {
+  "DEFAULT": {
+    "account_type": "standard",
     "accumulate": true,
-    "min_guns": 100,
-    "sweep_weekday": 3
+    "target_guns": 0,
+    "mix_orders": true,
+    "release_cadence": "daily",
+    "daily_release_time": "14:00",
+    "max_hold_days": 7,
+    "ship_to_cooldown_days": 1
+  },
+  "LIPSEYS": {
+    "account_type": "major",
+    "accumulate": true,
+    "target_guns": 42,
+    "mix_orders": false,
+    "release_cadence": "threshold",
+    "daily_release_time": "14:00",
+    "max_hold_days": 7,
+    "ship_to_cooldown_days": 0
   }
 }
 ```
 
-With `accumulate: true`, the gate protects available guns for that customer. With no target or sweep, a protected order releases when it becomes complete. When `min_guns` and/or `sweep_weekday` is configured, the protected customer batch releases at the target or sweep; an approved temporary exception can release it sooner. An accumulating order inside the commitment-protection window remains protected and is flagged for management review instead of being fragmented automatically. Customers without `accumulate: true` retain the prior non-reserving behavior.
+Major accounts with `mix_orders: false` expose one active sales order at a time and release it at `target_guns`, full completion below the target, `max_hold_days`, or an approved exception. Standard `daily` policies combine only the same customer and ship-to, then release once the configured cutoff arrives or the oldest sticky assignment reaches the maximum age. `ship_to_cooldown_days: 1` prevents a destination shipped today from receiving another picklist until tomorrow; `3` makes the destination next eligible three calendar days after its last shipment. Optional legacy sweep weekdays remain supported.
 
-Customer-specific accumulation, thresholds, and sweep days are intentionally unset until JP and Shipping approve them; the email's Lipsey's cadence was an example, not an approved production rule.
+Repository defaults remain advisory. Customer policies can be reviewed and changed in Settings before any enforcement date is approved.
 
 To reconcile the queries against the configured live VISUAL source without exposing order/customer detail:
 

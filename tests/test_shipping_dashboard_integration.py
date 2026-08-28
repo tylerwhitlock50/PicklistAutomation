@@ -194,6 +194,82 @@ class ReleasePolicyParsingTests(unittest.TestCase):
                 '{"LIPSEYS":{"accumulate":"yes"}}'
             )
 
+    def test_structured_major_and_standard_policy_fields_are_normalized(self):
+        result = app_module.parse_release_gate_customer_policies({
+            "default": {
+                "account_type": "standard",
+                "accumulate": True,
+                "target_guns": 0,
+                "mix_orders": True,
+                "release_cadence": "daily",
+                "daily_release_time": "14:00",
+                "max_hold_days": 7,
+                "ship_to_cooldown_days": 1,
+            },
+            "lipseys": {
+                "account_type": "major",
+                "accumulate": True,
+                "target_guns": 42,
+                "mix_orders": False,
+                "release_cadence": "threshold",
+                "daily_release_time": "14:00",
+                "max_hold_days": 7,
+                "ship_to_cooldown_days": 0,
+            },
+        })
+        self.assertEqual(result["DEFAULT"]["release_cadence"], "daily")
+        self.assertTrue(result["DEFAULT"]["mix_orders"])
+        self.assertEqual(result["LIPSEYS"]["target_guns"], 42)
+        self.assertFalse(result["LIPSEYS"]["mix_orders"])
+        self.assertEqual(result["DEFAULT"]["ship_to_cooldown_days"], 1)
+        self.assertEqual(result["LIPSEYS"]["ship_to_cooldown_days"], 0)
+
+    def test_structured_policy_rejects_invalid_daily_time(self):
+        with self.assertRaisesRegex(ValueError, "24-hour HH:MM"):
+            app_module.parse_release_gate_customer_policies({
+                "DEFAULT": {
+                    "account_type": "standard",
+                    "accumulate": True,
+                    "release_cadence": "daily",
+                    "daily_release_time": "2pm",
+                }
+            })
+
+
+class ReleasePolicySettingsTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        app_module.app.config.update(TESTING=True, SECRET_KEY="shipping-settings-test")
+        cls.client = app_module.app.test_client()
+
+    def test_settings_renders_structured_account_policy_editor(self):
+        with self.client.session_transaction() as session:
+            session[app_module.SETTINGS_SESSION_KEY] = True
+        with patch.object(
+            app_module,
+            "get_release_gate_customer_policies",
+            return_value={
+                "LIPSEYS": {
+                    "account_type": "major",
+                    "accumulate": True,
+                    "target_guns": 42,
+                    "mix_orders": False,
+                    "release_cadence": "threshold",
+                    "daily_release_time": "14:00",
+                    "max_hold_days": 7,
+                }
+            },
+        ):
+            response = self.client.get("/settings")
+        html = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Account consolidation policies", html)
+        self.assertIn("Major account", html)
+        self.assertIn("Target guns", html)
+        self.assertIn("Mix sales orders", html)
+        self.assertIn("Ship-to cooldown days", html)
+        self.assertIn("LIPSEYS", html)
+
 
 if __name__ == "__main__":
     unittest.main()

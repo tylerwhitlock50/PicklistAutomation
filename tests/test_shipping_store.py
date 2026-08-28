@@ -94,6 +94,55 @@ class ShippingStoreTests(unittest.TestCase):
             shipping_store.get_metric_snapshot(date(2026, 8, 27), 30), payload
         )
 
+    def test_sticky_serial_reservation_reconciliation(self):
+        first = datetime(2026, 8, 27, 16, 0, tzinfo=timezone.utc).isoformat()
+        desired = [{
+            "serial_no": "SER-1",
+            "part_id": "GUN-A",
+            "customer_id": "MAJOR",
+            "cust_order_id": "SO-1",
+            "line_no": "1",
+            "first_assigned_at": first,
+            "accumulation_started_at": first,
+        }]
+        live = [{
+            "SERIAL_NO": "SER-1",
+            "PART_ID": "GUN-A",
+            "WAREHOUSE_ID": "SHIPPING",
+            "LOCATION_ID": "R01-A",
+        }]
+        assigned = shipping_store.sync_serial_reservations(
+            desired=desired,
+            live_serials=live,
+            evaluated_at=first,
+            policy_version=5,
+        )
+        self.assertEqual(assigned["assigned"], 1)
+        self.assertEqual(shipping_store.serial_reservations_for_gate()[0]["serial_no"], "SER-1")
+
+        second = datetime(2026, 8, 28, 16, 0, tzinfo=timezone.utc).isoformat()
+        kept = shipping_store.sync_serial_reservations(
+            desired=desired,
+            live_serials=live,
+            evaluated_at=second,
+            policy_version=5,
+        )
+        row = shipping_store.serial_reservations_for_gate()[0]
+        self.assertEqual(kept["kept"], 1)
+        self.assertEqual(row["first_assigned_at"], first)
+        self.assertEqual(row["last_verified_at"], second)
+
+        third = datetime(2026, 8, 29, 16, 0, tzinfo=timezone.utc).isoformat()
+        fulfilled = shipping_store.sync_serial_reservations(
+            desired=[],
+            live_serials=[],
+            evaluated_at=third,
+            policy_version=5,
+        )
+        self.assertEqual(fulfilled["fulfilled"], 1)
+        self.assertEqual(shipping_store.serial_reservations_for_gate(), [])
+        self.assertEqual(shipping_store.recent_serial_reservations()[0]["status"], "fulfilled")
+
 
 if __name__ == "__main__":
     unittest.main()

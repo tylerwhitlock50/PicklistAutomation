@@ -245,6 +245,214 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertEqual(result["mode"], "enforced")
         self.assertEqual(result["policy_version"], 7)
 
+    def test_major_account_uses_one_active_sales_order(self):
+        rows = [
+            candidate("SO-OLD", open_qty=50, available=42, customer="MAJOR", promise=date(2026, 9, 1)),
+            candidate("SO-NEW", open_qty=10, available=42, customer="MAJOR", promise=date(2026, 9, 2)),
+        ]
+        result = self.build(
+            rows,
+            customer_policies={
+                "MAJOR": {
+                    "account_type": "major",
+                    "accumulate": True,
+                    "target_guns": 42,
+                    "mix_orders": False,
+                    "max_hold_days": 7,
+                }
+            },
+        )
+        self.assertEqual(decision(result, "SO-OLD")["reason_code"], "accumulation_target_reached")
+        self.assertEqual(
+            decision(result, "SO-NEW")["reason_code"],
+            "waiting_for_prior_major_order",
+        )
+
+    def test_major_account_releases_complete_remainder_below_target(self):
+        result = self.build(
+            [candidate("SO-OLD", open_qty=20, available=20, customer="MAJOR")],
+            customer_policies={
+                "MAJOR": {
+                    "account_type": "major",
+                    "accumulate": True,
+                    "target_guns": 42,
+                    "mix_orders": False,
+                }
+            },
+        )
+        row = decision(result, "SO-OLD")
+        self.assertEqual((row["decision"], row["reason_code"]), ("RELEASE", "complete"))
+
+    def test_default_standard_policy_releases_one_ship_to_batch_at_cutoff(self):
+        rows = [
+            candidate("SO-1", part="GUN-A", open_qty=4, available=4, customer="STORE", SHIP_TO_ID="MAIN"),
+            candidate("SO-2", part="GUN-B", open_qty=2, available=2, customer="STORE", SHIP_TO_ID="MAIN"),
+        ]
+        policy = {
+            "DEFAULT": {
+                "account_type": "standard",
+                "accumulate": True,
+                "mix_orders": True,
+                "release_cadence": "daily",
+                "daily_release_time": "14:00",
+                "max_hold_days": 7,
+            }
+        }
+        before = self.build(
+            rows,
+            customer_policies=policy,
+            local_now=datetime(2026, 8, 27, 13, 59, tzinfo=timezone.utc),
+        )
+        self.assertEqual(before["summary"]["accumulating"], 2)
+        after = self.build(
+            rows,
+            customer_policies=policy,
+            local_now=datetime(2026, 8, 27, 14, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(after["summary"]["release"], 2)
+        self.assertTrue(all(row["reason_code"] == "daily_customer_batch" for row in after["decisions"]))
+
+    def test_ship_to_shipped_today_accumulates_until_tomorrow(self):
+        result = self.build(
+            [candidate("SO-1", open_qty=2, available=2, customer="STORE", SHIP_TO_ID="MAIN")],
+            customer_policies={
+                "DEFAULT": {
+                    "account_type": "standard",
+                    "accumulate": True,
+                    "mix_orders": True,
+                    "release_cadence": "daily",
+                    "daily_release_time": "14:00",
+                    "ship_to_cooldown_days": 1,
+                }
+            },
+            ship_to_history=[{
+                "CUSTOMER_ID": "STORE",
+                "SHIP_TO_ID": "MAIN",
+                "LAST_SHIPPED_DATE": TODAY,
+            }],
+            local_now=datetime(2026, 8, 27, 15, 0, tzinfo=timezone.utc),
+        )
+        row = decision(result, "SO-1")
+        self.assertEqual((row["decision"], row["reason_code"]), (
+            "ACCUMULATING", "ship_to_cooldown"
+        ))
+        self.assertEqual(row["last_ship_to_shipment_date"], "2026-08-27")
+        self.assertEqual(row["next_ship_to_eligible_date"], "2026-08-28")
+        self.assertEqual(row["next_release_date"], "2026-08-28")
+        self.assertEqual(result["summary"]["ship_to_cooldown"], 1)
+
+    def test_three_day_cooldown_blocks_only_the_matching_ship_to(self):
+        rows = [
+            candidate("SO-MAIN", part="GUN-A", customer="STORE", SHIP_TO_ID="MAIN"),
+            candidate("SO-ALT", part="GUN-B", customer="STORE", SHIP_TO_ID="ALT"),
+        ]
+        result = self.build(
+            rows,
+            customer_policies={
+                "DEFAULT": {
+                    "account_type": "standard",
+                    "accumulate": True,
+                    "mix_orders": True,
+                    "release_cadence": "daily",
+                    "daily_release_time": "14:00",
+                    "ship_to_cooldown_days": 3,
+                }
+            },
+            ship_to_history=[{
+                "CUSTOMER_ID": "STORE",
+                "SHIP_TO_ID": "MAIN",
+                "LAST_SHIPPED_DATE": TODAY,
+            }],
+            local_now=datetime(2026, 8, 27, 15, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(decision(result, "SO-MAIN")["next_release_date"], "2026-08-30")
+        self.assertEqual(decision(result, "SO-MAIN")["reason_code"], "ship_to_cooldown")
+        self.assertEqual(decision(result, "SO-ALT")["reason_code"], "daily_customer_batch")
+
+    def test_approved_exception_overrides_ship_to_cooldown(self):
+        result = self.build(
+            [candidate("SO-1", customer="STORE", SHIP_TO_ID="MAIN")],
+            customer_policies={
+                "DEFAULT": {"accumulate": True, "ship_to_cooldown_days": 3}
+            },
+            ship_to_history=[{
+                "CUSTOMER_ID": "STORE",
+                "SHIP_TO_ID": "MAIN",
+                "LAST_SHIPPED_DATE": TODAY,
+            }],
+            exceptions=[{
+                "cust_order_id": "SO-1",
+                "expires_at": TODAY + timedelta(days=1),
+                "revoked_at": None,
+            }],
+        )
+        self.assertEqual(decision(result, "SO-1")["reason_code"], "approved_exception")
+
+    def test_seven_day_old_reservation_releases_available_remainder(self):
+        started = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+        result = self.build(
+            [candidate("SO-MAJOR", open_qty=100, available=1, customer="MAJOR")],
+            customer_policies={
+                "MAJOR": {
+                    "account_type": "major",
+                    "accumulate": True,
+                    "target_guns": 42,
+                    "mix_orders": False,
+                    "max_hold_days": 7,
+                }
+            },
+            serial_inventory=[{"SERIAL_NO": "SER-1", "PART_ID": "GUN-A"}],
+            reservations=[{
+                "serial_no": "SER-1",
+                "part_id": "GUN-A",
+                "cust_order_id": "SO-MAJOR",
+                "customer_id": "MAJOR",
+                "status": "active",
+                "first_assigned_at": started.isoformat(),
+                "accumulation_started_at": started.isoformat(),
+            }],
+            local_now=datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc),
+        )
+        row = decision(result, "SO-MAJOR")
+        self.assertEqual((row["decision"], row["reason_code"]), ("RELEASE", "maximum_hold_reached"))
+        self.assertEqual(row["reservation_age_days"], 7)
+
+    def test_sticky_serial_reservation_prevents_new_urgent_order_cutting_in(self):
+        started = datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc)
+        result = self.build(
+            [
+                candidate("SO-URGENT", available=1, customer="OTHER", promise=TODAY),
+                candidate("SO-MAJOR", open_qty=2, available=1, customer="MAJOR", promise=date(2026, 9, 2)),
+            ],
+            customer_policies={"MAJOR": {"account_type": "major", "accumulate": True, "target_guns": 42, "mix_orders": False}},
+            serial_inventory=[{"SERIAL_NO": "SER-1", "PART_ID": "GUN-A"}],
+            reservations=[{
+                "serial_no": "SER-1",
+                "part_id": "GUN-A",
+                "cust_order_id": "SO-MAJOR",
+                "customer_id": "MAJOR",
+                "status": "active",
+                "first_assigned_at": started.isoformat(),
+                "accumulation_started_at": started.isoformat(),
+            }],
+        )
+        self.assertEqual(decision(result, "SO-URGENT")["reason_code"], "no_supply")
+        self.assertEqual(decision(result, "SO-MAJOR")["protected_guns"], 1)
+
+    def test_new_serials_are_attached_to_protected_order(self):
+        result = self.build(
+            [candidate("SO-MAJOR", open_qty=10, available=2, customer="MAJOR")],
+            customer_policies={"MAJOR": {"account_type": "major", "accumulate": True, "target_guns": 42, "mix_orders": False}},
+            serial_inventory=[
+                {"SERIAL_NO": "SER-1", "PART_ID": "GUN-A", "LOCATION_ID": "R01-A"},
+                {"SERIAL_NO": "SER-2", "PART_ID": "GUN-A", "LOCATION_ID": "R01-A"},
+            ],
+        )
+        row = decision(result, "SO-MAJOR")
+        self.assertEqual(row["decision"], "ACCUMULATING")
+        self.assertEqual({item["serial_no"] for item in row["serial_assignments"]}, {"SER-1", "SER-2"})
+        self.assertEqual(result["summary"]["tracked_serials"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

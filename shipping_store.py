@@ -68,6 +68,31 @@ def initialize(get_conn: Callable[[], sqlite3.Connection]) -> None:
             CREATE INDEX IF NOT EXISTS idx_release_exceptions_order
                 ON release_gate_exceptions(cust_order_id, expires_at, revoked_at);
 
+            CREATE TABLE IF NOT EXISTS release_gate_serial_reservations (
+                serial_no TEXT PRIMARY KEY,
+                part_id TEXT NOT NULL,
+                customer_id TEXT,
+                cust_order_id TEXT NOT NULL,
+                line_no TEXT,
+                first_assigned_at TEXT NOT NULL,
+                accumulation_started_at TEXT NOT NULL,
+                last_verified_at TEXT NOT NULL,
+                warehouse_id TEXT,
+                location_id TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                invalidated_at TEXT,
+                invalid_reason TEXT,
+                released_at TEXT,
+                released_run_id INTEGER,
+                policy_version INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_release_serial_reservations_order
+                ON release_gate_serial_reservations(status, cust_order_id, part_id);
+
+            CREATE INDEX IF NOT EXISTS idx_release_serial_reservations_customer
+                ON release_gate_serial_reservations(status, customer_id, first_assigned_at);
+
             CREATE TABLE IF NOT EXISTS shipping_metric_snapshots (
                 snapshot_date TEXT NOT NULL,
                 period_days INTEGER NOT NULL,
@@ -311,6 +336,197 @@ def revoke_exception(exception_id: int, revoked_by: str) -> bool:
         )
         conn.commit()
         return cursor.rowcount == 1
+    finally:
+        _close_if_owned(conn)
+
+
+def serial_reservations_for_gate() -> list[dict[str, Any]]:
+    """Return sticky serial assignments still protecting eligible inventory."""
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM release_gate_serial_reservations
+            WHERE status = 'active'
+            ORDER BY first_assigned_at, serial_no
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        _close_if_owned(conn)
+
+
+def recent_serial_reservations(limit: int = 250) -> list[dict[str, Any]]:
+    """Reservation audit feed for management views and troubleshooting."""
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM release_gate_serial_reservations
+            ORDER BY last_verified_at DESC, serial_no
+            LIMIT ?
+            """,
+            (max(1, min(int(limit), 2000)),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        _close_if_owned(conn)
+
+
+def sync_serial_reservations(
+    *,
+    desired: list[dict[str, Any]],
+    live_serials: list[dict[str, Any]],
+    evaluated_at: str,
+    policy_version: int,
+) -> dict[str, int]:
+    """Reconcile sticky local assignments with a fresh read-only ERP serial snapshot.
+
+    A valid assignment keeps its original timestamps. A serial is freed only when it
+    leaves eligible ERP inventory or the current policy evaluation no longer assigns it
+    to that order. Reassignments are retained in this table as invalidated history until
+    the serial is selected again, at which point the row becomes active with a new
+    ``first_assigned_at`` while the order's original accumulation clock is preserved.
+    """
+    live_by_serial: dict[str, dict[str, Any]] = {}
+    for raw in live_serials:
+        serial = str(raw.get("serial_no") or raw.get("SERIAL_NO") or "").strip().upper()
+        if not serial:
+            continue
+        live_by_serial[serial] = raw
+
+    desired_by_serial: dict[str, dict[str, Any]] = {}
+    for raw in desired:
+        serial = str(raw.get("serial_no") or "").strip().upper()
+        order_id = str(raw.get("cust_order_id") or raw.get("order_id") or "").strip().upper()
+        part_id = str(raw.get("part_id") or "").strip().upper()
+        if serial and order_id and part_id and serial in live_by_serial:
+            desired_by_serial[serial] = {**raw, "cust_order_id": order_id, "part_id": part_id}
+
+    counts = {"kept": 0, "assigned": 0, "invalidated": 0, "fulfilled": 0}
+    conn = _conn()
+    try:
+        existing_rows = conn.execute(
+            "SELECT * FROM release_gate_serial_reservations"
+        ).fetchall()
+        existing = {str(row["serial_no"]).upper(): dict(row) for row in existing_rows}
+
+        for serial, row in existing.items():
+            if row["status"] != "active":
+                continue
+            if serial not in live_by_serial:
+                conn.execute(
+                    """
+                    UPDATE release_gate_serial_reservations
+                    SET status = 'fulfilled', invalidated_at = ?,
+                        invalid_reason = 'left eligible ERP inventory', last_verified_at = ?
+                    WHERE serial_no = ? AND status = 'active'
+                    """,
+                    (evaluated_at, evaluated_at, serial),
+                )
+                counts["fulfilled"] += 1
+            elif serial not in desired_by_serial:
+                conn.execute(
+                    """
+                    UPDATE release_gate_serial_reservations
+                    SET status = 'invalidated', invalidated_at = ?,
+                        invalid_reason = 'no longer selected by release policy',
+                        last_verified_at = ?
+                    WHERE serial_no = ? AND status = 'active'
+                    """,
+                    (evaluated_at, evaluated_at, serial),
+                )
+                counts["invalidated"] += 1
+
+        for serial, row in desired_by_serial.items():
+            live = live_by_serial[serial]
+            prior = existing.get(serial)
+            same_active_assignment = bool(
+                prior
+                and prior.get("status") == "active"
+                and str(prior.get("cust_order_id") or "").upper() == row["cust_order_id"]
+                and str(prior.get("part_id") or "").upper() == row["part_id"]
+            )
+            if same_active_assignment:
+                conn.execute(
+                    """
+                    UPDATE release_gate_serial_reservations
+                    SET customer_id = ?, line_no = ?, last_verified_at = ?,
+                        warehouse_id = ?, location_id = ?, policy_version = ?,
+                        invalidated_at = NULL, invalid_reason = NULL
+                    WHERE serial_no = ?
+                    """,
+                    (
+                        row.get("customer_id"),
+                        row.get("line_no"),
+                        evaluated_at,
+                        live.get("warehouse_id") or live.get("WAREHOUSE_ID"),
+                        live.get("location_id") or live.get("LOCATION_ID"),
+                        int(policy_version),
+                        serial,
+                    ),
+                )
+                counts["kept"] += 1
+                continue
+
+            order_clock = conn.execute(
+                """
+                SELECT MIN(accumulation_started_at) AS started_at
+                FROM release_gate_serial_reservations
+                WHERE cust_order_id = ?
+                """,
+                (row["cust_order_id"],),
+            ).fetchone()["started_at"]
+            first_assigned = str(row.get("first_assigned_at") or evaluated_at)
+            accumulation_started = str(
+                row.get("accumulation_started_at") or order_clock or first_assigned
+            )
+            conn.execute(
+                """
+                INSERT INTO release_gate_serial_reservations
+                    (serial_no, part_id, customer_id, cust_order_id, line_no,
+                     first_assigned_at, accumulation_started_at, last_verified_at,
+                     warehouse_id, location_id, status, invalidated_at,
+                     invalid_reason, released_at, released_run_id, policy_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL, NULL, NULL, NULL, ?)
+                ON CONFLICT(serial_no) DO UPDATE SET
+                    part_id = excluded.part_id,
+                    customer_id = excluded.customer_id,
+                    cust_order_id = excluded.cust_order_id,
+                    line_no = excluded.line_no,
+                    first_assigned_at = excluded.first_assigned_at,
+                    accumulation_started_at = excluded.accumulation_started_at,
+                    last_verified_at = excluded.last_verified_at,
+                    warehouse_id = excluded.warehouse_id,
+                    location_id = excluded.location_id,
+                    status = 'active',
+                    invalidated_at = NULL,
+                    invalid_reason = NULL,
+                    released_at = NULL,
+                    released_run_id = NULL,
+                    policy_version = excluded.policy_version
+                """,
+                (
+                    serial,
+                    row["part_id"],
+                    row.get("customer_id"),
+                    row["cust_order_id"],
+                    row.get("line_no"),
+                    first_assigned,
+                    accumulation_started,
+                    evaluated_at,
+                    live.get("warehouse_id") or live.get("WAREHOUSE_ID"),
+                    live.get("location_id") or live.get("LOCATION_ID"),
+                    int(policy_version),
+                ),
+            )
+            counts["assigned"] += 1
+
+        conn.commit()
+        return counts
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         _close_if_owned(conn)
 

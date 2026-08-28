@@ -16,7 +16,7 @@ from decimal import Decimal
 from email.message import EmailMessage
 from functools import wraps
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pandas as pd
@@ -194,11 +194,18 @@ SHIPPING_METRICS_CACHE_MINUTES = float(
 RELEASE_CANDIDATES_FILE = resolve_path_setting(
     os.getenv("RELEASE_CANDIDATES_FILE", "sql/release_candidates.sql")
 )
+RELEASE_SERIAL_SUPPLY_FILE = resolve_path_setting(
+    os.getenv("RELEASE_SERIAL_SUPPLY_FILE", "sql/release_serial_supply.sql")
+)
+RELEASE_SHIPTO_HISTORY_FILE = resolve_path_setting(
+    os.getenv("RELEASE_SHIPTO_HISTORY_FILE", "sql/release_shipto_history.sql")
+)
 RELEASE_GATE_CACHE_SECONDS = float(os.getenv("RELEASE_GATE_CACHE_SECONDS", "60"))
 RELEASE_GATE_FILTER_TOKEN = "__RELEASE_GATE_FILTER__"
 RELEASE_LOOKAHEAD_TOKEN = "__RELEASE_LOOKAHEAD_DAYS__"
 RELEASE_COMPONENT_CODES_TOKEN = "__COMPONENT_PRODUCT_CODES__"
 RELEASE_EXCLUDED_CUSTOMERS_TOKEN = "__RELEASE_EXCLUDED_CUSTOMERS__"
+RELEASE_SERIAL_PART_FILTER_TOKEN = "__RELEASE_SERIAL_PART_FILTER__"
 # Allocation screen: per-SKU supply/demand model + Promise Del Date editing.
 ALLOC_SUPPLY_FILE = resolve_path_setting(
     os.getenv("ALLOC_SUPPLY_FILE", "sql/alloc_supply.sql")
@@ -975,7 +982,14 @@ def fetch_picklist_from_mssql(
     gate_payload = None
     gate_mode = get_release_gate_mode()
     if gate_mode != "off":
-        gate_payload = build_release_gate_payload(query_options=query_options)
+        # A generated picklist is the operational boundary: bypass the dashboard cache
+        # and revalidate sticky serial reservations against live ERP immediately before
+        # released order IDs are injected into the allocation SQL.
+        gate_payload = build_release_gate_payload(
+            force=True,
+            query_options=query_options,
+            require_serial_tracking=gate_mode == "enforced",
+        )
         if gate_payload.get("error") and gate_mode == "enforced":
             raise RuntimeError(
                 "Release gate is enforced but could not be evaluated: "
@@ -994,6 +1008,8 @@ def fetch_picklist_from_mssql(
     engine = get_erp_engine()
     with engine.connect() as connection:
         df = pd.read_sql_query(query, connection)
+    if gate_payload is not None:
+        df.attrs["release_gate_payload"] = gate_payload
         if gate_payload and not gate_payload.get("error") and not df.empty:
             decision_map = {
                 str(row["order_id"]).strip().upper(): row
@@ -1247,6 +1263,12 @@ def parse_release_gate_customer_policies(raw: Any) -> dict[str, dict[str, Any]]:
         if not customer or not isinstance(policy, dict):
             raise ValueError("Each customer release policy must be an object.")
         normalized: dict[str, Any] = {}
+        account_type = policy.get("account_type")
+        if account_type not in (None, ""):
+            account_type_value = str(account_type).strip().lower()
+            if account_type_value not in {"major", "standard"}:
+                raise ValueError(f"{customer}: account_type must be major or standard.")
+            normalized["account_type"] = account_type_value
         accumulate = policy.get("accumulate", False)
         if not isinstance(accumulate, bool):
             raise ValueError(f"{customer}: accumulate must be true or false.")
@@ -1258,6 +1280,55 @@ def parse_release_gate_customer_policies(raw: Any) -> dict[str, dict[str, Any]]:
         if min_guns < 0:
             raise ValueError(f"{customer}: min_guns must be zero or greater.")
         normalized["min_guns"] = min_guns
+        if "target_guns" in policy:
+            try:
+                target_guns = int(policy.get("target_guns", 0))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{customer}: target_guns must be a whole number.") from exc
+            if target_guns < 0:
+                raise ValueError(f"{customer}: target_guns must be zero or greater.")
+            normalized["target_guns"] = target_guns
+        if "mix_orders" in policy:
+            mix_orders = policy.get("mix_orders")
+            if not isinstance(mix_orders, bool):
+                raise ValueError(f"{customer}: mix_orders must be true or false.")
+            normalized["mix_orders"] = mix_orders
+        if "release_cadence" in policy:
+            cadence = str(policy.get("release_cadence") or "").strip().lower()
+            if cadence not in {"threshold", "daily", "completion"}:
+                raise ValueError(
+                    f"{customer}: release_cadence must be threshold, daily, or completion."
+                )
+            normalized["release_cadence"] = cadence
+        if "daily_release_time" in policy:
+            daily_release_time = str(policy.get("daily_release_time") or "").strip()
+            try:
+                parsed_release_time = datetime.strptime(daily_release_time, "%H:%M")
+            except ValueError as exc:
+                raise ValueError(
+                    f"{customer}: daily_release_time must use 24-hour HH:MM format."
+                ) from exc
+            normalized["daily_release_time"] = parsed_release_time.strftime("%H:%M")
+        if "max_hold_days" in policy:
+            try:
+                max_hold_days = int(policy.get("max_hold_days", 7))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{customer}: max_hold_days must be a whole number.") from exc
+            if max_hold_days < 0 or max_hold_days > 90:
+                raise ValueError(f"{customer}: max_hold_days must be from 0 to 90.")
+            normalized["max_hold_days"] = max_hold_days
+        if "ship_to_cooldown_days" in policy:
+            try:
+                cooldown_days = int(policy.get("ship_to_cooldown_days", 0))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"{customer}: ship_to_cooldown_days must be a whole number."
+                ) from exc
+            if cooldown_days < 0 or cooldown_days > 30:
+                raise ValueError(
+                    f"{customer}: ship_to_cooldown_days must be from 0 to 30."
+                )
+            normalized["ship_to_cooldown_days"] = cooldown_days
         sweep = policy.get("sweep_weekday")
         if sweep not in (None, ""):
             try:
@@ -2679,6 +2750,7 @@ def settings():
         get_config_value("smtp_use_tls", "SMTP_USE_TLS", default="true"),
         default=True,
     )
+    release_policies = get_release_gate_customer_policies()
 
     return render_template(
         "settings.html",
@@ -2719,8 +2791,9 @@ def settings():
         release_gate_mode=get_release_gate_mode(),
         release_gate_due_override_days=get_release_gate_due_override_days(),
         release_gate_customer_policies_json=json.dumps(
-            get_release_gate_customer_policies(), indent=2, sort_keys=True
+            release_policies, indent=2, sort_keys=True
         ),
+        release_gate_customer_policies=release_policies,
     )
 
 
@@ -4381,9 +4454,49 @@ def _fetch_release_candidate_rows(
     return df.to_dict(orient="records")
 
 
+def _fetch_release_serial_rows(part_ids: Iterable[str]) -> list[dict]:
+    if not RELEASE_SERIAL_SUPPLY_FILE.exists():
+        raise FileNotFoundError(
+            f"Release serial-supply query not found at: {RELEASE_SERIAL_SUPPLY_FILE}"
+        )
+    parts = sorted({str(part).strip().upper() for part in part_ids if str(part).strip()})
+    template = RELEASE_SERIAL_SUPPLY_FILE.read_text(encoding="utf-8")
+    if RELEASE_SERIAL_PART_FILTER_TOKEN not in template:
+        raise ValueError(
+            f"Release serial query must contain {RELEASE_SERIAL_PART_FILTER_TOKEN}."
+        )
+    if parts:
+        literals = ", ".join(sql_quote_literal(part) for part in parts)
+        part_filter = f"AND tit.PART_ID IN ({literals})"
+    else:
+        part_filter = "AND 1 = 0"
+    query = template.replace(RELEASE_SERIAL_PART_FILTER_TOKEN, part_filter)
+    engine = get_erp_engine()
+    logger.info("Running release-gate serial supply query")
+    with engine.connect() as connection:
+        df = pd.read_sql_query(query, connection)
+    logger.info("Release serial-supply query returned %d rows.", len(df.index))
+    return df.to_dict(orient="records")
+
+
+def _fetch_release_shipto_history_rows() -> list[dict]:
+    if not RELEASE_SHIPTO_HISTORY_FILE.exists():
+        raise FileNotFoundError(
+            f"Release ship-to history query not found at: {RELEASE_SHIPTO_HISTORY_FILE}"
+        )
+    query = RELEASE_SHIPTO_HISTORY_FILE.read_text(encoding="utf-8")
+    engine = get_erp_engine()
+    logger.info("Running release-gate ship-to history query")
+    with engine.connect() as connection:
+        df = pd.read_sql_query(query, connection)
+    logger.info("Release ship-to history query returned %d rows.", len(df.index))
+    return df.to_dict(orient="records")
+
+
 def build_release_gate_payload(
     force: bool = False,
     query_options: Optional[dict[str, Any]] = None,
+    require_serial_tracking: bool = False,
 ) -> dict[str, Any]:
     policy = ensure_release_gate_policy_version()
     signature = json.dumps(
@@ -4401,9 +4514,42 @@ def build_release_gate_payload(
     ):
         return _release_gate_cache["payload"]
 
-    source_as_of = datetime.now(timezone.utc).isoformat()
+    evaluated_at = datetime.now(timezone.utc)
+    source_as_of = evaluated_at.isoformat()
     try:
         rows = _fetch_release_candidate_rows(query_options=query_options)
+        gun_parts = {
+            str(row.get("PART_ID") or "").strip().upper()
+            for row in rows
+            if str(row.get("ITEM_TYPE") or "guns").strip().lower() == "guns"
+            and float(row.get("AVAILABLE_QTY") or 0) > 0
+            and str(row.get("PART_ID") or "").strip()
+        }
+        try:
+            serial_rows: Optional[list[dict]] = _fetch_release_serial_rows(gun_parts)
+            serial_error = None
+        except Exception as serial_exc:  # noqa: BLE001 - advisory may show quantity fallback
+            logger.exception("Release-gate serial supply query failed")
+            serial_rows = None
+            serial_error = str(serial_exc)
+            if require_serial_tracking:
+                raise RuntimeError(
+                    "Live serial reservation validation is required for enforced picklists: "
+                    f"{serial_exc}"
+                ) from serial_exc
+        try:
+            ship_to_history: Optional[list[dict]] = _fetch_release_shipto_history_rows()
+            ship_to_history_error = None
+        except Exception as ship_to_exc:  # noqa: BLE001 - advisory exposes degraded check
+            logger.exception("Release-gate ship-to history query failed")
+            ship_to_history = None
+            ship_to_history_error = str(ship_to_exc)
+            if require_serial_tracking:
+                raise RuntimeError(
+                    "Live ship-to cooldown validation is required for enforced picklists: "
+                    f"{ship_to_exc}"
+                ) from ship_to_exc
+        existing_reservations = shipping_store.serial_reservations_for_gate()
         payload = release_gate.evaluate_release_gate(
             rows,
             today=_today_local(),
@@ -4411,8 +4557,26 @@ def build_release_gate_payload(
             due_override_days=policy["due_override_days"],
             customer_policies=policy["customer_policies"],
             exceptions=shipping_store.active_exceptions(),
+            serial_inventory=serial_rows,
+            reservations=existing_reservations,
+            ship_to_history=ship_to_history,
+            local_now=evaluated_at.astimezone(resolve_timezone()),
             policy_version=policy["version"],
+            evaluated_at=evaluated_at,
         )
+        if serial_rows is not None:
+            payload["reservation_sync"] = shipping_store.sync_serial_reservations(
+                desired=payload.get("reservation_updates") or [],
+                live_serials=serial_rows,
+                evaluated_at=payload["evaluated_at"],
+                policy_version=policy["version"],
+            )
+        else:
+            payload["reservation_sync"] = None
+        payload["serial_tracking_error"] = serial_error
+        payload["ship_to_tracking_available"] = ship_to_history is not None
+        payload["ship_to_tracking_error"] = ship_to_history_error
+        payload["serial_reservations"] = shipping_store.recent_serial_reservations()
         payload["source_as_of"] = source_as_of
         payload["error"] = None
         payload["active_exceptions"] = shipping_store.active_exceptions()
@@ -4441,6 +4605,12 @@ def build_release_gate_payload(
             "released_orders": [],
             "decisions": [],
             "active_exceptions": shipping_store.active_exceptions(),
+            "serial_tracking_available": False,
+            "serial_tracking_error": str(exc),
+            "ship_to_tracking_available": False,
+            "ship_to_tracking_error": str(exc),
+            "serial_reservations": shipping_store.recent_serial_reservations(),
+            "reservation_updates": [],
             "error": str(exc),
         }
     _release_gate_cache.update(

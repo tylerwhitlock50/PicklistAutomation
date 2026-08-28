@@ -63,6 +63,7 @@ SELECT
     col.LINE_NO,
     co.CUSTOMER_ID,
     c.NAME AS CUSTOMER_NAME,
+    co.SHIPTO_ID AS SHIP_TO_ID,
     co.ORDER_DATE,
     col.PART_ID,
     p.PRODUCT_CODE,

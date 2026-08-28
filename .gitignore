@@ -6,4 +6,5 @@ __pycache__/
 picklist_history.db
 data/*.db
 exports/*.xlsx
+exports/*.png
 logs/*.log

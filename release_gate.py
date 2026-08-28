@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import calendar
 from copy import deepcopy
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as clock_time, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Iterable, Optional
 
@@ -116,6 +116,7 @@ def _normalize_candidates(rows: Iterable[dict]) -> tuple[dict[str, dict], dict[s
                 "order_id": order_id,
                 "customer_id": _text(_get(row, "CUSTOMER_ID", "customer_id")),
                 "customer_name": _text(_get(row, "CUSTOMER_NAME", "customer_name")),
+                "ship_to_id": _text(_get(row, "SHIP_TO_ID", "ship_to_id")),
                 "order_date": _as_date(_get(row, "ORDER_DATE", "order_date")),
                 "promise_del": _as_date(
                     _get(row, "PROMISE_DEL_DATE", "promise_del_date")
@@ -193,7 +194,14 @@ def _is_at_risk(order: dict, today: date, due_override_days: int) -> bool:
 
 def _policy_values(policy: dict) -> tuple[bool, float, Optional[int]]:
     accumulate = _bool(policy.get("accumulate"))
-    min_guns = max(0.0, _num(policy.get("min_guns")))
+    min_guns = max(
+        0.0,
+        _num(
+            policy.get("target_guns")
+            if policy.get("target_guns") not in (None, "")
+            else policy.get("min_guns")
+        ),
+    )
     sweep_weekday_raw = policy.get("sweep_weekday")
     sweep_weekday = None
     if sweep_weekday_raw not in (None, ""):
@@ -206,12 +214,74 @@ def _policy_values(policy: dict) -> tuple[bool, float, Optional[int]]:
     return accumulate, min_guns, sweep_weekday
 
 
-def _allocate(order: dict, remaining: dict[str, float], require_complete: bool) -> dict:
+def _policy_profile(policy: dict) -> dict[str, Any]:
+    accumulate, target_guns, sweep_weekday = _policy_values(policy)
+    account_type = str(policy.get("account_type") or "").strip().lower()
+    if account_type not in {"major", "standard"}:
+        account_type = "major" if accumulate else "standard"
+    cadence = str(policy.get("release_cadence") or "").strip().lower()
+    if cadence not in {"threshold", "daily", "completion"}:
+        cadence = "threshold" if target_guns > EPSILON or sweep_weekday is not None else "completion"
+    mix_default = account_type != "major"
+    mix_orders = _bool(policy.get("mix_orders"), default=mix_default)
+    release_time_raw = str(policy.get("daily_release_time") or "14:00").strip()
+    try:
+        release_time = clock_time.fromisoformat(release_time_raw)
+    except ValueError:
+        release_time = clock_time(14, 0)
+        release_time_raw = "14:00"
+    try:
+        max_hold_days = max(0, int(policy.get("max_hold_days", 7)))
+    except (TypeError, ValueError):
+        max_hold_days = 7
+    try:
+        ship_to_cooldown_days = max(0, int(policy.get("ship_to_cooldown_days", 0)))
+    except (TypeError, ValueError):
+        ship_to_cooldown_days = 0
+    return {
+        "account_type": account_type,
+        "accumulate": accumulate,
+        "target_guns": target_guns,
+        "sweep_weekday": sweep_weekday,
+        "mix_orders": mix_orders,
+        "release_cadence": cadence,
+        "daily_release_time": release_time_raw,
+        "daily_release_clock": release_time,
+        "max_hold_days": min(max_hold_days, 90),
+        "ship_to_cooldown_days": min(ship_to_cooldown_days, 30),
+    }
+
+
+def _as_datetime(value: Any) -> Optional[datetime]:
+    if _is_missing(value):
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime.combine(value, clock_time.min, tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _allocate(
+    order: dict,
+    remaining: dict[str, float],
+    require_complete: bool,
+    reserved: Optional[dict[str, float]] = None,
+) -> dict:
     trial = deepcopy(remaining)
+    reserved = reserved or {}
     allocations = []
     for line in order["lines"]:
         available = max(0.0, trial.get(line["part_id"], 0.0))
-        qty = min(line["open_qty"], available)
+        reserved_qty = min(
+            line["open_qty"], max(0.0, reserved.get(line["part_id"], 0.0))
+        )
+        new_qty = min(max(0.0, line["open_qty"] - reserved_qty), available)
+        qty = reserved_qty + new_qty
         if require_complete and qty < line["open_qty"] - EPSILON:
             return {
                 "complete": False,
@@ -220,9 +290,17 @@ def _allocate(order: dict, remaining: dict[str, float], require_complete: bool) 
                 "allocations": [],
                 "remaining": remaining,
             }
+        if new_qty > EPSILON:
+            trial[line["part_id"]] = available - new_qty
         if qty > EPSILON:
-            trial[line["part_id"]] = available - qty
-            allocations.append({**line, "qty": qty})
+            allocations.append(
+                {
+                    **line,
+                    "qty": qty,
+                    "reserved_qty": reserved_qty,
+                    "new_qty": new_qty,
+                }
+            )
     ready_qty = sum(row["qty"] for row in allocations)
     ready_guns = sum(row["qty"] for row in allocations if row["item_type"] == "guns")
     return {
@@ -256,6 +334,10 @@ def evaluate_release_gate(
     due_override_days: int = 1,
     customer_policies: Optional[dict[str, dict]] = None,
     exceptions: Iterable[dict] = (),
+    serial_inventory: Optional[Iterable[dict]] = None,
+    reservations: Iterable[dict] = (),
+    ship_to_history: Optional[Iterable[dict]] = None,
+    local_now: Optional[datetime] = None,
     policy_version: int = 1,
     evaluated_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
@@ -267,8 +349,150 @@ def evaluate_release_gate(
         raise ValueError("due_override_days must be zero or greater")
 
     orders, supply = _normalize_candidates(rows)
-    remaining = deepcopy(supply)
     policies = {str(key).upper(): value for key, value in (customer_policies or {}).items()}
+    default_policy = policies.get("DEFAULT", {})
+
+    def policy_for(order: dict) -> dict:
+        result = dict(default_policy)
+        result.update(policies.get(_customer_key(order), {}))
+        return result
+
+    evaluated = evaluated_at or datetime.now(timezone.utc)
+    if evaluated.tzinfo is None:
+        evaluated = evaluated.replace(tzinfo=timezone.utc)
+    local_clock = local_now or evaluated
+    if local_clock.tzinfo is None:
+        local_clock = local_clock.replace(tzinfo=timezone.utc)
+
+    ship_to_tracking_available = ship_to_history is not None
+    last_shipments: dict[tuple[str, str], date] = {}
+    if ship_to_history is not None:
+        for raw in ship_to_history:
+            customer_id = _text(_get(raw, "CUSTOMER_ID", "customer_id")).upper()
+            ship_to_id = (
+                _text(_get(raw, "SHIP_TO_ID", "ship_to_id")) or "DEFAULT"
+            ).upper()
+            last_shipped = _as_date(
+                _get(raw, "LAST_SHIPPED_DATE", "last_shipped_date")
+            )
+            if not customer_id or last_shipped is None:
+                continue
+            key = (customer_id, ship_to_id)
+            if key not in last_shipments or last_shipped > last_shipments[key]:
+                last_shipments[key] = last_shipped
+
+    def ship_to_cooldown(order: dict, profile: dict[str, Any]) -> dict[str, Any]:
+        customer_id = _customer_key(order)
+        ship_to_id = (order.get("ship_to_id") or "DEFAULT").strip().upper()
+        last_shipped = last_shipments.get((customer_id, ship_to_id))
+        cooldown_days = int(profile.get("ship_to_cooldown_days") or 0)
+        next_eligible = (
+            last_shipped + timedelta(days=cooldown_days)
+            if last_shipped is not None and cooldown_days > 0
+            else None
+        )
+        return {
+            "days": cooldown_days,
+            "last_shipped": last_shipped,
+            "next_eligible": next_eligible,
+            "active": bool(next_eligible is not None and today < next_eligible),
+        }
+
+    serial_tracking_available = serial_inventory is not None
+    serial_rows: list[dict[str, Any]] = []
+    live_serials: set[str] = set()
+    serials_by_part: dict[str, list[dict[str, Any]]] = {}
+    if serial_inventory is not None:
+        for raw in serial_inventory:
+            serial_no = _text(_get(raw, "SERIAL_NO", "serial_no"))
+            part_id = _text(_get(raw, "PART_ID", "part_id"))
+            if not serial_no or not part_id:
+                continue
+            serial_key = serial_no.upper()
+            if serial_key in live_serials:
+                continue
+            normalized_serial = {
+                "serial_no": serial_key,
+                "part_id": part_id.upper(),
+                "warehouse_id": _text(_get(raw, "WAREHOUSE_ID", "warehouse_id")),
+                "location_id": _text(_get(raw, "LOCATION_ID", "location_id")),
+                "last_transaction_at": _text(
+                    _get(raw, "LAST_TRANSACTION_AT", "last_transaction_at")
+                ),
+            }
+            live_serials.add(serial_key)
+            serial_rows.append(normalized_serial)
+            serials_by_part.setdefault(part_id.upper(), []).append(normalized_serial)
+        for part_serials in serials_by_part.values():
+            part_serials.sort(
+                key=lambda row: (row.get("last_transaction_at") or "", row["serial_no"])
+            )
+
+        gun_parts = {
+            line["part_id"]
+            for order in orders.values()
+            for line in order["lines"]
+            if line["item_type"] == "guns"
+        }
+        for part_id in gun_parts:
+            supply[part_id] = min(
+                supply.get(part_id, 0.0), float(len(serials_by_part.get(part_id, [])))
+            )
+
+    valid_reservations: list[dict[str, Any]] = []
+    reserved_by_order_part: dict[str, dict[str, float]] = {}
+    reservation_serials_by_order_part: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    reserved_serials: set[str] = set()
+    accumulation_started_by_order: dict[str, datetime] = {}
+    for raw in reservations:
+        if str(raw.get("status") or "active").lower() != "active":
+            continue
+        serial_no = str(raw.get("serial_no") or "").strip().upper()
+        order_id = str(raw.get("cust_order_id") or raw.get("order_id") or "").strip().upper()
+        part_id = str(raw.get("part_id") or "").strip().upper()
+        if not serial_no or not order_id or not part_id or order_id not in orders:
+            continue
+        if serial_tracking_available and serial_no not in live_serials:
+            continue
+        order_parts = {line["part_id"] for line in orders[order_id]["lines"]}
+        if part_id not in order_parts or serial_no in reserved_serials:
+            continue
+        normalized = {
+            **raw,
+            "serial_no": serial_no,
+            "cust_order_id": order_id,
+            "part_id": part_id,
+        }
+        valid_reservations.append(normalized)
+        reserved_serials.add(serial_no)
+        reserved_by_order_part.setdefault(order_id, {})[part_id] = (
+            reserved_by_order_part.setdefault(order_id, {}).get(part_id, 0.0) + 1.0
+        )
+        reservation_serials_by_order_part.setdefault((order_id, part_id), []).append(
+            normalized
+        )
+        started = _as_datetime(
+            raw.get("accumulation_started_at") or raw.get("first_assigned_at")
+        )
+        if started and (
+            order_id not in accumulation_started_by_order
+            or started < accumulation_started_by_order[order_id]
+        ):
+            accumulation_started_by_order[order_id] = started
+
+    remaining = deepcopy(supply)
+    for order_parts in reserved_by_order_part.values():
+        for part_id, qty in order_parts.items():
+            remaining[part_id] = max(0.0, remaining.get(part_id, 0.0) - qty)
+
+    def allocate(order: dict, current: dict[str, float], require_complete: bool) -> dict:
+        return _allocate(
+            order,
+            current,
+            require_complete,
+            reserved=reserved_by_order_part.get(order["order_id"].upper(), {}),
+        )
+
     active_exceptions = _active_exception_map(exceptions, today)
     decisions: dict[str, dict] = {}
 
@@ -284,13 +508,20 @@ def evaluate_release_gate(
         group_ready_guns: Optional[float] = None,
         release_condition: Optional[str] = None,
         commitment_at_risk: bool = False,
+        policy_profile: Optional[dict[str, Any]] = None,
+        batch_key: Optional[str] = None,
+        reservation_age_days: Optional[int] = None,
+        accumulation_started_at: Optional[datetime] = None,
     ) -> None:
         ready_qty = allocation.get("ready_qty", 0.0)
         accumulating = decision == "ACCUMULATING"
+        cooldown_profile = policy_profile or _policy_profile(policy_for(order))
+        cooldown = ship_to_cooldown(order, cooldown_profile)
         decisions[order["order_id"].upper()] = {
             "order_id": order["order_id"],
             "customer_id": order["customer_id"],
             "customer_name": order["customer_name"],
+            "ship_to_id": order["ship_to_id"],
             "decision": decision,
             "reason_code": code,
             "label": label,
@@ -313,6 +544,23 @@ def evaluate_release_gate(
             ),
             "release_condition": release_condition,
             "commitment_at_risk": bool(commitment_at_risk),
+            "account_type": (policy_profile or {}).get("account_type"),
+            "mix_orders": (policy_profile or {}).get("mix_orders"),
+            "release_cadence": (policy_profile or {}).get("release_cadence"),
+            "max_hold_days": (policy_profile or {}).get("max_hold_days"),
+            "ship_to_cooldown_days": cooldown["days"],
+            "last_ship_to_shipment_date": (
+                cooldown["last_shipped"].isoformat() if cooldown["last_shipped"] else None
+            ),
+            "next_ship_to_eligible_date": (
+                cooldown["next_eligible"].isoformat() if cooldown["next_eligible"] else None
+            ),
+            "ship_to_cooldown_active": cooldown["active"],
+            "batch_key": batch_key,
+            "reservation_age_days": reservation_age_days,
+            "accumulation_started_at": (
+                accumulation_started_at.isoformat() if accumulation_started_at else None
+            ),
             "promise_ship": order["promise_ship"].isoformat() if order["promise_ship"] else None,
             "promise_del": order["promise_del"].isoformat() if order["promise_del"] else None,
             "next_release_date": next_release_date.isoformat() if next_release_date else None,
@@ -321,6 +569,8 @@ def evaluate_release_gate(
                     "line_no": row["line_no"],
                     "part_id": row["part_id"],
                     "qty": _round_qty(row["qty"]),
+                    "reserved_qty": _round_qty(row.get("reserved_qty", 0.0)),
+                    "new_qty": _round_qty(row.get("new_qty", row["qty"])),
                     "item_type": row["item_type"],
                 }
                 for row in allocation.get("allocations", [])
@@ -333,7 +583,7 @@ def evaluate_release_gate(
     for order in ordered:
         if not order["block_reasons"]:
             continue
-        potential = _allocate(order, supply, require_complete=False)
+        potential = allocate(order, remaining, require_complete=False)
         reasons = ", ".join(sorted(order["block_reasons"]))
         record(order, "BLOCKED", "hard_block", f"BLOCKED - {reasons}", potential)
 
@@ -347,13 +597,30 @@ def evaluate_release_gate(
             continue
         exception = active_exceptions.get(key)
         at_risk = _is_at_risk(order, today, due_override_days)
-        policy = policies.get(_customer_key(order), {})
+        policy = policy_for(order)
+        profile = _policy_profile(policy)
         accumulates = _bool(policy.get("accumulate")) and order["open_guns"] > EPSILON
         if not exception and (not at_risk or accumulates):
             continue
-        allocation = _allocate(order, remaining, require_complete=False)
+        allocation = allocate(order, remaining, require_complete=False)
         if allocation["ready_qty"] <= EPSILON:
             record(order, "HOLD", "no_supply", "HOLD - no allocatable supply", allocation)
+            continue
+        cooldown = ship_to_cooldown(order, profile)
+        if not exception and cooldown["active"]:
+            record(
+                order,
+                "HOLD",
+                "ship_to_cooldown",
+                (
+                    f"HOLD - ship-to last shipped {cooldown['last_shipped'].isoformat()}; "
+                    f"eligible {cooldown['next_eligible'].isoformat()}"
+                ),
+                allocation,
+                cooldown["next_eligible"],
+                commitment_at_risk=at_risk,
+                policy_profile=profile,
+            )
             continue
         remaining = allocation["remaining"]
         if exception:
@@ -373,28 +640,71 @@ def evaluate_release_gate(
                 allocation,
             )
 
-    # Accumulating customers receive a logical reservation while inventory remains in
-    # its shelf location. Protected quantities reduce what later customer groups can
-    # release, but the order itself does not reach the picklist until its configured
-    # target/sweep condition is met, it is complete under a completion-only policy, or
-    # it receives an exception.
-    accumulating_by_customer: dict[str, list[dict]] = {}
+    # Accumulating policies reserve serial-backed supply. Major accounts with mixing
+    # disabled expose exactly one active sales order at a time. Standard daily policies
+    # may combine orders only inside the same customer + ship-to batch.
+    major_head_by_customer: dict[str, str] = {}
+    reserved_heads = sorted(
+        accumulation_started_by_order.items(),
+        key=lambda item: (item[1], item[0]),
+    )
+    for order_id, _started in reserved_heads:
+        order = orders.get(order_id)
+        if not order or order["block_reasons"] or order["open_guns"] <= EPSILON:
+            continue
+        profile = _policy_profile(policy_for(order))
+        if profile["accumulate"] and profile["account_type"] == "major" and not profile["mix_orders"]:
+            major_head_by_customer.setdefault(_customer_key(order), order_id)
+    for order in ordered:
+        if order["block_reasons"] or order["open_guns"] <= EPSILON:
+            continue
+        profile = _policy_profile(policy_for(order))
+        if profile["accumulate"] and profile["account_type"] == "major" and not profile["mix_orders"]:
+            major_head_by_customer.setdefault(_customer_key(order), order["order_id"].upper())
+
+    accumulating_by_scope: dict[str, list[dict]] = {}
+    scope_profiles: dict[str, dict[str, Any]] = {}
     for order in ordered:
         key = order["order_id"].upper()
         if key in decisions or order["open_guns"] <= EPSILON:
             continue
+        profile = _policy_profile(policy_for(order))
+        if not profile["accumulate"]:
+            continue
         customer_key = _customer_key(order)
-        policy = policies.get(customer_key, {})
-        if _bool(policy.get("accumulate")):
-            accumulating_by_customer.setdefault(customer_key, []).append(order)
+        if (
+            profile["account_type"] == "major"
+            and not profile["mix_orders"]
+            and major_head_by_customer.get(customer_key) != key
+        ):
+            potential = allocate(order, remaining, require_complete=False)
+            record(
+                order,
+                "HOLD",
+                "waiting_for_prior_major_order",
+                f"HOLD - waiting for {major_head_by_customer[customer_key]} to clear",
+                potential,
+                policy_profile=profile,
+                batch_key=f"ORDER:{key}",
+            )
+            continue
+        if profile["account_type"] == "major" and not profile["mix_orders"]:
+            scope_key = f"ORDER:{key}"
+        elif profile["release_cadence"] == "daily":
+            scope_key = f"STORE:{customer_key}|SHIPTO:{order.get('ship_to_id') or 'DEFAULT'}"
+        else:
+            scope_key = f"CUSTOMER:{customer_key}"
+        accumulating_by_scope.setdefault(scope_key, []).append(order)
+        scope_profiles[scope_key] = profile
 
     accumulating_groups = sorted(
-        accumulating_by_customer.items(),
+        accumulating_by_scope.items(),
         key=lambda item: _priority(sorted(item[1], key=_priority)[0]),
     )
-    for customer_key, customer_orders in accumulating_groups:
-        policy = policies.get(customer_key, {})
-        _, min_guns, sweep_weekday = _policy_values(policy)
+    for scope_key, customer_orders in accumulating_groups:
+        profile = scope_profiles[scope_key]
+        target_guns = float(profile["target_guns"])
+        sweep_weekday = profile["sweep_weekday"]
         sweep_day = sweep_weekday is not None and today.weekday() == sweep_weekday
         next_sweep = None
         if sweep_weekday is not None:
@@ -404,7 +714,7 @@ def evaluate_release_gate(
         trial_remaining = deepcopy(remaining)
         accumulated: list[tuple[dict, dict]] = []
         for order in sorted(customer_orders, key=_priority):
-            allocation = _allocate(order, trial_remaining, require_complete=False)
+            allocation = allocate(order, trial_remaining, require_complete=False)
             trial_remaining = allocation["remaining"]
             accumulated.append((order, allocation))
 
@@ -412,72 +722,131 @@ def evaluate_release_gate(
             allocation["ready_guns"] for _, allocation in accumulated
         )
         threshold_reached = (
-            min_guns > EPSILON and group_ready_guns >= min_guns - EPSILON
+            target_guns > EPSILON and group_ready_guns >= target_guns - EPSILON
         )
-        group_releases = threshold_reached or sweep_day
-        unconstrained = min_guns <= EPSILON and sweep_weekday is None
+        group_complete = bool(accumulated) and all(
+            allocation["complete"] for _, allocation in accumulated
+        )
+        group_started_values = [
+            accumulation_started_by_order[order["order_id"].upper()]
+            for order, _ in accumulated
+            if order["order_id"].upper() in accumulation_started_by_order
+        ]
+        group_started = min(group_started_values) if group_started_values else None
+        reservation_age_days = None
+        aged_release = False
+        if group_started is not None:
+            started_local = group_started.astimezone(local_clock.tzinfo).date()
+            reservation_age_days = max(0, (local_clock.date() - started_local).days)
+            aged_release = reservation_age_days >= profile["max_hold_days"]
+
+        daily_release = (
+            profile["release_cadence"] == "daily"
+            and local_clock.time().replace(tzinfo=None) >= profile["daily_release_clock"]
+        )
+        completion_release = (
+            group_complete
+            and (
+                profile["release_cadence"] == "completion"
+                or (profile["account_type"] == "major" and not profile["mix_orders"])
+            )
+        )
+        group_releases = (
+            threshold_reached
+            or sweep_day
+            or daily_release
+            or aged_release
+            or completion_release
+        )
         remaining = trial_remaining
 
-        if min_guns > EPSILON and sweep_weekday is not None:
+        if profile["release_cadence"] == "daily":
             release_condition = (
-                f"Release at {_round_qty(min_guns)} protected customer guns "
-                f"or the {calendar.day_name[sweep_weekday]} sweep"
+                f"Release one customer/ship-to batch daily at {profile['daily_release_time']} "
+                f"or after {profile['max_hold_days']} days"
             )
-        elif min_guns > EPSILON:
+            next_release_date = today if not daily_release else today + timedelta(days=1)
+        elif target_guns > EPSILON:
             release_condition = (
-                f"Release at {_round_qty(min_guns)} protected customer guns"
+                f"Release at {_round_qty(target_guns)} guns, when the active order is complete, "
+                f"or after {profile['max_hold_days']} days"
             )
+            next_release_date = next_sweep
         elif sweep_weekday is not None:
             release_condition = (
-                f"Release on the {calendar.day_name[sweep_weekday]} sweep"
+                f"Release on the {calendar.day_name[sweep_weekday]} sweep or after "
+                f"{profile['max_hold_days']} days"
             )
+            next_release_date = next_sweep
         else:
-            release_condition = "Release when the order is complete"
+            release_condition = (
+                f"Release when complete or after {profile['max_hold_days']} days"
+            )
+            next_release_date = None
 
         for order, allocation in accumulated:
             at_risk = _is_at_risk(order, today, due_override_days)
-            if group_releases and allocation["ready_qty"] > EPSILON:
-                if threshold_reached:
+            cooldown = ship_to_cooldown(order, profile)
+            if (
+                group_releases
+                and not cooldown["active"]
+                and allocation["ready_qty"] > EPSILON
+            ):
+                if aged_release:
+                    code = "maximum_hold_reached"
+                    label = f"SHIP NOW - {profile['max_hold_days']}-day maximum reached"
+                elif daily_release:
+                    code = "daily_customer_batch"
+                    label = f"SHIP NOW - daily {profile['daily_release_time']} store batch"
+                elif threshold_reached:
                     code = "accumulation_target_reached"
                     label = (
                         "SHIP NOW - accumulation target reached "
                         f"({_round_qty(group_ready_guns)} guns)"
                     )
-                else:
+                elif sweep_day:
                     code = "scheduled_customer_release"
                     label = "SHIP NOW - scheduled customer release"
+                else:
+                    code = "complete"
+                    label = "SHIP NOW - active sales order complete"
                 record(
                     order,
                     "RELEASE",
                     code,
                     label,
                     allocation,
-                    target_guns=min_guns if min_guns > EPSILON else None,
+                    target_guns=target_guns if target_guns > EPSILON else None,
                     group_ready_guns=group_ready_guns,
                     release_condition=release_condition,
                     commitment_at_risk=at_risk,
+                    policy_profile=profile,
+                    batch_key=scope_key,
+                    reservation_age_days=reservation_age_days,
+                    accumulation_started_at=group_started,
                 )
                 continue
 
-            if unconstrained and allocation["complete"]:
-                record(
-                    order,
-                    "RELEASE",
-                    "complete",
-                    "SHIP NOW - complete",
-                    allocation,
-                    release_condition=release_condition,
-                    commitment_at_risk=at_risk,
+            decision_next_release = next_release_date
+            if cooldown["active"]:
+                decision_next_release = cooldown["next_eligible"]
+                label = (
+                    f"ACCUMULATING - ship-to last shipped "
+                    f"{cooldown['last_shipped'].isoformat()}; protected until "
+                    f"{cooldown['next_eligible'].isoformat()}"
                 )
-                continue
-
-            if allocation["ready_qty"] <= EPSILON:
+            elif allocation["ready_qty"] <= EPSILON:
                 label = "ACCUMULATING - waiting for allocatable supply"
-            elif min_guns > EPSILON:
+            elif profile["release_cadence"] == "daily":
+                label = (
+                    f"ACCUMULATING - {_round_qty(group_ready_guns)} store guns protected "
+                    f"until {profile['daily_release_time']}"
+                )
+            elif target_guns > EPSILON:
                 label = (
                     "ACCUMULATING - "
-                    f"{_round_qty(group_ready_guns)}/{_round_qty(min_guns)} "
-                    "customer guns protected"
+                    f"{_round_qty(group_ready_guns)}/{_round_qty(target_guns)} "
+                    f"guns protected for {scope_key.lower()}"
                 )
             elif next_sweep:
                 label = (
@@ -490,10 +859,16 @@ def evaluate_release_gate(
                     f"{_round_qty(allocation['ready_guns'])}/"
                     f"{_round_qty(order['open_guns'])} guns protected"
                 )
-            if at_risk:
+            if cooldown["active"]:
+                code = "ship_to_cooldown"
+                if at_risk:
+                    label += "; commitment at risk - review exception"
+            elif at_risk:
                 label += "; commitment at risk - review exception"
                 code = "accumulating_commitment_at_risk"
-            elif min_guns > EPSILON or sweep_weekday is not None:
+            elif profile["release_cadence"] == "daily":
+                code = "accumulating_for_daily_batch"
+            elif target_guns > EPSILON or sweep_weekday is not None:
                 code = "accumulating_for_customer_release"
             else:
                 code = "accumulating_for_completion"
@@ -503,14 +878,41 @@ def evaluate_release_gate(
                 code,
                 label,
                 allocation,
-                next_sweep,
-                target_guns=(
-                    min_guns if min_guns > EPSILON else order["open_guns"]
-                ),
+                decision_next_release,
+                target_guns=(target_guns if target_guns > EPSILON else order["open_guns"]),
                 group_ready_guns=group_ready_guns,
                 release_condition=release_condition,
                 commitment_at_risk=at_risk,
+                policy_profile=profile,
+                batch_key=scope_key,
+                reservation_age_days=reservation_age_days,
+                accumulation_started_at=group_started,
             )
+
+    # A non-accumulating order for a destination shipped inside its configured
+    # cooldown remains eligible for supply on the next allowed day; it does not
+    # consume inventory while held. Approved exceptions were already handled above.
+    for order in ordered:
+        key = order["order_id"].upper()
+        if key in decisions:
+            continue
+        profile = _policy_profile(policy_for(order))
+        cooldown = ship_to_cooldown(order, profile)
+        if not cooldown["active"]:
+            continue
+        potential = allocate(order, remaining, require_complete=False)
+        record(
+            order,
+            "HOLD",
+            "ship_to_cooldown",
+            (
+                f"HOLD - ship-to last shipped {cooldown['last_shipped'].isoformat()}; "
+                f"eligible {cooldown['next_eligible'].isoformat()}"
+            ),
+            potential,
+            cooldown["next_eligible"],
+            policy_profile=profile,
+        )
 
     # Process customer groups in priority order. A custom customer policy may hold a
     # complete set until its minimum gun batch or sweep weekday is reached. Held groups
@@ -528,20 +930,20 @@ def evaluate_release_gate(
         key=lambda item: _priority(sorted(item[1], key=_priority)[0]),
     )
     for customer_key, customer_orders in customer_groups:
-        policy = policies.get(customer_key, {})
+        policy = policy_for(customer_orders[0])
         _, min_guns, sweep_weekday = _policy_values(policy)
 
         trial_remaining = deepcopy(remaining)
         complete_candidates: list[tuple[dict, dict]] = []
         incomplete_orders: list[tuple[dict, dict]] = []
         for order in sorted(customer_orders, key=_priority):
-            allocation = _allocate(order, trial_remaining, require_complete=True)
+            allocation = allocate(order, trial_remaining, require_complete=True)
             if allocation["complete"]:
                 trial_remaining = allocation["remaining"]
                 complete_candidates.append((order, allocation))
             else:
                 incomplete_orders.append(
-                    (order, _allocate(order, remaining, require_complete=False))
+                    (order, allocate(order, remaining, require_complete=False))
                 )
 
         ready_guns = sum(allocation["ready_guns"] for _, allocation in complete_candidates)
@@ -591,6 +993,80 @@ def evaluate_release_gate(
                 potential,
             )
 
+    # Attach concrete serials to every protected/released configured batch. Existing
+    # assignments are consumed first; newly available serials fill only the remaining
+    # quantity. The caller persists ``reservation_updates`` after reconciling this same
+    # ERP snapshot, making the assignment sticky across future evaluations.
+    available_serials_by_part = {
+        part_id: [
+            row for row in part_serials if row["serial_no"] not in reserved_serials
+        ]
+        for part_id, part_serials in serials_by_part.items()
+    }
+    reservation_updates: list[dict[str, Any]] = []
+    for decision in decisions.values():
+        decision["serial_assignments"] = []
+        if decision["decision"] not in {"RELEASE", "ACCUMULATING"} or not decision.get("batch_key"):
+            continue
+        order_id = decision["order_id"].upper()
+        order_started = accumulation_started_by_order.get(order_id)
+        for allocation in decision["allocations"]:
+            if allocation["item_type"] != "guns":
+                continue
+            part_id = allocation["part_id"]
+            existing_candidates = reservation_serials_by_order_part.get(
+                (order_id, part_id), []
+            )
+            existing_needed = max(0, int(round(float(allocation.get("reserved_qty") or 0))))
+            selected_existing = existing_candidates[:existing_needed]
+            new_needed = max(0, int(round(float(allocation.get("new_qty") or 0))))
+            selected_new = available_serials_by_part.get(part_id, [])[:new_needed]
+            if selected_new:
+                del available_serials_by_part[part_id][: len(selected_new)]
+
+            for existing in selected_existing:
+                first_assigned = str(existing.get("first_assigned_at") or evaluated.isoformat())
+                accumulation_started = str(
+                    existing.get("accumulation_started_at")
+                    or (order_started.isoformat() if order_started else first_assigned)
+                )
+                assignment = {
+                    "serial_no": existing["serial_no"],
+                    "part_id": part_id,
+                    "customer_id": decision.get("customer_id"),
+                    "cust_order_id": decision["order_id"],
+                    "line_no": allocation.get("line_no"),
+                    "first_assigned_at": first_assigned,
+                    "accumulation_started_at": accumulation_started,
+                    "existing": True,
+                }
+                decision["serial_assignments"].append(assignment)
+                reservation_updates.append(assignment)
+
+            for serial_row in selected_new:
+                first_assigned = evaluated.isoformat()
+                accumulation_started = (
+                    order_started.isoformat() if order_started else first_assigned
+                )
+                assignment = {
+                    "serial_no": serial_row["serial_no"],
+                    "part_id": part_id,
+                    "customer_id": decision.get("customer_id"),
+                    "cust_order_id": decision["order_id"],
+                    "line_no": allocation.get("line_no"),
+                    "first_assigned_at": first_assigned,
+                    "accumulation_started_at": accumulation_started,
+                    "existing": False,
+                }
+                decision["serial_assignments"].append(assignment)
+                reservation_updates.append(assignment)
+
+        if decision["serial_assignments"] and not decision.get("accumulation_started_at"):
+            decision["accumulation_started_at"] = min(
+                row["accumulation_started_at"] for row in decision["serial_assignments"]
+            )
+            decision["reservation_age_days"] = 0
+
     decision_rows = sorted(decisions.values(), key=lambda row: (
         {"RELEASE": 0, "ACCUMULATING": 1, "HOLD": 2, "BLOCKED": 3}.get(
             row["decision"], 9
@@ -622,6 +1098,10 @@ def evaluate_release_gate(
             )
         ),
         "held_ready_units": _round_qty(sum(float(row["ready_qty"]) for row in decision_rows if row["decision"] == "HOLD")),
+        "tracked_serials": len(reservation_updates),
+        "ship_to_cooldown": sum(
+            row["reason_code"] == "ship_to_cooldown" for row in decision_rows
+        ),
     }
     protected_supply: dict[str, float] = {}
     for row in decision_rows:
@@ -632,7 +1112,6 @@ def evaluate_release_gate(
             protected_supply[part_id] = (
                 protected_supply.get(part_id, 0.0) + float(allocation["qty"])
             )
-    evaluated = evaluated_at or datetime.now(timezone.utc)
     return {
         "mode": normalized_mode,
         "policy_version": int(policy_version),
@@ -641,6 +1120,9 @@ def evaluate_release_gate(
         "summary": summary,
         "released_orders": [row["order_id"] for row in decision_rows if row["decision"] == "RELEASE"],
         "decisions": decision_rows,
+        "serial_tracking_available": serial_tracking_available,
+        "ship_to_tracking_available": ship_to_tracking_available,
+        "reservation_updates": reservation_updates,
         "supply": {part: _round_qty(qty) for part, qty in sorted(supply.items())},
         "protected_supply": {
             part: _round_qty(qty) for part, qty in sorted(protected_supply.items())
