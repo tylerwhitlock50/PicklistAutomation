@@ -151,7 +151,13 @@ Evaluate rules in this precedence order:
 4. **Ship-to cooldown** - unless an approved exception applies, a destination with a
    recent shipment cannot release again until `last shipment + ship_to_cooldown_days`.
    Accumulating orders may keep protecting serials during the cooldown; ordinary held
-   orders do not consume supply.
+   orders do not consume supply. The cooldown history merges two sources: actual ERP
+   `SHIPPER.SHIPPED_DATE` rows and the application's own release ledger, which logs the
+   customer/ship-to pairs each generated picklist released. The ledger closes the
+   same-day window where a picklist has been generated but VISUAL has not yet recorded
+   a shipment. A global floor (`RELEASE_GATE_MIN_SHIP_TO_COOLDOWN_DAYS`, default 1)
+   applies on top of every per-customer policy, so no destination releases twice on
+   the same day regardless of policy configuration.
 5. **Ship complete** - release when all physical shippable lines can be covered from the
    currently allocatable supply and no conflicting pick/packlist already exists.
 6. **Major-account consolidation** - when sales-order mixing is disabled, expose only the
@@ -163,8 +169,13 @@ Evaluate rules in this precedence order:
 8. **Manual exception audit** - require a reason,
    actor, timestamp, and expiration. Typical categories: customer expedite, commitment at
    risk, compliance/ATF, carrier cutoff, backorder authorization, or manager approval.
-8. **Otherwise hold** - show why it is held, guns ready, total open guns, missing items,
+9. **Otherwise hold** - show why it is held, guns ready, total open guns, missing items,
    age, Promise Ship date, and the next expected release condition/date.
+
+Audit persistence is scoped to the operational boundary: sticky serial reservations are
+reconciled and an evaluation + decision audit row set is recorded only when a picklist is
+actually generated. Dashboard and API reads are side-effect free, and the evaluation
+history is capped (oldest rows pruned, decisions cascading).
 
 The released set is then allocated deterministically using the existing priority order.
 A held order must not consume supply ahead of released orders. An accumulating order may

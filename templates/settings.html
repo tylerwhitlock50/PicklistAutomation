@@ -157,7 +157,10 @@
                 <h3>Account consolidation policies</h3>
                 <p class="helper-text">
                   <code>DEFAULT</code> applies to every account not listed separately. Add major
-                  accounts by their exact VISUAL customer ID.
+                  accounts by their exact VISUAL customer ID. A global 1-day ship-to cooldown
+                  floor (<code>RELEASE_GATE_MIN_SHIP_TO_COOLDOWN_DAYS</code>) applies on top of
+                  these policies, so a destination released or shipped today is never released
+                  again the same day.
                 </p>
               </div>
               <button type="button" class="button tertiary" id="add-release-policy">Add account</button>

@@ -10,6 +10,9 @@ ExcludedCustomers AS (
 ),
 
 -- DETERMINE SUPPLY: SHIPPING warehouse, Racks R01-R09 only, exclude Stage/International, Rack10 and Rack11
+-- KEEP IN LOCKSTEP with the gun branch of EligibleSupply in sql/release_candidates.sql:
+-- the release gate judges completeness on that CTE, so a predicate change here must be
+-- mirrored there or the gate and the pick will disagree on availability.
 Supply AS (
     SELECT
         pl.PART_ID,

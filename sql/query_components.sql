@@ -5,7 +5,10 @@ Params AS (
         DATEADD(day, 10, CAST(GETDATE() AS date)) AS THROUGH_DATE
 ),
 
-/* 1) Supply */
+/* 1) Supply
+   KEEP IN LOCKSTEP with the component branch of EligibleSupply in
+   sql/release_candidates.sql: the release gate judges completeness on that
+   CTE, so a predicate change here must be mirrored there. */
 Supply AS (
     SELECT
         pl.PART_ID,

@@ -23,6 +23,15 @@ ComponentProductCodes AS (
 ExcludedCustomers AS (
     __RELEASE_EXCLUDED_CUSTOMERS__
 ),
+/*
+  KEEP IN LOCKSTEP with the picklist supply CTEs: the gun branch below must
+  match sql/query_guns.sql `Supply` and the component branch must match
+  sql/query_components.sql `Supply` (verified equivalent against live ERP
+  2026-08-28). If the gate sees different availability than the picklist, it
+  can release orders the pick cannot fill or hold orders it could. Neither
+  query nets out inventory on in-flight unshipped picklists; the local
+  release ledger's ship-to cooldown covers the same-day window instead.
+*/
 EligibleSupply AS (
     SELECT
         pl.PART_ID,

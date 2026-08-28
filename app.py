@@ -894,6 +894,9 @@ def apply_release_gate_filter(query: str, gate_payload: Optional[dict]) -> str:
     if not released:
         clause = "AND 1 = 0  -- release gate: no orders currently eligible"
     else:
+        # Accepted trade-off: escaped literals in an IN list (read-only query,
+        # bounded by the open-order count; both picklist queries already run
+        # with OPTION (RECOMPILE), so plan-reuse loss is moot).
         literals = ", ".join(sql_quote_literal(order_id) for order_id in released)
         clause = f"AND co.ID IN ({literals})  -- release gate policy v{gate_payload.get('policy_version', 1)}"
     return query.replace(RELEASE_GATE_FILTER_TOKEN, clause)
@@ -989,6 +992,7 @@ def fetch_picklist_from_mssql(
             force=True,
             query_options=query_options,
             require_serial_tracking=gate_mode == "enforced",
+            persist=True,
         )
         if gate_payload.get("error") and gate_mode == "enforced":
             raise RuntimeError(
@@ -1027,8 +1031,8 @@ def fetch_picklist_from_mssql(
                         "label", "No gate decision"
                     )
                 )
-        logger.info("Picklist query returned %d rows.", len(df.index))
-        return df
+    logger.info("Picklist query returned %d rows.", len(df.index))
+    return df
 
 
 def run_audit_sql_file(query_file: Path, description: str) -> pd.DataFrame:
@@ -1240,6 +1244,20 @@ def get_release_gate_mode() -> str:
 def get_release_gate_due_override_days() -> int:
     raw = get_config_value(
         "release_gate_due_override_days", "RELEASE_GATE_DUE_OVERRIDE_DAYS", "1"
+    )
+    try:
+        return max(0, min(int(str(raw).strip()), 30))
+    except (TypeError, ValueError):
+        return 1
+
+
+def get_release_gate_min_ship_to_cooldown_days() -> int:
+    """Global floor for the ship-to cooldown; protects every customer from
+    same-day duplicate picklists even without an explicit policy."""
+    raw = get_config_value(
+        "release_gate_min_ship_to_cooldown_days",
+        "RELEASE_GATE_MIN_SHIP_TO_COOLDOWN_DAYS",
+        "1",
     )
     try:
         return max(0, min(int(str(raw).strip()), 30))
@@ -1966,6 +1984,21 @@ def _execute_picklist_run_core(
             query_type=query_type,
             run_timestamp=run_timestamp,
         )
+        try:
+            gate_payload = df.attrs.get("release_gate_payload")
+            if gate_payload and not gate_payload.get("error"):
+                released = [
+                    row
+                    for row in gate_payload.get("decisions") or []
+                    if row.get("decision") == "RELEASE"
+                ]
+                shipping_store.record_released_ship_tos(
+                    run_id=run_id,
+                    released_decisions=released,
+                    released_date=_today_local(),
+                )
+        except Exception as exc:  # noqa: BLE001 — ledger write must never fail the run
+            logger.exception("Failed to record released ship-tos for run %s: %s", run_id, exc)
         try:
             save_plan_snapshot(
                 run_id=run_id,
@@ -4497,7 +4530,11 @@ def build_release_gate_payload(
     force: bool = False,
     query_options: Optional[dict[str, Any]] = None,
     require_serial_tracking: bool = False,
+    persist: bool = False,
 ) -> dict[str, Any]:
+    # persist=True is reserved for the operational boundary (picklist generation):
+    # only then are sticky serial reservations reconciled and an audit evaluation
+    # recorded. Dashboard and API reads stay side-effect free.
     policy = ensure_release_gate_policy_version()
     signature = json.dumps(
         {"version": policy["version"], "query_options": query_options or {}},
@@ -4549,6 +4586,15 @@ def build_release_gate_payload(
                     "Live ship-to cooldown validation is required for enforced picklists: "
                     f"{ship_to_exc}"
                 ) from ship_to_exc
+        if ship_to_history is not None:
+            # A picklist generated earlier today has no SHIPPED_DATE in VISUAL yet;
+            # the local release ledger closes that same-day duplicate window.
+            try:
+                ship_to_history = list(ship_to_history) + (
+                    shipping_store.recent_released_ship_tos()
+                )
+            except Exception:  # noqa: BLE001 - ledger is supplemental history
+                logger.exception("Local release ledger read failed")
         existing_reservations = shipping_store.serial_reservations_for_gate()
         payload = release_gate.evaluate_release_gate(
             rows,
@@ -4563,8 +4609,9 @@ def build_release_gate_payload(
             local_now=evaluated_at.astimezone(resolve_timezone()),
             policy_version=policy["version"],
             evaluated_at=evaluated_at,
+            min_ship_to_cooldown_days=get_release_gate_min_ship_to_cooldown_days(),
         )
-        if serial_rows is not None:
+        if persist and serial_rows is not None:
             payload["reservation_sync"] = shipping_store.sync_serial_reservations(
                 desired=payload.get("reservation_updates") or [],
                 live_serials=serial_rows,
@@ -4580,8 +4627,10 @@ def build_release_gate_payload(
         payload["source_as_of"] = source_as_of
         payload["error"] = None
         payload["active_exceptions"] = shipping_store.active_exceptions()
-        payload["evaluation_id"] = shipping_store.record_evaluation(
-            payload, source_as_of=source_as_of
+        payload["evaluation_id"] = (
+            shipping_store.record_evaluation(payload, source_as_of=source_as_of)
+            if persist
+            else None
         )
     except Exception as exc:  # noqa: BLE001 - dashboard degrades; enforced runs fail closed
         logger.exception("Release gate evaluation failed")

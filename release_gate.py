@@ -19,6 +19,29 @@ from typing import Any, Iterable, Optional
 
 EPSILON = 1e-9
 
+# Every reason_code a decision can carry. Codes are persisted in the audit store
+# and shown on the dashboard, so treat this registry as append-only.
+REASON_CODES: dict[str, str] = {
+    "hard_block": "Order fails a hard business rule (status, credit, RMA, etc.)",
+    "no_supply": "No allocatable supply for a time-critical or excepted order",
+    "approved_exception": "Released by an approved manual exception",
+    "commitment_at_risk": "Released because the promise date is at risk",
+    "ship_to_cooldown": "Destination shipped within its cooldown window",
+    "waiting_for_prior_major_order": "Major account exposes one order at a time",
+    "maximum_hold_reached": "Released: accumulation reached its maximum hold age",
+    "daily_customer_batch": "Released: daily store batch time reached",
+    "accumulation_target_reached": "Released: gun accumulation target reached",
+    "scheduled_customer_release": "Released on the customer's sweep day",
+    "complete": "Released: order (or active batch) is complete",
+    "accumulating_commitment_at_risk": "Accumulating, but a promise date is at risk",
+    "accumulating_for_daily_batch": "Protecting stock until the daily batch time",
+    "accumulating_for_customer_release": "Protecting stock toward a threshold or sweep",
+    "accumulating_for_completion": "Protecting stock until the order completes",
+    "scheduled_hold": "Held for the customer's scheduled sweep day",
+    "below_batch_threshold": "Held below the customer's batch threshold",
+    "waiting_for_completion": "Held until the full order can ship complete",
+}
+
 
 def _is_missing(value: Any) -> bool:
     if value is None:
@@ -252,6 +275,25 @@ def _policy_profile(policy: dict) -> dict[str, Any]:
     }
 
 
+def _cooldown_decision(
+    cooldown: dict[str, Any], decision: str, *, at_risk: bool = False
+) -> tuple[str, str]:
+    """Canonical (reason_code, label) for an active ship-to cooldown.
+
+    The cooldown rule is enforced at three points in the evaluation (at-risk
+    commitments, accumulating groups, and plain holds); this is the single
+    source for its reason code and label wording.
+    """
+    verb = "protected until" if decision == "ACCUMULATING" else "eligible"
+    label = (
+        f"{decision} - ship-to last shipped {cooldown['last_shipped'].isoformat()}; "
+        f"{verb} {cooldown['next_eligible'].isoformat()}"
+    )
+    if at_risk:
+        label += "; commitment at risk - review exception"
+    return "ship_to_cooldown", label
+
+
 def _as_datetime(value: Any) -> Optional[datetime]:
     if _is_missing(value):
         return None
@@ -340,6 +382,7 @@ def evaluate_release_gate(
     local_now: Optional[datetime] = None,
     policy_version: int = 1,
     evaluated_at: Optional[datetime] = None,
+    min_ship_to_cooldown_days: int = 0,
 ) -> dict[str, Any]:
     """Return one auditable decision per order, including protected accumulation."""
     normalized_mode = (mode or "advisory").strip().lower()
@@ -347,6 +390,9 @@ def evaluate_release_gate(
         raise ValueError("mode must be off, advisory, or enforced")
     if due_override_days < 0:
         raise ValueError("due_override_days must be zero or greater")
+    if min_ship_to_cooldown_days < 0:
+        raise ValueError("min_ship_to_cooldown_days must be zero or greater")
+    min_cooldown_days = min(int(min_ship_to_cooldown_days), 30)
 
     orders, supply = _normalize_candidates(rows)
     policies = {str(key).upper(): value for key, value in (customer_policies or {}).items()}
@@ -368,7 +414,7 @@ def evaluate_release_gate(
     last_shipments: dict[tuple[str, str], date] = {}
     if ship_to_history is not None:
         for raw in ship_to_history:
-            customer_id = _text(_get(raw, "CUSTOMER_ID", "customer_id")).upper()
+            customer_id = (_text(_get(raw, "CUSTOMER_ID", "customer_id")) or "").upper()
             ship_to_id = (
                 _text(_get(raw, "SHIP_TO_ID", "ship_to_id")) or "DEFAULT"
             ).upper()
@@ -385,7 +431,11 @@ def evaluate_release_gate(
         customer_id = _customer_key(order)
         ship_to_id = (order.get("ship_to_id") or "DEFAULT").strip().upper()
         last_shipped = last_shipments.get((customer_id, ship_to_id))
-        cooldown_days = int(profile.get("ship_to_cooldown_days") or 0)
+        # The global floor guarantees same-day duplicate protection even for
+        # customers with no explicit ship_to_cooldown_days policy.
+        cooldown_days = max(
+            int(profile.get("ship_to_cooldown_days") or 0), min_cooldown_days
+        )
         next_eligible = (
             last_shipped + timedelta(days=cooldown_days)
             if last_shipped is not None and cooldown_days > 0
@@ -608,14 +658,12 @@ def evaluate_release_gate(
             continue
         cooldown = ship_to_cooldown(order, profile)
         if not exception and cooldown["active"]:
+            code, label = _cooldown_decision(cooldown, "HOLD", at_risk=at_risk)
             record(
                 order,
                 "HOLD",
-                "ship_to_cooldown",
-                (
-                    f"HOLD - ship-to last shipped {cooldown['last_shipped'].isoformat()}; "
-                    f"eligible {cooldown['next_eligible'].isoformat()}"
-                ),
+                code,
+                label,
                 allocation,
                 cooldown["next_eligible"],
                 commitment_at_risk=at_risk,
@@ -830,10 +878,8 @@ def evaluate_release_gate(
             decision_next_release = next_release_date
             if cooldown["active"]:
                 decision_next_release = cooldown["next_eligible"]
-                label = (
-                    f"ACCUMULATING - ship-to last shipped "
-                    f"{cooldown['last_shipped'].isoformat()}; protected until "
-                    f"{cooldown['next_eligible'].isoformat()}"
+                _, label = _cooldown_decision(
+                    cooldown, "ACCUMULATING", at_risk=at_risk
                 )
             elif allocation["ready_qty"] <= EPSILON:
                 label = "ACCUMULATING - waiting for allocatable supply"
@@ -861,8 +907,6 @@ def evaluate_release_gate(
                 )
             if cooldown["active"]:
                 code = "ship_to_cooldown"
-                if at_risk:
-                    label += "; commitment at risk - review exception"
             elif at_risk:
                 label += "; commitment at risk - review exception"
                 code = "accumulating_commitment_at_risk"
@@ -901,14 +945,12 @@ def evaluate_release_gate(
         if not cooldown["active"]:
             continue
         potential = allocate(order, remaining, require_complete=False)
+        code, label = _cooldown_decision(cooldown, "HOLD")
         record(
             order,
             "HOLD",
-            "ship_to_cooldown",
-            (
-                f"HOLD - ship-to last shipped {cooldown['last_shipped'].isoformat()}; "
-                f"eligible {cooldown['next_eligible'].isoformat()}"
-            ),
+            code,
+            label,
             potential,
             cooldown["next_eligible"],
             policy_profile=profile,
@@ -931,7 +973,9 @@ def evaluate_release_gate(
     )
     for customer_key, customer_orders in customer_groups:
         policy = policy_for(customer_orders[0])
-        _, min_guns, sweep_weekday = _policy_values(policy)
+        profile = _policy_profile(policy)
+        min_guns = profile["target_guns"]
+        sweep_weekday = profile["sweep_weekday"]
 
         trial_remaining = deepcopy(remaining)
         complete_candidates: list[tuple[dict, dict]] = []
@@ -947,7 +991,12 @@ def evaluate_release_gate(
                 )
 
         ready_guns = sum(allocation["ready_guns"] for _, allocation in complete_candidates)
-        has_custom_policy = bool(policy)
+        # A DEFAULT policy alone (or an empty per-customer stub) must not change
+        # batching semantics: only a customer-specific entry with batching values
+        # (a gun threshold or a sweep day) opts the customer into custom batching.
+        has_custom_policy = customer_key in policies and (
+            min_guns > EPSILON or sweep_weekday is not None
+        )
         sweep_day = sweep_weekday is not None and today.weekday() == sweep_weekday
         contains_only_non_gun_orders = bool(complete_candidates) and all(
             order["open_guns"] <= EPSILON for order, _ in complete_candidates
@@ -1099,8 +1148,19 @@ def evaluate_release_gate(
         ),
         "held_ready_units": _round_qty(sum(float(row["ready_qty"]) for row in decision_rows if row["decision"] == "HOLD")),
         "tracked_serials": len(reservation_updates),
+        # Total kept for template compatibility; the split separates orders blocked
+        # from shipping (HOLD) from stock protected while accumulating anyway.
         "ship_to_cooldown": sum(
             row["reason_code"] == "ship_to_cooldown" for row in decision_rows
+        ),
+        "ship_to_cooldown_holds": sum(
+            row["reason_code"] == "ship_to_cooldown" and row["decision"] == "HOLD"
+            for row in decision_rows
+        ),
+        "ship_to_cooldown_accumulating": sum(
+            row["reason_code"] == "ship_to_cooldown"
+            and row["decision"] == "ACCUMULATING"
+            for row in decision_rows
         ),
     }
     protected_supply: dict[str, float] = {}

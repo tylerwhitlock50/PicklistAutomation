@@ -453,6 +453,127 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertEqual({item["serial_no"] for item in row["serial_assignments"]}, {"SER-1", "SER-2"})
         self.assertEqual(result["summary"]["tracked_serials"], 2)
 
+    def test_ship_to_history_row_without_customer_is_ignored(self):
+        for bad_customer in (None, "", float("nan")):
+            result = self.build(
+                [candidate("SO-1", open_qty=1, available=1)],
+                ship_to_history=[{
+                    "CUSTOMER_ID": bad_customer,
+                    "SHIP_TO_ID": "MAIN",
+                    "LAST_SHIPPED_DATE": TODAY,
+                }],
+            )
+            self.assertEqual(decision(result, "SO-1")["decision"], "RELEASE")
+
+    def test_min_cooldown_floor_applies_without_customer_policy(self):
+        history = [{
+            "CUSTOMER_ID": "CUST",
+            "SHIP_TO_ID": "DEFAULT",
+            "LAST_SHIPPED_DATE": TODAY,
+        }]
+        unprotected = self.build(
+            [candidate("SO-1", open_qty=1, available=1)], ship_to_history=history
+        )
+        self.assertEqual(decision(unprotected, "SO-1")["decision"], "RELEASE")
+        floored = self.build(
+            [candidate("SO-1", open_qty=1, available=1)],
+            ship_to_history=history,
+            min_ship_to_cooldown_days=1,
+        )
+        row = decision(floored, "SO-1")
+        self.assertEqual((row["decision"], row["reason_code"]), ("HOLD", "ship_to_cooldown"))
+        self.assertEqual(row["next_ship_to_eligible_date"], "2026-08-28")
+        self.assertEqual(floored["summary"]["ship_to_cooldown_holds"], 1)
+
+    def test_min_cooldown_floor_does_not_hold_unshipped_destinations(self):
+        result = self.build(
+            [candidate("SO-1", open_qty=1, available=1)],
+            ship_to_history=[],
+            min_ship_to_cooldown_days=1,
+        )
+        self.assertEqual(decision(result, "SO-1")["decision"], "RELEASE")
+
+    def test_locally_released_ship_to_blocks_second_same_day_release(self):
+        # A picklist run logs its releases; the merged history row (SOURCE picklist)
+        # must trigger the cooldown exactly like an ERP shipment.
+        result = self.build(
+            [candidate("SO-2", open_qty=1, available=1, customer="STORE", SHIP_TO_ID="MAIN")],
+            ship_to_history=[{
+                "CUSTOMER_ID": "STORE",
+                "SHIP_TO_ID": "MAIN",
+                "LAST_SHIPPED_DATE": TODAY.isoformat(),
+                "SOURCE": "picklist",
+            }],
+            min_ship_to_cooldown_days=1,
+        )
+        row = decision(result, "SO-2")
+        self.assertEqual((row["decision"], row["reason_code"]), ("HOLD", "ship_to_cooldown"))
+
+    def test_default_policy_does_not_hold_ordinary_customers(self):
+        # A DEFAULT entry (or an empty per-customer stub) must not flip the legacy
+        # batching branch: a plain complete order still releases as complete.
+        result = self.build(
+            [candidate("SO-1", open_qty=2, available=2, customer="PLAIN")],
+            customer_policies={
+                "DEFAULT": {"ship_to_cooldown_days": 1},
+                "PLAIN": {},
+            },
+        )
+        row = decision(result, "SO-1")
+        self.assertEqual((row["decision"], row["reason_code"]), ("RELEASE", "complete"))
+
+    def test_cooldown_labels_share_canonical_format(self):
+        history = [{
+            "CUSTOMER_ID": "STORE",
+            "SHIP_TO_ID": "MAIN",
+            "LAST_SHIPPED_DATE": TODAY,
+        }]
+        hold = self.build(
+            [candidate("SO-H", customer="STORE", SHIP_TO_ID="MAIN")],
+            customer_policies={"DEFAULT": {"ship_to_cooldown_days": 2}},
+            ship_to_history=history,
+        )
+        accumulating = self.build(
+            [candidate("SO-A", open_qty=2, available=1, customer="STORE", SHIP_TO_ID="MAIN")],
+            customer_policies={
+                "DEFAULT": {"accumulate": True, "ship_to_cooldown_days": 2}
+            },
+            ship_to_history=history,
+        )
+        hold_label = decision(hold, "SO-H")["label"]
+        acc_label = decision(accumulating, "SO-A")["label"]
+        suffix = "ship-to last shipped 2026-08-27; "
+        self.assertEqual(hold_label, f"HOLD - {suffix}eligible 2026-08-29")
+        self.assertEqual(acc_label, f"ACCUMULATING - {suffix}protected until 2026-08-29")
+        self.assertEqual(accumulating["summary"]["ship_to_cooldown_accumulating"], 1)
+
+    def test_all_emitted_reason_codes_are_registered(self):
+        scenarios = [
+            self.build([candidate("SO-1", open_qty=2, available=2)]),
+            self.build([candidate("SO-2", open_qty=2, available=1)]),
+            self.build([candidate("SO-3", ORDER_RELEASED=0)]),
+            self.build(
+                [candidate("SO-4", open_qty=3, available=2, customer="BIG")],
+                customer_policies={"BIG": {"accumulate": True}},
+            ),
+            self.build(
+                [candidate("SO-5", customer="STORE", SHIP_TO_ID="MAIN")],
+                customer_policies={"DEFAULT": {"ship_to_cooldown_days": 2}},
+                ship_to_history=[{
+                    "CUSTOMER_ID": "STORE",
+                    "SHIP_TO_ID": "MAIN",
+                    "LAST_SHIPPED_DATE": TODAY,
+                }],
+            ),
+            self.build(
+                [candidate("SO-6", open_qty=1, available=1, customer="BATCH")],
+                customer_policies={"BATCH": {"min_guns": 5}},
+            ),
+        ]
+        for result in scenarios:
+            for row in result["decisions"]:
+                self.assertIn(row["reason_code"], release_gate.REASON_CODES)
+
 
 if __name__ == "__main__":
     unittest.main()

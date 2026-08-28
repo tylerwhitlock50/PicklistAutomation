@@ -93,6 +93,19 @@ def initialize(get_conn: Callable[[], sqlite3.Connection]) -> None:
             CREATE INDEX IF NOT EXISTS idx_release_serial_reservations_customer
                 ON release_gate_serial_reservations(status, customer_id, first_assigned_at);
 
+            CREATE TABLE IF NOT EXISTS release_gate_release_log (
+                released_date TEXT NOT NULL,
+                customer_id TEXT NOT NULL,
+                ship_to_id TEXT NOT NULL,
+                cust_order_id TEXT NOT NULL,
+                run_id INTEGER,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(released_date, customer_id, ship_to_id, cust_order_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_release_log_date
+                ON release_gate_release_log(released_date);
+
             CREATE TABLE IF NOT EXISTS shipping_metric_snapshots (
                 snapshot_date TEXT NOT NULL,
                 period_days INTEGER NOT NULL,
@@ -233,11 +246,41 @@ def record_evaluation(payload: dict, source_as_of: Optional[str] = None) -> int:
                 for row in payload.get("decisions") or []
             ],
         )
+        _prune_evaluations(conn)
         conn.commit()
         return evaluation_id
     except Exception:
         conn.rollback()
         raise
+    finally:
+        _close_if_owned(conn)
+
+
+EVALUATION_HISTORY_KEEP = 500
+
+
+def _prune_evaluations(conn: sqlite3.Connection, keep: Optional[int] = None) -> int:
+    """Cap the evaluation audit history; decisions follow via ON DELETE CASCADE."""
+    if keep is None:
+        keep = EVALUATION_HISTORY_KEEP
+    cursor = conn.execute(
+        """
+        DELETE FROM release_gate_evaluations
+        WHERE id NOT IN (
+            SELECT id FROM release_gate_evaluations ORDER BY id DESC LIMIT ?
+        )
+        """,
+        (max(1, int(keep)),),
+    )
+    return cursor.rowcount
+
+
+def prune_evaluations(keep: Optional[int] = None) -> int:
+    conn = _conn()
+    try:
+        removed = _prune_evaluations(conn, keep)
+        conn.commit()
+        return removed
     finally:
         _close_if_owned(conn)
 
@@ -527,6 +570,91 @@ def sync_serial_reservations(
     except Exception:
         conn.rollback()
         raise
+    finally:
+        _close_if_owned(conn)
+
+
+RELEASE_LOG_RETENTION_DAYS = 31
+
+
+def record_released_ship_tos(
+    *,
+    run_id: Optional[int],
+    released_decisions: list[dict[str, Any]],
+    released_date: date,
+) -> int:
+    """Log which customer/ship-to pairs a picklist run released.
+
+    The gate merges this ledger into the ERP ship-to shipment history so a
+    picklist generated earlier today triggers the ship-to cooldown even before
+    VISUAL records a SHIPPED_DATE. Idempotent per (date, customer, ship-to, order).
+    """
+    rows = []
+    for decision in released_decisions:
+        customer_id = str(decision.get("customer_id") or "").strip().upper()
+        order_id = str(decision.get("order_id") or decision.get("cust_order_id") or "").strip().upper()
+        if not customer_id or not order_id:
+            continue
+        ship_to_id = str(decision.get("ship_to_id") or "").strip().upper() or "DEFAULT"
+        rows.append(
+            (
+                released_date.isoformat(),
+                customer_id,
+                ship_to_id,
+                order_id,
+                int(run_id) if run_id is not None else None,
+                _now_iso(),
+            )
+        )
+    if not rows:
+        return 0
+    conn = _conn()
+    try:
+        conn.executemany(
+            """
+            INSERT INTO release_gate_release_log
+                (released_date, customer_id, ship_to_id, cust_order_id, run_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(released_date, customer_id, ship_to_id, cust_order_id)
+                DO NOTHING
+            """,
+            rows,
+        )
+        conn.execute(
+            "DELETE FROM release_gate_release_log WHERE released_date < date(?, ?)",
+            (released_date.isoformat(), f"-{RELEASE_LOG_RETENTION_DAYS} days"),
+        )
+        conn.commit()
+        return len(rows)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        _close_if_owned(conn)
+
+
+def recent_released_ship_tos(days: int = RELEASE_LOG_RETENTION_DAYS) -> list[dict[str, Any]]:
+    """Local release history shaped like the ERP ship-to history rows."""
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT customer_id, ship_to_id, MAX(released_date) AS last_released_date
+            FROM release_gate_release_log
+            WHERE released_date >= date('now', ?)
+            GROUP BY customer_id, ship_to_id
+            """,
+            (f"-{max(1, int(days))} days",),
+        ).fetchall()
+        return [
+            {
+                "CUSTOMER_ID": row["customer_id"],
+                "SHIP_TO_ID": row["ship_to_id"],
+                "LAST_SHIPPED_DATE": row["last_released_date"],
+                "SOURCE": "picklist",
+            }
+            for row in rows
+        ]
     finally:
         _close_if_owned(conn)
 

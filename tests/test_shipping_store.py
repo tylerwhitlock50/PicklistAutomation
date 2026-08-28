@@ -143,6 +143,109 @@ class ShippingStoreTests(unittest.TestCase):
         self.assertEqual(shipping_store.serial_reservations_for_gate(), [])
         self.assertEqual(shipping_store.recent_serial_reservations()[0]["status"], "fulfilled")
 
+    def _evaluation_payload(self, order="SO-1"):
+        return {
+            "evaluated_at": datetime.now(timezone.utc).isoformat(),
+            "mode": "advisory",
+            "policy_version": 1,
+            "summary": {"orders": 1},
+            "decisions": [{
+                "order_id": order, "customer_id": "CUST", "decision": "RELEASE",
+                "reason_code": "complete", "label": "SHIP NOW - complete",
+                "open_qty": 1, "ready_qty": 1,
+            }],
+        }
+
+    def test_evaluation_history_is_pruned_with_cascade(self):
+        for index in range(7):
+            shipping_store.record_evaluation(
+                self._evaluation_payload(f"SO-{index}"), source_as_of="now"
+            )
+        shipping_store.prune_evaluations(keep=3)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            evaluations = conn.execute(
+                "SELECT COUNT(*) FROM release_gate_evaluations"
+            ).fetchone()[0]
+            decisions = conn.execute(
+                "SELECT COUNT(*) FROM release_gate_decisions"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(evaluations, 3)
+        self.assertEqual(decisions, 3)
+        self.assertEqual(
+            shipping_store.latest_evaluation()["decisions"][0]["order_id"], "SO-6"
+        )
+
+    def test_record_evaluation_applies_retention_cap(self):
+        original = shipping_store.EVALUATION_HISTORY_KEEP
+        shipping_store.EVALUATION_HISTORY_KEEP = 2
+        try:
+            for index in range(4):
+                shipping_store.record_evaluation(
+                    self._evaluation_payload(f"SO-{index}"), source_as_of="now"
+                )
+        finally:
+            shipping_store.EVALUATION_HISTORY_KEEP = original
+        conn = sqlite3.connect(self.db_path)
+        try:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM release_gate_evaluations"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(count, 2)
+
+    def test_release_ledger_roundtrip_and_idempotency(self):
+        released = [
+            {"order_id": "SO-1", "customer_id": "STORE", "ship_to_id": "MAIN"},
+            {"order_id": "SO-2", "customer_id": "STORE", "ship_to_id": ""},
+            {"order_id": "", "customer_id": "STORE", "ship_to_id": "MAIN"},
+        ]
+        written = shipping_store.record_released_ship_tos(
+            run_id=7, released_decisions=released, released_date=date.today()
+        )
+        self.assertEqual(written, 2)
+        # Re-recording the same run must not raise or duplicate.
+        shipping_store.record_released_ship_tos(
+            run_id=7, released_decisions=released, released_date=date.today()
+        )
+        rows = shipping_store.recent_released_ship_tos()
+        self.assertEqual(len(rows), 2)
+        by_ship_to = {row["SHIP_TO_ID"]: row for row in rows}
+        self.assertEqual(set(by_ship_to), {"MAIN", "DEFAULT"})
+        self.assertEqual(by_ship_to["MAIN"]["CUSTOMER_ID"], "STORE")
+        self.assertEqual(
+            by_ship_to["MAIN"]["LAST_SHIPPED_DATE"], date.today().isoformat()
+        )
+        self.assertEqual(by_ship_to["MAIN"]["SOURCE"], "picklist")
+
+    def test_release_ledger_prunes_old_rows(self):
+        old_day = date.today() - timedelta(days=45)
+        shipping_store.record_released_ship_tos(
+            run_id=1,
+            released_decisions=[
+                {"order_id": "SO-OLD", "customer_id": "STORE", "ship_to_id": "MAIN"}
+            ],
+            released_date=old_day,
+        )
+        shipping_store.record_released_ship_tos(
+            run_id=2,
+            released_decisions=[
+                {"order_id": "SO-NEW", "customer_id": "STORE", "ship_to_id": "MAIN"}
+            ],
+            released_date=date.today(),
+        )
+        conn = sqlite3.connect(self.db_path)
+        try:
+            remaining = conn.execute(
+                "SELECT cust_order_id FROM release_gate_release_log"
+            ).fetchall()
+        finally:
+            conn.close()
+        self.assertEqual([row[0] for row in remaining], ["SO-NEW"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -106,6 +106,8 @@ The Settings screen writes the policy JSON. `DEFAULT` controls stores not explic
 
 Major accounts with `mix_orders: false` expose one active sales order at a time and release it at `target_guns`, full completion below the target, `max_hold_days`, or an approved exception. Standard `daily` policies combine only the same customer and ship-to, then release once the configured cutoff arrives or the oldest sticky assignment reaches the maximum age. `ship_to_cooldown_days: 1` prevents a destination shipped today from receiving another picklist until tomorrow; `3` makes the destination next eligible three calendar days after its last shipment. Optional legacy sweep weekdays remain supported.
 
+Two guarantees back the "one shipment per destination per day" goal regardless of per-customer policy. First, a global cooldown floor (`RELEASE_GATE_MIN_SHIP_TO_COOLDOWN_DAYS`, default 1) applies on top of every policy. Second, cooldowns are driven by both actual ERP shipment dates and a local release ledger: every generated picklist logs the customer/ship-to pairs it released, so a destination released this morning is held this afternoon even if VISUAL has not yet recorded the shipment. Audit rows (evaluations and decisions) are written only when a picklist is generated — dashboard and API reads are side-effect free — and the history is capped automatically.
+
 Repository defaults remain advisory. Customer policies can be reviewed and changed in Settings before any enforcement date is approved.
 
 To reconcile the queries against the configured live VISUAL source without exposing order/customer detail:

@@ -165,7 +165,8 @@
           <div><strong>{{ release_gate.summary.release_units }}</strong><span>Units released</span></div>
           <div><strong>{{ release_gate.summary.held_ready_units }}</strong><span>Ready but held</span></div>
           <div><strong>{{ release_gate.summary.tracked_serials or 0 }}</strong><span>Sticky serials</span></div>
-          <div><strong>{{ release_gate.summary.ship_to_cooldown or 0 }}</strong><span>Ship-to cooldowns</span></div>
+          <div><strong>{{ release_gate.summary.ship_to_cooldown_holds if release_gate.summary.ship_to_cooldown_holds is defined else (release_gate.summary.ship_to_cooldown or 0) }}</strong><span>Cooldown holds</span></div>
+          <div><strong>{{ release_gate.summary.ship_to_cooldown_accumulating or 0 }}</strong><span>Cooldown accumulating</span></div>
         </div>
         {% if not release_gate.serial_tracking_available %}
         <p class="scorecard-advisory"><strong>Serial tracking fallback:</strong> quantity decisions are visible, but no serial assignments will be changed until the live ERP serial check succeeds.</p>
