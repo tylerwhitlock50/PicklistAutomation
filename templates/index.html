@@ -161,6 +161,21 @@
           {% endif %}
 
           {% if feature_flags.shipping %}
+          <section class="audit-cta shipping-scorecard-banner" data-shipping-scorecard-banner>
+            <div class="audit-cta-icon"><span></span></div>
+            <div class="audit-cta-copy">
+              <div class="audit-cta-title">Shipping management scorecard</div>
+              <div class="scorecard-banner-metrics" data-scorecard-banner-metrics>
+                <span><strong>&mdash;</strong> On time</span>
+                <span><strong>&mdash;</strong> Complete</span>
+                <span><strong>&mdash;</strong> Guns / shipment</span>
+                <span><strong>&mdash;</strong> Single-gun</span>
+              </div>
+              <div class="audit-cta-sub" data-scorecard-banner-status>Loading the six agreed KPIs&hellip;</div>
+            </div>
+            <a class="audit-cta-btn" href="{{ url_for('shipping_page', view='scorecard') }}">Open scorecard &rarr;</a>
+          </section>
+
           <section class="audit-cta excess-banner" data-excess-banner hidden>
             <div class="excess-face" data-excess-face aria-hidden="true">&#128512;</div>
             <div class="audit-cta-copy">
@@ -1115,6 +1130,37 @@
             window.location.replace(url.toString());
           }
         }
+      })();
+    </script>
+    <script>
+      // Compact SLT readout. It hydrates after the operational dashboard is
+      // interactive and links to the full six-KPI scorecard.
+      (function () {
+        var banner = document.querySelector("[data-shipping-scorecard-banner]");
+        if (!banner) return;
+        function pct(value) { return value == null ? "—" : Number(value).toFixed(1) + "%"; }
+        function dec(value) { return value == null ? "—" : Number(value).toFixed(2); }
+        fetch("/api/shipping/metrics?days=30")
+          .then(function (resp) { return resp.ok ? resp.json() : null; })
+          .then(function (data) {
+            var status = banner.querySelector("[data-scorecard-banner-status]");
+            if (!data || data.error && !data.stale) {
+              if (status) status.textContent = "Metrics are unavailable; open the scorecard for source details.";
+              return;
+            }
+            var cards = data.cards || {};
+            var values = [
+              pct((cards.ship_on_time || {}).value),
+              pct((cards.ship_complete || {}).value),
+              dec((cards.average_guns_per_shipment || {}).value),
+              String((cards.single_gun_shipments || {}).value == null ? "—" : cards.single_gun_shipments.value)
+            ];
+            banner.querySelectorAll("[data-scorecard-banner-metrics] strong").forEach(function (node, index) {
+              node.textContent = values[index] || "—";
+            });
+            if (status) status.textContent = "30-day view · today is partial · open for all six KPIs, trends, and action queues.";
+          })
+          .catch(function () { /* summary is best-effort */ });
       })();
     </script>
     <script>

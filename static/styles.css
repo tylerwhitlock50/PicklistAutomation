@@ -59,6 +59,13 @@ body {
   gap: 18px;
 }
 
+/* Grid items otherwise contribute their full table/toolbar min-content width
+   and can widen every page card beyond a phone viewport. Scrollable tables
+   keep their own horizontal overflow inside .table-wrap. */
+.page-shell > * {
+  min-width: 0;
+}
+
 .card {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -2186,4 +2193,272 @@ details.detail-section > .table-wrap {
 
 .alloc-overview-title {
   color: var(--ink);
+}
+
+/* ---------------------------------------------------------------------------
+   Shipping management scorecard and release gate
+--------------------------------------------------------------------------- */
+.scorecard-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.scorecard-kpis {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.scorecard-kpi {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+}
+
+.scorecard-kpi-top,
+.scorecard-kpi-context,
+.scorecard-legend {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.scorecard-kpi-label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+
+.scorecard-kpi-value {
+  margin: 10px 0 7px;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: clamp(30px, 4vw, 46px);
+  font-weight: 750;
+  line-height: 1;
+}
+
+.scorecard-kpi-context,
+.scorecard-definition,
+.scorecard-delta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.scorecard-delta {
+  border-radius: 999px;
+  padding: 3px 7px;
+  background: #f0ede6;
+}
+
+.scorecard-delta.is-better {
+  color: #165f3c;
+  background: #dff2e7;
+}
+
+.scorecard-definition {
+  margin-top: 10px;
+}
+
+.scorecard-definition summary,
+.gate-exception-panel summary {
+  cursor: pointer;
+  color: var(--primary);
+  font-weight: 700;
+}
+
+.scorecard-definition p {
+  margin: 8px 0 0;
+  line-height: 1.45;
+}
+
+.scorecard-chart-grid,
+.scorecard-action-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.scorecard-chart-card {
+  min-width: 0;
+}
+
+.scorecard-chart {
+  min-height: 260px;
+  margin-top: 8px;
+}
+
+.scorecard-chart svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.scorecard-gridline {
+  stroke: #ded9ce;
+  stroke-width: 1;
+}
+
+.scorecard-axis-label {
+  fill: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.scorecard-line {
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.line-on-time { stroke: #225ea8; }
+.line-complete { stroke: #cc8a19; stroke-dasharray: 7 5; }
+.volume-guns { fill: #225ea8; stroke: #164370; stroke-width: .8; }
+.volume-shipments { fill: #e8c278; stroke: #8e6414; stroke-width: .8; }
+
+.scorecard-legend {
+  justify-content: flex-start;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.scorecard-legend span::before {
+  content: "";
+  display: inline-block;
+  width: 18px;
+  height: 3px;
+  margin-right: 6px;
+  vertical-align: middle;
+  background: #225ea8;
+}
+
+.scorecard-legend .legend-complete::before {
+  background: repeating-linear-gradient(90deg, #cc8a19 0 7px, transparent 7px 11px);
+}
+.scorecard-legend .legend-guns::before { height: 9px; background: #225ea8; }
+.scorecard-legend .legend-shipments::before { height: 9px; background: #e8c278; }
+
+.scorecard-warning,
+.scorecard-advisory,
+.scorecard-enforced {
+  margin: 14px 0;
+  padding: 11px 13px;
+  border-radius: var(--radius-sm);
+  border: 1px solid #d9aa70;
+  background: #fff3df;
+}
+
+.scorecard-warning {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border-color: #df9a8b;
+  background: var(--error-bg);
+}
+
+.scorecard-warning.stale { border-color: #d9aa70; background: #fff3df; }
+.scorecard-enforced { border-color: #8fb3e0; background: #e2ecf9; }
+
+.gate-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.gate-summary > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+
+.gate-summary strong {
+  font-family: var(--font-mono);
+  font-size: 22px;
+}
+
+.gate-summary span { color: var(--muted); font-size: 12px; }
+.pill.gate-release { background: #dff2e7; color: #165f3c; }
+.pill.gate-accumulating { background: #dcecff; color: #174f87; }
+.pill.gate-hold { background: #fff0cf; color: #76510b; }
+.pill.gate-blocked { background: var(--error-bg); color: #873c2c; }
+
+.release-gate-filter {
+  width: min(360px, 42vw);
+  min-width: 280px;
+}
+
+.gate-exception-panel {
+  margin-top: 18px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.gate-exception-form {
+  display: grid;
+  grid-template-columns: 1fr 2fr 1fr 1fr auto;
+  gap: 10px;
+  align-items: end;
+  margin-top: 12px;
+}
+
+.gate-exception-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.scorecard-quality { margin-bottom: 28px; }
+
+.shipping-scorecard-banner {
+  border-color: #8fb3e0;
+  background: #f4f8fd;
+}
+
+.scorecard-banner-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px 14px;
+  margin: 4px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.scorecard-banner-metrics strong {
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 15px;
+}
+
+@media (max-width: 980px) {
+  .scorecard-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .scorecard-chart-grid,
+  .scorecard-action-grid { grid-template-columns: 1fr; }
+  .gate-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .gate-exception-form { grid-template-columns: 1fr 1fr; }
+}
+
+@media (max-width: 620px) {
+  .scorecard-kpis { grid-template-columns: 1fr; }
+  .gate-summary { grid-template-columns: 1fr 1fr; }
+  .gate-exception-form { grid-template-columns: 1fr; }
+  .release-gate-filter { width: 100%; min-width: 0; }
 }

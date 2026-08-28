@@ -45,7 +45,10 @@ import audit_universe
 import excess
 import pick_store
 import recon
+import release_gate
 import serial_history
+import shipping_metrics
+import shipping_store
 import shortage
 import verify_store
 
@@ -179,6 +182,23 @@ EXCESS_PACKLISTS_FILE = resolve_path_setting(
 )
 EXCESS_PACKLIST_COST_DEFAULT = 51.0
 EXCESS_CACHE_MINUTES = float(os.getenv("EXCESS_CACHE_MINUTES", "5"))
+# JP / SLT shipping scorecard. The SQL returns raw order and shipment facts;
+# shipping_metrics.py owns the documented grains and denominators.
+SHIPPING_METRICS_FILE = resolve_path_setting(
+    os.getenv("SHIPPING_METRICS_FILE", "sql/shipping_metrics.sql")
+)
+SHIPPING_METRICS_CACHE_MINUTES = float(
+    os.getenv("SHIPPING_METRICS_CACHE_MINUTES", "5")
+)
+# Order-release candidates are evaluated before the normal picklist allocation.
+RELEASE_CANDIDATES_FILE = resolve_path_setting(
+    os.getenv("RELEASE_CANDIDATES_FILE", "sql/release_candidates.sql")
+)
+RELEASE_GATE_CACHE_SECONDS = float(os.getenv("RELEASE_GATE_CACHE_SECONDS", "60"))
+RELEASE_GATE_FILTER_TOKEN = "__RELEASE_GATE_FILTER__"
+RELEASE_LOOKAHEAD_TOKEN = "__RELEASE_LOOKAHEAD_DAYS__"
+RELEASE_COMPONENT_CODES_TOKEN = "__COMPONENT_PRODUCT_CODES__"
+RELEASE_EXCLUDED_CUSTOMERS_TOKEN = "__RELEASE_EXCLUDED_CUSTOMERS__"
 # Allocation screen: per-SKU supply/demand model + Promise Del Date editing.
 ALLOC_SUPPLY_FILE = resolve_path_setting(
     os.getenv("ALLOC_SUPPLY_FILE", "sql/alloc_supply.sql")
@@ -851,6 +871,27 @@ def load_query(query_type: str, query_options: Optional[dict[str, Any]] = None) 
     return query_template
 
 
+def apply_release_gate_filter(query: str, gate_payload: Optional[dict]) -> str:
+    """Inject the released order set before the SQL allocation CTE runs."""
+    if RELEASE_GATE_FILTER_TOKEN not in query:
+        return query
+    if not gate_payload or gate_payload.get("mode") != "enforced":
+        return query.replace(RELEASE_GATE_FILTER_TOKEN, "")
+    released = sorted(
+        {
+            str(order_id).strip().upper()
+            for order_id in gate_payload.get("released_orders") or []
+            if str(order_id).strip()
+        }
+    )
+    if not released:
+        clause = "AND 1 = 0  -- release gate: no orders currently eligible"
+    else:
+        literals = ", ".join(sql_quote_literal(order_id) for order_id in released)
+        clause = f"AND co.ID IN ({literals})  -- release gate policy v{gate_payload.get('policy_version', 1)}"
+    return query.replace(RELEASE_GATE_FILTER_TOKEN, clause)
+
+
 # One pooled engine per connection string for the process lifetime: building
 # an engine per query paid engine construction plus a fresh ODBC login on
 # every request. Keyed by connection string so a settings change takes effect
@@ -931,6 +972,16 @@ def fetch_picklist_from_mssql(
     query_options: Optional[dict[str, Any]] = None,
 ) -> pd.DataFrame:
     query = load_query(query_type, query_options=query_options)
+    gate_payload = None
+    gate_mode = get_release_gate_mode()
+    if gate_mode != "off":
+        gate_payload = build_release_gate_payload(query_options=query_options)
+        if gate_payload.get("error") and gate_mode == "enforced":
+            raise RuntimeError(
+                "Release gate is enforced but could not be evaluated: "
+                f"{gate_payload.get('error')}"
+            )
+    query = apply_release_gate_filter(query, gate_payload)
     if query_type == "guns":
         applied_options = get_default_guns_query_options()
         if query_options:
@@ -943,6 +994,23 @@ def fetch_picklist_from_mssql(
     engine = get_erp_engine()
     with engine.connect() as connection:
         df = pd.read_sql_query(query, connection)
+        if gate_payload and not gate_payload.get("error") and not df.empty:
+            decision_map = {
+                str(row["order_id"]).strip().upper(): row
+                for row in gate_payload.get("decisions") or []
+            }
+            order_column = "Cust Order ID"
+            if order_column in df.columns:
+                df["Release Gate"] = df[order_column].map(
+                    lambda value: (decision_map.get(str(value).strip().upper()) or {}).get(
+                        "decision", "UNREVIEWED"
+                    )
+                )
+                df["Release Reason"] = df[order_column].map(
+                    lambda value: (decision_map.get(str(value).strip().upper()) or {}).get(
+                        "label", "No gate decision"
+                    )
+                )
         logger.info("Picklist query returned %d rows.", len(df.index))
         return df
 
@@ -1144,6 +1212,93 @@ def get_excess_packlist_cost() -> float:
     except (TypeError, ValueError):
         return EXCESS_PACKLIST_COST_DEFAULT
     return value if value >= 0 else EXCESS_PACKLIST_COST_DEFAULT
+
+
+def get_release_gate_mode() -> str:
+    """off | advisory | enforced; new installs deliberately start advisory."""
+    raw = get_config_value("release_gate_mode", "RELEASE_GATE_MODE", "advisory")
+    mode = str(raw or "advisory").strip().lower()
+    return mode if mode in {"off", "advisory", "enforced"} else "advisory"
+
+
+def get_release_gate_due_override_days() -> int:
+    raw = get_config_value(
+        "release_gate_due_override_days", "RELEASE_GATE_DUE_OVERRIDE_DAYS", "1"
+    )
+    try:
+        return max(0, min(int(str(raw).strip()), 30))
+    except (TypeError, ValueError):
+        return 1
+
+
+def parse_release_gate_customer_policies(raw: Any) -> dict[str, dict[str, Any]]:
+    if raw in (None, ""):
+        return {}
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError as exc:
+        raise ValueError("Customer release policies must be valid JSON.") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("Customer release policies must be a JSON object keyed by customer ID.")
+
+    result: dict[str, dict[str, Any]] = {}
+    for customer_id, policy in parsed.items():
+        customer = str(customer_id or "").strip().upper()
+        if not customer or not isinstance(policy, dict):
+            raise ValueError("Each customer release policy must be an object.")
+        normalized: dict[str, Any] = {}
+        accumulate = policy.get("accumulate", False)
+        if not isinstance(accumulate, bool):
+            raise ValueError(f"{customer}: accumulate must be true or false.")
+        normalized["accumulate"] = accumulate
+        try:
+            min_guns = int(policy.get("min_guns", 0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{customer}: min_guns must be a whole number.") from exc
+        if min_guns < 0:
+            raise ValueError(f"{customer}: min_guns must be zero or greater.")
+        normalized["min_guns"] = min_guns
+        sweep = policy.get("sweep_weekday")
+        if sweep not in (None, ""):
+            try:
+                sweep_value = int(sweep)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"{customer}: sweep_weekday must be 0 (Monday) through 6 (Sunday)."
+                ) from exc
+            if sweep_value not in range(7):
+                raise ValueError(
+                    f"{customer}: sweep_weekday must be 0 (Monday) through 6 (Sunday)."
+                )
+            normalized["sweep_weekday"] = sweep_value
+        result[customer] = normalized
+    return result
+
+
+def get_release_gate_customer_policies() -> dict[str, dict[str, Any]]:
+    raw = get_config_value(
+        "release_gate_customer_policies_json",
+        "RELEASE_GATE_CUSTOMER_POLICIES_JSON",
+        "{}",
+    )
+    try:
+        return parse_release_gate_customer_policies(raw)
+    except ValueError as exc:
+        logger.error("Invalid release-gate customer policy configuration: %s", exc)
+        return {}
+
+
+def ensure_release_gate_policy_version(changed_by: str = "system") -> dict[str, Any]:
+    desired = {
+        "mode": get_release_gate_mode(),
+        "due_override_days": get_release_gate_due_override_days(),
+        "customer_policies": get_release_gate_customer_policies(),
+    }
+    latest = shipping_store.latest_policy_config()
+    if latest and all(latest.get(key) == value for key, value in desired.items()):
+        return latest
+    version = shipping_store.save_policy_config(changed_by=changed_by, **desired)
+    return {"version": version, **desired, "changed_by": changed_by}
 
 
 def get_max_runs_per_day() -> int:
@@ -2238,6 +2393,7 @@ audit_store.initialize()
 pick_store.initialize(get_sqlite_conn)
 verify_store.initialize(get_sqlite_conn)
 allocation_store.initialize(get_sqlite_conn)
+shipping_store.initialize(get_sqlite_conn)
 backfill_plan_snapshots()
 check_audit_universe_sql()
 start_scheduler()
@@ -2449,6 +2605,41 @@ def settings():
         else:
             delete_setting("excess_packlist_cost_usd")
 
+        release_gate_mode = (request.form.get("release_gate_mode") or "advisory").strip().lower()
+        if release_gate_mode not in {"off", "advisory", "enforced"}:
+            flash("Release gate mode must be off, advisory, or enforced.", "error")
+            return redirect(url_for("settings"))
+        due_days_raw = (
+            request.form.get("release_gate_due_override_days") or "1"
+        ).strip()
+        try:
+            due_days = int(due_days_raw)
+            if due_days < 0 or due_days > 30:
+                raise ValueError
+        except ValueError:
+            flash("Commitment-protection days must be a whole number from 0 to 30.", "error")
+            return redirect(url_for("settings"))
+        policies_raw = (
+            request.form.get("release_gate_customer_policies_json") or "{}"
+        ).strip()
+        try:
+            policies = parse_release_gate_customer_policies(policies_raw)
+        except ValueError as exc:
+            flash(str(exc), "error")
+            return redirect(url_for("settings"))
+        set_setting("release_gate_mode", release_gate_mode)
+        set_setting("release_gate_due_override_days", str(due_days))
+        set_setting(
+            "release_gate_customer_policies_json",
+            json.dumps(policies, sort_keys=True),
+        )
+        ensure_release_gate_policy_version(
+            changed_by=f"settings:{request.remote_addr or 'unknown'}"
+        )
+        _release_gate_cache.update(
+            {"payload": None, "fetched_at": None, "signature": None}
+        )
+
         set_setting("smtp_use_tls", "true" if request.form.get("smtp_use_tls") else "false")
 
         for feature_name, feature_def in FEATURE_FLAGS.items():
@@ -2524,6 +2715,11 @@ def settings():
         excess_packlist_cost_usd=get_excess_packlist_cost(),
         excess_cost_source=get_config_source(
             "excess_packlist_cost_usd", "EXCESS_PACKLIST_COST_USD"
+        ),
+        release_gate_mode=get_release_gate_mode(),
+        release_gate_due_override_days=get_release_gate_due_override_days(),
+        release_gate_customer_policies_json=json.dumps(
+            get_release_gate_customer_policies(), indent=2, sort_keys=True
         ),
     )
 
@@ -4139,6 +4335,227 @@ def _today_local() -> date:
     return datetime.now(timezone.utc).astimezone(resolve_timezone()).date()
 
 
+def render_release_candidates_query(
+    query_template: str,
+    query_options: Optional[dict[str, Any]] = None,
+) -> str:
+    options = get_default_guns_query_options()
+    if query_options:
+        options = {**options, **query_options}
+    component_rows = "\n    UNION ALL\n    ".join(
+        f"SELECT {sql_quote_literal(code)} AS PRODUCT_CODE"
+        for code in SHORTAGE_PRODUCT_CODES
+    ) or "SELECT '' AS PRODUCT_CODE"
+    excluded_rows = "\n    UNION ALL\n    ".join(
+        f"SELECT {sql_quote_literal(term)} AS CUSTOMER_TERM"
+        for term in options["excluded_customers"]
+    ) or "SELECT '' AS CUSTOMER_TERM"
+    return (
+        query_template.replace(RELEASE_LOOKAHEAD_TOKEN, str(options["lookahead_days"]))
+        .replace(RELEASE_COMPONENT_CODES_TOKEN, component_rows)
+        .replace(RELEASE_EXCLUDED_CUSTOMERS_TOKEN, excluded_rows)
+    )
+
+
+_release_gate_cache: dict[str, Any] = {
+    "payload": None,
+    "fetched_at": None,
+    "signature": None,
+}
+
+
+def _fetch_release_candidate_rows(
+    query_options: Optional[dict[str, Any]] = None,
+) -> list[dict]:
+    if not RELEASE_CANDIDATES_FILE.exists():
+        raise FileNotFoundError(
+            f"Release candidate query not found at: {RELEASE_CANDIDATES_FILE}"
+        )
+    template = RELEASE_CANDIDATES_FILE.read_text(encoding="utf-8")
+    query = render_release_candidates_query(template, query_options=query_options)
+    engine = get_erp_engine()
+    logger.info("Running order release candidate query")
+    with engine.connect() as connection:
+        df = pd.read_sql_query(query, connection)
+    logger.info("Order release candidate query returned %d rows.", len(df.index))
+    return df.to_dict(orient="records")
+
+
+def build_release_gate_payload(
+    force: bool = False,
+    query_options: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    policy = ensure_release_gate_policy_version()
+    signature = json.dumps(
+        {"version": policy["version"], "query_options": query_options or {}},
+        sort_keys=True,
+        default=str,
+    )
+    cached_at = _release_gate_cache["fetched_at"]
+    if (
+        not force
+        and _release_gate_cache["payload"] is not None
+        and _release_gate_cache["signature"] == signature
+        and cached_at is not None
+        and datetime.now() - cached_at < timedelta(seconds=RELEASE_GATE_CACHE_SECONDS)
+    ):
+        return _release_gate_cache["payload"]
+
+    source_as_of = datetime.now(timezone.utc).isoformat()
+    try:
+        rows = _fetch_release_candidate_rows(query_options=query_options)
+        payload = release_gate.evaluate_release_gate(
+            rows,
+            today=_today_local(),
+            mode=policy["mode"],
+            due_override_days=policy["due_override_days"],
+            customer_policies=policy["customer_policies"],
+            exceptions=shipping_store.active_exceptions(),
+            policy_version=policy["version"],
+        )
+        payload["source_as_of"] = source_as_of
+        payload["error"] = None
+        payload["active_exceptions"] = shipping_store.active_exceptions()
+        payload["evaluation_id"] = shipping_store.record_evaluation(
+            payload, source_as_of=source_as_of
+        )
+    except Exception as exc:  # noqa: BLE001 - dashboard degrades; enforced runs fail closed
+        logger.exception("Release gate evaluation failed")
+        payload = {
+            "mode": policy["mode"],
+            "policy_version": policy["version"],
+            "evaluated_at": datetime.now(timezone.utc).isoformat(),
+            "source_as_of": source_as_of,
+            "due_override_days": policy["due_override_days"],
+            "summary": {
+                "orders": 0,
+                "release": 0,
+                "accumulating": 0,
+                "hold": 0,
+                "blocked": 0,
+                "release_units": 0,
+                "protected_units": 0,
+                "protected_guns": 0,
+                "held_ready_units": 0,
+            },
+            "released_orders": [],
+            "decisions": [],
+            "active_exceptions": shipping_store.active_exceptions(),
+            "error": str(exc),
+        }
+    _release_gate_cache.update(
+        {"payload": payload, "fetched_at": datetime.now(), "signature": signature}
+    )
+    return payload
+
+
+_shipping_scorecard_cache: dict[tuple[int, str], dict[str, Any]] = {}
+
+
+def parse_scorecard_days(raw: Any) -> int:
+    try:
+        value = int(str(raw or "30").strip())
+    except (TypeError, ValueError):
+        return 30
+    return value if value in {1, 7, 30, 90} else 30
+
+
+def _fetch_shipping_metric_rows(start: date, end: date) -> list[dict]:
+    span = end - start
+    query_start = start - span
+    df = run_erp_query_file(
+        SHIPPING_METRICS_FILE,
+        {"query_start": query_start.isoformat(), "end_date": end.isoformat()},
+        "shipping management metrics",
+    )
+    return df.to_dict(orient="records")
+
+
+def _empty_scorecard_payload(days: int, error: str) -> dict[str, Any]:
+    today = _today_local()
+    cards = {
+        key: {
+            **definition,
+            "value": None,
+            "prior_value": None,
+            "delta": None,
+            "numerator": None,
+            "denominator": None,
+            "companion": {},
+        }
+        for key, definition in shipping_metrics.METRIC_DEFINITIONS.items()
+    }
+    return {
+        "error": error,
+        "stale": False,
+        "as_of": None,
+        "period": {
+            "start": (today - timedelta(days=days - 1)).isoformat(),
+            "end_exclusive": (today + timedelta(days=1)).isoformat(),
+            "days": days,
+            "latest_complete_date": (today - timedelta(days=1)).isoformat(),
+            "is_partial": True,
+        },
+        "cards": cards,
+        "trends": [],
+        "actions": {"late_orders": [], "single_shipments": []},
+        "coverage": {},
+        "source": {},
+    }
+
+
+def build_shipping_scorecard_payload(days: int = 30, force: bool = False) -> dict[str, Any]:
+    days = parse_scorecard_days(days)
+    today = _today_local()
+    cache_key = (days, today.isoformat())
+    cached = _shipping_scorecard_cache.get(cache_key)
+    if (
+        not force
+        and cached
+        and datetime.now() - cached["_cached_at"]
+        < timedelta(minutes=SHIPPING_METRICS_CACHE_MINUTES)
+    ):
+        return cached["payload"]
+
+    start = today - timedelta(days=days - 1)
+    end = today + timedelta(days=1)
+    try:
+        rows = _fetch_shipping_metric_rows(start, end)
+        payload = shipping_metrics.build_shipping_metrics(
+            rows, start, end, as_of=datetime.now(timezone.utc)
+        )
+        payload["period"]["is_partial"] = True
+        payload["period"]["latest_complete_date"] = (
+            today - timedelta(days=1)
+        ).isoformat()
+        payload["error"] = None
+        payload["stale"] = False
+        try:
+            shipping_store.save_metric_snapshot(
+                snapshot_date=today,
+                period_days=days,
+                payload=payload,
+                source_as_of=payload.get("as_of"),
+            )
+        except Exception as exc:  # noqa: BLE001 - history should not hide fresh metrics
+            logger.warning("Could not save shipping metric snapshot: %s", exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Shipping management metric query failed")
+        snapshot = shipping_store.get_metric_snapshot(today, days)
+        if snapshot:
+            payload = snapshot
+            payload["error"] = f"Live refresh failed; showing the latest saved snapshot: {exc}"
+            payload["stale"] = True
+        else:
+            payload = _empty_scorecard_payload(days, str(exc))
+
+    _shipping_scorecard_cache[cache_key] = {
+        "payload": payload,
+        "_cached_at": datetime.now(),
+    }
+    return payload
+
+
 _excess_cache: dict[str, Any] = {"payload": None, "fetched_at": None}
 
 
@@ -4437,6 +4854,7 @@ def build_verify_daily_payload(
 # Task views come first and reporting views come last. The overview uses local
 # session data only, so opening Shipping never blocks on an ERP report query.
 SHIPPING_VIEWS = {
+    "scorecard": "Scorecard",
     "work": "Overview",
     "pick": "Pick orders",
     "verify": "Verify boxes",
@@ -4511,7 +4929,7 @@ def build_pick_order_queue() -> dict[str, Any]:
 @app.get("/shipping")
 @require_trusted_client
 def shipping_page():
-    view = request.args.get("view") or "work"
+    view = request.args.get("view") or "scorecard"
     if view not in SHIPPING_VIEWS:
         view = "work"
 
@@ -4525,8 +4943,16 @@ def shipping_page():
     latest_success_by_type: dict[str, Any] = {}
     pick_orders: list[dict[str, Any]] = []
     ready_for_pack: list[dict[str, Any]] = []
+    scorecard = None
+    release_gate_payload = None
+    scorecard_days = parse_scorecard_days(request.args.get("days"))
 
-    if view == "recon":
+    if view == "scorecard":
+        scorecard = _audit_json_safe(
+            build_shipping_scorecard_payload(scorecard_days)
+        )
+        release_gate_payload = _audit_json_safe(build_release_gate_payload())
+    elif view == "recon":
         recon_payload = _audit_json_safe(build_recon_payload(request.args.get("date")))
     elif view == "shortages":
         shortages = _audit_json_safe(build_shortage_payload())
@@ -4584,7 +5010,73 @@ def shipping_page():
         ready_for_pack=ready_for_pack,
         max_pick_orders=pick_store.MAX_ORDERS_PER_SESSION,
         today_iso=_today_local().isoformat(),
+        scorecard=scorecard,
+        scorecard_days=scorecard_days,
+        release_gate=release_gate_payload,
     )
+
+
+@app.get("/api/shipping/metrics")
+@require_trusted_client
+def api_shipping_metrics():
+    days = parse_scorecard_days(request.args.get("days"))
+    force = request.args.get("refresh") == "1"
+    return jsonify(_audit_json_safe(build_shipping_scorecard_payload(days, force=force))), 200
+
+
+@app.get("/api/shipping/release-gate")
+@require_trusted_client
+def api_shipping_release_gate():
+    force = request.args.get("refresh") == "1"
+    return jsonify(_audit_json_safe(build_release_gate_payload(force=force))), 200
+
+
+@app.post("/shipping/release-exceptions")
+@require_trusted_client
+@require_csrf
+def shipping_release_exception_add():
+    order_id = (request.form.get("cust_order_id") or "").strip().upper()
+    reason = (request.form.get("reason") or "").strip()
+    operator = (request.form.get("operator") or "").strip()
+    try:
+        hours = int(request.form.get("expires_hours") or "24")
+        if hours < 1 or hours > 168:
+            raise ValueError
+        expires = datetime.now(timezone.utc) + timedelta(hours=hours)
+        shipping_store.add_exception(
+            cust_order_id=order_id,
+            reason=reason,
+            created_by=operator,
+            expires_at=expires.isoformat(),
+        )
+    except ValueError as exc:
+        flash(str(exc), "error")
+    else:
+        _release_gate_cache.update(
+            {"payload": None, "fetched_at": None, "signature": None}
+        )
+        flash(f"Release exception added for {order_id}.", "success")
+    return redirect(url_for("shipping_page", view="scorecard"))
+
+
+@app.post("/shipping/release-exceptions/<int:exception_id>/revoke")
+@require_trusted_client
+@require_csrf
+def shipping_release_exception_revoke(exception_id: int):
+    operator = (request.form.get("operator") or "").strip()
+    try:
+        revoked = shipping_store.revoke_exception(exception_id, operator)
+    except ValueError as exc:
+        flash(str(exc), "error")
+    else:
+        _release_gate_cache.update(
+            {"payload": None, "fetched_at": None, "signature": None}
+        )
+        flash(
+            "Release exception revoked." if revoked else "Release exception was already inactive.",
+            "success" if revoked else "error",
+        )
+    return redirect(url_for("shipping_page", view="scorecard"))
 
 
 @app.get("/api/shipping/shortages")

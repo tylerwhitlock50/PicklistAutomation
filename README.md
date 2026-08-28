@@ -5,6 +5,8 @@ Simple Python app that:
 - Runs against Microsoft SQL Server
 - Stores each run in SQLite (keeps last `MAX_RUNS_TO_KEEP` runs)
 - Shows latest picklist in a web UI
+- Shows JP's six-metric Shipping management scorecard with daily trends and action queues
+- Evaluates auditable order-release decisions before allocation (advisory by default)
 - Exports latest picklist to Excel
 - Exports prior successful runs from the Recent Runs table
 - Sends Telegram + SMTP notifications for success/failure
@@ -54,6 +56,50 @@ For sensitive saved values (`MSSQL_CONNECTION_STRING`, Telegram bot token, SMTP 
 ```bash
 python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
+
+## Shipping management scorecard
+
+Open `http://localhost:5000/shipping` for the default 30-day management view. It includes:
+
+- Ship on time and ship complete, with explicit cohorts and denominators
+- Average guns per shipment, single-gun shipments, total guns, and total shipments
+- Prior-period comparisons, daily service/volume trends, late-order and single-gun queues
+- Promise-date/source coverage so missing data is visible rather than scored silently
+- A release queue showing `SHIP NOW`, `ACCUMULATING`, `HOLD`, and `BLOCKED` with reasons and next dates
+
+The home page also displays a compact four-metric strip linked to the full six-metric scorecard. JSON consumers can use `GET /api/shipping/metrics?days=30` and `GET /api/shipping/release-gate`.
+
+The scorecard uses VISUAL packlists as shipment grain and serialized trace units as the gun measure. Metric contracts, rollout steps, and reconciliation checks are documented in [`docs/shipping-kpi-release-gates-plan.md`](docs/shipping-kpi-release-gates-plan.md).
+
+## Order release gate
+
+Configure the gate from Settings. New installs start in `advisory`, so Shipping can validate the queue without changing picklists. After sign-off, `enforced` injects only released order IDs into both picklist queries before supply allocation. If the release evaluation fails while enforced, the run stops instead of bypassing the policy.
+
+Rule precedence is: hard blocks; approved temporary exceptions and ordinary commitment protection; configured protected accumulation; complete-order release; customer batch/sweep policies; then wait for completion. `HOLD` does not reserve inventory. `ACCUMULATING` does: allocatable units remain in their shelf locations but are subtracted before later normal orders are evaluated. Every evaluation recomputes that logical protection from current supply, and every policy version, decision, allocation, and temporary exception is retained in SQLite.
+
+Example customer-policy JSON (Thursday is weekday `3`):
+
+```json
+{
+  "LIPSEYS": {
+    "accumulate": true,
+    "min_guns": 100,
+    "sweep_weekday": 3
+  }
+}
+```
+
+With `accumulate: true`, the gate protects available guns for that customer. With no target or sweep, a protected order releases when it becomes complete. When `min_guns` and/or `sweep_weekday` is configured, the protected customer batch releases at the target or sweep; an approved temporary exception can release it sooner. An accumulating order inside the commitment-protection window remains protected and is flagged for management review instead of being fragmented automatically. Customers without `accumulate: true` retain the prior non-reserving behavior.
+
+Customer-specific accumulation, thresholds, and sweep days are intentionally unset until JP and Shipping approve them; the email's Lipsey's cadence was an example, not an approved production rule.
+
+To reconcile the queries against the configured live VISUAL source without exposing order/customer detail:
+
+```bash
+python scripts/validate_shipping_management.py --days 30
+```
+
+This command is read-only and prints aggregate KPI, coverage, and release-reason QA.
 
 ## Access Control
 

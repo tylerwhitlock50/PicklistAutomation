@@ -50,6 +50,7 @@ DemandBase AS (
        AND ce.CREDIT_STATUS = 'A'
     WHERE co.STATUS = 'R'
       AND col.LINE_STATUS = 'A'
+      __RELEASE_GATE_FILTER__
       AND NOT EXISTS (
           SELECT 1
           FROM ExcludedCustomers ec

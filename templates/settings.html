@@ -123,6 +123,55 @@
 
           <section class="settings-section">
             <div class="settings-section-header">
+              <h2>Order Release Gate</h2>
+              <p class="helper-text">
+                The gate controls order eligibility before picklist allocation. Start in advisory
+                mode; enforced mode removes held orders from generated lists.
+              </p>
+            </div>
+            <label for="release_gate_mode">Mode</label>
+            <select id="release_gate_mode" name="release_gate_mode">
+              <option value="off" {% if release_gate_mode == 'off' %}selected{% endif %}>Off</option>
+              <option value="advisory" {% if release_gate_mode == 'advisory' %}selected{% endif %}>Advisory &mdash; show decisions, do not filter</option>
+              <option value="enforced" {% if release_gate_mode == 'enforced' %}selected{% endif %}>Enforced &mdash; only Ship Now orders reach picklists</option>
+            </select>
+
+            <label for="release_gate_due_override_days">Commitment-protection days</label>
+            <input
+              id="release_gate_due_override_days"
+              name="release_gate_due_override_days"
+              type="number"
+              min="0"
+              max="30"
+              step="1"
+              value="{{ release_gate_due_override_days }}"
+            />
+            <p class="helper-text">
+              Orders whose Promise Ship date is within this many days may release available units
+              even when the order is incomplete. Accumulating orders are flagged for review instead
+              of being split automatically; an approved exception can release them. Default: 1 day.
+            </p>
+
+            <label for="release_gate_customer_policies_json">Customer consolidation policies (JSON)</label>
+            <textarea
+              id="release_gate_customer_policies_json"
+              name="release_gate_customer_policies_json"
+              rows="8"
+              spellcheck="false"
+              class="mono"
+            >{{ release_gate_customer_policies_json }}</textarea>
+            <p class="helper-text">
+              Key by customer ID. Example:
+              <code>{"LIPSEYS":{"accumulate":true,"min_guns":100,"sweep_weekday":3}}</code>.
+              <code>accumulate</code> protects available shelf inventory from later orders. With no
+              target or sweep it releases at full-order availability; otherwise the gun target,
+              sweep day, or an approved exception releases the protected batch.
+              Weekdays are 0=Monday through 6=Sunday. Values must be approved before enforcement.
+            </p>
+          </section>
+
+          <section class="settings-section">
+            <div class="settings-section-header">
               <h2>Run Limit</h2>
               <p class="helper-text">Current source: <strong>{{ max_runs_source }}</strong></p>
             </div>
