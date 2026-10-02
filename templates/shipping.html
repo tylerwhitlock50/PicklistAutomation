@@ -8,7 +8,8 @@
   </head>
   <body>
     <main class="page-shell">
-      {% set active_nav = 'shipping' %}
+      {% set active_nav = 'work' if view in ('pick', 'verify') else 'reports' %}
+      {% set active_sub = view %}
       {% include '_topnav.html' %}
 
       {% with messages = get_flashed_messages(with_categories=true) %}
@@ -22,7 +23,6 @@
       {% set row_cap = 50 %}
       {% set view_titles = {
         'scorecard': 'Management scorecard',
-        'work': 'What needs attention?',
         'recon': 'Did everything ship?',
         'shortages': 'Component shortages',
         'stage': 'Staged shipments',
@@ -32,7 +32,6 @@
       } %}
       {% set view_copy = {
         'scorecard': 'One shared view of service, consolidation, throughput, and the orders that need management attention.',
-        'work': 'Start or resume today’s shipping work. Reports and historical checks are available after the operational steps.',
         'recon': "Each morning's picklist is the plan; the packlists are what actually left. This view lines them up, with shipments checked through today.",
         'shortages': 'Open component demand the picklist cannot see, split by why.',
         'stage': 'Serialized units sitting in SHIPPING stage bins — staged goods should be gone within the target window.',
@@ -44,7 +43,7 @@
       <section class="hero card">
         <div class="hero-top">
           <div>
-            <p class="eyebrow">Shipping Ops</p>
+            <p class="eyebrow">{{ 'Work' if view in ('pick', 'verify') else 'Reports' }}</p>
             <h1>{{ view_titles[view] }}</h1>
           </div>
           {% if view == 'recon' and not recon.error %}
@@ -54,13 +53,6 @@
           {% endif %}
         </div>
         <p class="hero-copy">{{ view_copy[view] }}</p>
-        <nav class="analytics-toolbar" aria-label="Shipping views">
-          {% for key, label in view_options.items() %}
-          <a class="analytics-window {{ 'active' if view == key }}"
-             href="{{ url_for('shipping_page', view=key) }}"
-             data-loading-message="Loading {{ label|lower }}&hellip;">{{ label }}</a>
-          {% endfor %}
-        </nav>
       </section>
 
       {% if view == 'scorecard' %}
@@ -125,6 +117,72 @@
           {% endfor %}
         </div>
       </section>
+
+      {% if hold_stats or request_stats %}
+      <section class="card">
+        <div class="scorecard-head">
+          <div>
+            <p class="eyebrow">Friction</p><h2>Holds and requests</h2>
+            <p class="helper-text">How long orders sit on readiness holds and how fast requests get answered &middot; last {{ scorecard_days }} days</p>
+          </div>
+          <a class="button tertiary" href="{{ url_for('shipping_page', view='holds') }}">Open holds</a>
+        </div>
+        <div class="audit-tiles analytics-tiles">
+          {% if hold_stats %}
+          {% set open_total = hold_stats.open.total %}
+          {% set cleared_total = hold_stats.cleared.total %}
+          <div class="audit-tile {{ 'tile-misplaced' if open_total.count else 'tile-verified' }}">
+            <span class="audit-tile-num">{{ open_total.count }}</span>
+            <span class="audit-tile-label">Open holds</span>
+            <span class="audit-tile-sub">{% if open_total.median_hours is not none %}median age {{ (open_total.median_hours / 24)|round(1) }} days &middot; oldest {{ (open_total.max_hours / 24)|round(1) }} days{% else %}none open{% endif %}</span>
+          </div>
+          <div class="audit-tile tile-verified">
+            <span class="audit-tile-num">{{ cleared_total.count }}</span>
+            <span class="audit-tile-label">Holds cleared</span>
+            <span class="audit-tile-sub">{% if cleared_total.median_hours is not none %}median {{ cleared_total.median_hours|round(0)|int }} h to clear{% else %}none cleared in window{% endif %}</span>
+          </div>
+          {% endif %}
+          {% if request_stats %}
+          <div class="audit-tile {{ 'tile-missing' if request_stats.overdue else 'tile-pending' }}">
+            <span class="audit-tile-num">{{ request_stats.open }}</span>
+            <span class="audit-tile-label">Open requests</span>
+            <span class="audit-tile-sub">{{ request_stats.overdue }} past SLA &middot; {{ request_stats.urgent }} urgent</span>
+          </div>
+          <div class="audit-tile tile-pending">
+            <span class="audit-tile-num">{{ request_stats.median_hours_to_ack if request_stats.median_hours_to_ack is not none else '–' }}</span>
+            <span class="audit-tile-label">Hours to first response</span>
+            <span class="audit-tile-sub">median &middot; {{ request_stats.median_hours_to_close if request_stats.median_hours_to_close is not none else '–' }} h to close &middot; {{ request_stats.created_in_window }} requests</span>
+          </div>
+          {% endif %}
+        </div>
+        {% if hold_stats and hold_stats.open.by_owner %}
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Owner</th><th>Open holds</th><th>Median age</th><th>Oldest</th><th>Cleared in window</th><th>Median time to clear</th></tr></thead>
+            <tbody>
+              {% for owner, st in hold_stats.open.by_owner.items() %}
+              {% set cl = hold_stats.cleared.by_owner.get(owner) %}
+              <tr>
+                <td>{{ owner_labels.get(owner, owner) }}</td>
+                <td class="mono">{{ st.count }}</td>
+                <td class="mono">{{ (st.median_hours / 24)|round(1) if st.median_hours is not none else '–' }} d</td>
+                <td class="mono">{{ (st.max_hours / 24)|round(1) if st.max_hours is not none else '–' }} d</td>
+                <td class="mono">{{ cl.count if cl else 0 }}</td>
+                <td class="mono">{{ cl.median_hours|round(0)|int ~ ' h' if cl and cl.median_hours is not none else '–' }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% if hold_stats.open.by_reason %}
+        <p class="helper-text">
+          Open by reason:
+          {% for code, st in hold_stats.open.by_reason.items()|sort(attribute='1.count', reverse=true) %}{{ hold_reason_labels.get(code, code) }} <strong>{{ st.count }}</strong>{{ '' if loop.last else ' · ' }}{% endfor %}
+        </p>
+        {% endif %}
+        {% endif %}
+      </section>
+      {% endif %}
 
       <section class="scorecard-chart-grid">
         <article class="card scorecard-chart-card">
@@ -209,7 +267,7 @@
         <h3>Active exceptions</h3><div class="table-wrap"><table>
           <thead><tr><th>Order</th><th>Reason</th><th>Approved by</th><th>Expires</th><th></th></tr></thead>
           <tbody>{% for ex in release_gate.active_exceptions %}<tr>
-            <td class="mono">{{ ex.cust_order_id }}</td><td>{{ ex.reason }}</td><td>{{ ex.created_by }}</td><td>{{ ex.expires_at[:16]|replace('T', ' ') }} UTC</td>
+            <td class="mono">{{ ex.cust_order_id }}</td><td>{{ ex.reason }}</td><td>{{ ex.created_by }}</td><td>{{ ex.expires_at|local_dt }}</td>
             <td><form method="post" action="{{ url_for('shipping_release_exception_revoke', exception_id=ex.id) }}" class="inline-form"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}" /><input type="hidden" name="operator" value="" data-revoke-operator /><button class="button tertiary table-button" type="submit">Revoke</button></form></td>
           </tr>{% endfor %}</tbody>
         </table></div>
@@ -293,70 +351,6 @@
           } catch (e) {}
         })();
       </script>
-      {% endif %}
-
-      {% if view == 'work' %}
-      {% set active_picks = pick_sessions|selectattr('status', 'equalto', 'active')|list %}
-      {% set active_verifications = verify_sessions|selectattr('status', 'equalto', 'active')|list %}
-      <section class="shipping-work-grid" aria-label="Shipping workflow">
-        <article class="card workflow-card workflow-primary">
-          <span class="workflow-step">1</span>
-          <p class="eyebrow">Pull inventory</p>
-          <h2>Pick orders</h2>
-          <p>Scan the sales order, then confirm each item pulled for that customer.</p>
-          {% if active_picks %}
-          <div class="work-queue">
-            {% for session in active_picks[:3] %}
-            <a class="work-queue-item" href="{{ url_for('pick_session_page', session_id=session.id) }}">
-              <span><strong>Resume {{ session.query_type }} pick</strong><small>{{ session.picked_units }}/{{ session.planned_units }} units · started {{ session.started_display }}</small></span>
-              <span aria-hidden="true">&rarr;</span>
-            </a>
-            {% endfor %}
-          </div>
-          {% else %}
-          <p class="work-clear">No active pick sessions.</p>
-          {% endif %}
-          <a class="button {{ 'tertiary' if active_picks else '' }}" href="{{ url_for('shipping_page', view='pick') }}">{{ 'View pick work' if active_picks else 'Start a pick' }}</a>
-        </article>
-
-        <article class="card workflow-card workflow-primary">
-          <span class="workflow-step">2</span>
-          <p class="eyebrow">Check the box</p>
-          <h2>Verify packlists</h2>
-          <p>Scan a packlist and confirm every serialized item before the box leaves.</p>
-          {% if active_verifications %}
-          <div class="work-queue">
-            {% for session in active_verifications[:3] %}
-            <a class="work-queue-item" href="{{ url_for('verify_session_page', session_id=session.id) }}">
-              <span><strong>Resume {{ session.packlist_id }}</strong><small>{{ session.customer_name or session.customer_id or 'Customer not listed' }} · started {{ session.started_display }}</small></span>
-              <span aria-hidden="true">&rarr;</span>
-            </a>
-            {% endfor %}
-          </div>
-          {% else %}
-          <p class="work-clear">No verifications in progress.</p>
-          {% endif %}
-          <a class="button {{ 'tertiary' if active_verifications else '' }}" href="{{ url_for('shipping_page', view='verify') }}#verify-start">{{ 'View verification work' if active_verifications else 'Verify a box' }}</a>
-        </article>
-
-        <article class="card workflow-card workflow-support">
-          <span class="workflow-step">3</span>
-          <p class="eyebrow">Clear blockers</p>
-          <h2>Exceptions</h2>
-          <div class="workflow-links">
-            <a href="{{ url_for('shipping_page', view='stage') }}"><strong>Staged shipments</strong><span>Find serialized units waiting too long &rarr;</span></a>
-            <a href="{{ url_for('shipping_page', view='shortages') }}"><strong>Component shortages</strong><span>Find transfers and true stockouts &rarr;</span></a>
-          </div>
-        </article>
-
-        <article class="card workflow-card workflow-support">
-          <span class="workflow-step">4</span>
-          <p class="eyebrow">Close the day</p>
-          <h2>Reconciliation</h2>
-          <p>Compare the morning plan with what actually shipped after operational work is complete.</p>
-          <a class="button tertiary" href="{{ url_for('shipping_page', view='recon') }}" data-loading-message="Loading reconciliation&hellip;">Review shipments</a>
-        </article>
-      </section>
       {% endif %}
 
       {% if view == 'recon' %}
@@ -889,7 +883,7 @@
               <tr>
                 <td><a href="{{ url_for('pick_session_page', session_id=s.id) }}">#{{ s.id }}</a></td>
                 <td><span class="pill run-type {{ s.query_type }}">{{ s.query_type }}</span></td>
-                <td><span class="pill {{ 'success' if s.status == 'completed' else 'running' }}">{{ s.status }}</span></td>
+                <td><span class="pill {{ 'success' if s.status == 'completed' else ('abandoned' if s.status == 'abandoned' else 'running') }}">{{ 'closed short' if s.status == 'abandoned' else s.status }}</span>{% if s.status == 'abandoned' and s.closed_by %}<br /><span class="helper-text">by {{ s.closed_by }}</span>{% endif %}</td>
                 <td>{{ s.operator or '' }}</td>
                 <td>{{ s.started_display or '' }}</td>
                 <td>{{ s.picked_units }}/{{ s.planned_units }}</td>
@@ -897,6 +891,13 @@
                 <td class="table-actions">
                   <a class="button {{ 'secondary' if s.status == 'active' else 'tertiary' }} table-button" href="{{ url_for('pick_session_page', session_id=s.id) }}">{{ 'Resume' if s.status == 'active' else 'View' }}</a>
                   <a class="button tertiary table-button" href="{{ url_for('pick_session_export', session_id=s.id) }}" data-no-loading>Export</a>
+                  {% if s.status in ('active', 'closed') %}
+                  <form method="post" action="{{ url_for('pick_session_abandon', session_id=s.id) }}" class="inline-form close-session" onsubmit="return confirm('Close pick session #{{ s.id }} short? Its orders go back to the queue and anything pulled must go back on the shelf.');">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                    <input type="text" name="reason" placeholder="Reason" required maxlength="200" />
+                    <button class="button danger table-button" type="submit">Close short</button>
+                  </form>
+                  {% endif %}
                 </td>
               </tr>
               {% endfor %}

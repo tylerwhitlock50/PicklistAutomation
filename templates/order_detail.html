@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="csrf-token" content="{{ csrf_token() }}" />
+    <title>{{ order.order_id }} &middot; Order</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <main class="page-shell">
+      {% set active_nav = 'lookup' %}
+      {% set active_sub = 'orders' %}
+      {% include '_topnav.html' %}
+
+      {% macro money(value) %}${{ '%.2f'|format(value or 0) }}{% endmacro %}
+      {% macro age(hours) %}{% if hours is none %}&mdash;{% elif hours >= 48 %}{{ (hours / 24)|round(0, 'floor')|int }} days{% else %}{{ hours|round(0)|int }} hours{% endif %}{% endmacro %}
+
+      <section class="hero card">
+        <div class="hero-top">
+          <div>
+            <p class="eyebrow"><a href="{{ url_for('orders_page') }}">Orders</a> &rsaquo; detail</p>
+            <h1 class="mono">{{ order.order_id }}</h1>
+          </div>
+          <div>
+            {% if order.found %}<span class="state-badge state-{{ order.state }}">{{ order.state }}</span>{% endif %}
+          </div>
+        </div>
+        {% if order.error %}
+        <p class="flash error">Could not load this order from VISUAL: {{ order.error }}</p>
+        {% endif %}
+        {% if not order.found and not order.error %}
+        <p class="empty-state">No sales order with id <strong>{{ order.order_id }}</strong> was found.</p>
+        {% elif order.found %}
+        <p class="hero-copy">
+          <strong>{{ order.customer_name or order.customer_id }}</strong>
+          &middot; status {{ order.order_status }}{% if order.closed %} (closed){% endif %}
+          &middot; {{ order.open_qty|int }} open unit{{ '' if order.open_qty == 1 else 's' }} worth {{ money(order.open_value) }}
+          {% if order.due %}&middot; due {{ order.due }}{% endif %}
+          {% if order.on_picklist %}&middot; on today's picklist{% elif order.on_picklist is sameas false %}&middot; not on today's picklist{% endif %}
+        </p>
+        <p class="helper-text">
+          {% if order.holds %}
+            {{ order.blocking_count }} blocking hold{{ '' if order.blocking_count == 1 else 's' }}, {{ order.hold_count - order.blocking_count }} advisory
+            &middot; owners: {{ order.owner_labels|join(', ') }}
+          {% else %}
+            No holds. This order can ship as soon as it is picked.
+          {% endif %}
+          &middot; live check {{ (order.live_evaluated_at or '')[:16]|replace('T', ' ') }} UTC
+        </p>
+        {% endif %}
+      </section>
+
+      {% if order.found %}
+      <section class="card">
+        <h2>Holds</h2>
+        {% if order.holds %}
+        {% for h in order.holds %}
+        <article class="hold-item {{ 'blocking' if h.blocking else 'non-blocking' }}" data-hold-id="{{ h.id or '' }}">
+          <div class="hold-item-head">
+            <div>
+              <span class="hold-pill {{ 'blocking' if h.blocking }} {{ 'critical' if h.critical }}">{{ 'Critical' if h.critical else ('Blocking' if h.blocking else 'Advisory') }}</span>
+              <strong>{{ h.label }}</strong>{% if h.line_no %} <span class="helper-text">line {{ h.line_no }}</span>{% endif %}
+            </div>
+            <div class="helper-text">
+              owner: <strong>{{ h.owner_label }}</strong>
+              {% if h.age_hours is not none %}&middot; open {{ age(h.age_hours) }}{% endif %}
+              {% if h.acknowledged_by %}&middot; acknowledged by {{ h.acknowledged_by }} {{ (h.acknowledged_at or '')[:16]|replace('T', ' ') }}{% endif %}
+            </div>
+          </div>
+          {% if h.detail %}
+          <p class="hold-detail">
+            {% for key, value in h.detail.items() %}{% if value is not none and value != '' %}<code>{{ key }}</code> {{ value }}{{ '' if loop.last else ' · ' }}{% endif %}{% endfor %}
+          </p>
+          {% endif %}
+          {% if h.id and not h.acknowledged_at %}
+          <form class="hold-ack-form" data-ack-form data-hold-id="{{ h.id }}" data-no-loading>
+            <input type="text" name="note" placeholder="What are you doing about it? (optional)" maxlength="300" />
+            <button type="submit" class="button tertiary">Acknowledge</button>
+          </form>
+          {% elif not h.id %}
+          <p class="helper-text">Seen on the live check but not yet in the punch list; it will appear after the next scheduled evaluation.</p>
+          {% endif %}
+        </article>
+        {% endfor %}
+        {% else %}
+        <p class="work-clear">No holds on this order.</p>
+        {% endif %}
+        <p class="inline-status" id="ack-status" hidden></p>
+      </section>
+
+      <div class="detail-grid">
+        <section class="card">
+          <h2>Ship-to &amp; FFL</h2>
+          {% set st = order.ship_to or {} %}
+          <dl class="kv">
+            <dt>Ship-to</dt>
+            <dd>
+              {% if st.present %}
+              <strong>{{ st.name }}</strong><br />
+              {% for line in [st.addr_1, st.addr_2, st.addr_3] if line %}{{ line }}<br />{% endfor %}
+              {{ st.city }}{% if st.city and st.state %}, {% endif %}{{ st.state }} {{ st.zip }} {{ st.country }}
+              {% if not st.active %}<br /><span class="hold-pill blocking">inactive address</span>{% endif %}
+              {% else %}<span class="muted">none on order</span>{% endif %}
+              <br /><span class="helper-text">ship-to id {{ order.ship_to_id or '—' }}</span>
+            </dd>
+            <dt>Ship via</dt>
+            <dd>{{ order.ship_via or '—' }}{% if order.ship_via_source == 'customer' %} <span class="helper-text">(from customer master)</span>{% endif %}</dd>
+            <dt>FOB</dt>
+            <dd>{{ order.fob or '—' }}</dd>
+          </dl>
+          {% set ffl = order.ffl or {} %}
+          <h3>FFL on file</h3>
+          <dl class="kv">
+            <dt>Ship-to FFL</dt>
+            <dd class="mono">{{ ffl.shipto_number or '—' }}{% if ffl.shipto_expiry_raw %} <span class="helper-text">exp {{ ffl.shipto_expiry_raw }}{% if ffl.shipto_expiry %} ({{ ffl.shipto_expiry }}){% else %} (unreadable){% endif %}</span>{% endif %}</dd>
+            <dt>Master FFL</dt>
+            <dd class="mono">{{ ffl.master_number or '—' }}{% if ffl.master_expiry_raw %} <span class="helper-text">exp {{ ffl.master_expiry_raw }}{% if ffl.master_expiry %} ({{ ffl.master_expiry }}){% else %} (unreadable){% endif %}</span>{% endif %}</dd>
+            <dt>Used for checks</dt>
+            <dd>{% if ffl.source == 'shipto' %}ship-to record{% if ffl.days_to_expiry is not none %} &middot; {{ ffl.days_to_expiry }} days to expiry{% endif %}{% elif ffl.source == 'master' %}customer master (ship-to has no FFL){% if ffl.days_to_expiry is not none %} &middot; {{ ffl.days_to_expiry }} days to expiry{% endif %}{% else %}<strong>none, no FFL on the ship-to or the customer master</strong>{% endif %}</dd>
+            <dt>Master vs ship-to</dt>
+            <dd>{% if ffl.numbers_agree is none %}<span class="muted">only one record</span>{% elif ffl.numbers_agree %}same number{% else %}<span class="muted">different numbers (informational, the ship-to governs)</span>{% endif %}</dd>
+            <dt>Attachments</dt>
+            <dd>{{ order.docs.attachments }} total &middot; {{ order.docs.ffl_ez_check }} EZ check &middot; {{ order.docs.ffl_master }} FFL copy
+              {% if order_documents %}
+              <ul class="doc-list">
+                {% for d in order_documents %}
+                <li><span class="hold-pill {{ 'blocking' if d.kind in ('ffl_ez_check', 'ffl_master') }}">{{ {'ffl_ez_check': 'EZ check', 'ffl_master': 'FFL copy'}.get(d.kind, 'other') }}</span> <span class="mono">{{ d.document_id }}</span>{% if d.created %} <span class="helper-text">{{ d.created }}</span>{% endif %}</li>
+                {% endfor %}
+              </ul>
+              <span class="helper-text">{% if ocr_enabled %}FFL documents are read and compared with the ship-to on each readiness refresh.{% else %}Document comparison (OCR) is off; enable READINESS_OCR_ENABLED to check the licensee name and premise automatically.{% endif %}</span>
+              {% endif %}
+            </dd>
+          </dl>
+        </section>
+
+        <section class="card">
+          <h2>Credit</h2>
+          {% set cr = order.credit or {} %}
+          <dl class="kv">
+            <dt>Status</dt>
+            <dd>{{ cr.status or '—' }}{% if cr.approved %} (approved){% else %} <strong>(not approved)</strong>{% endif %}</dd>
+            <dt>Limit</dt>
+            <dd>{% if cr.limit %}{{ money(cr.limit) }}{% else %}<span class="muted">none set</span>{% endif %} &middot; ship-time control <span class="mono">{{ cr.ship_ctl or '—' }}</span></dd>
+            <dt>Open AR</dt>
+            <dd>{{ money(cr.open_recv) }}</dd>
+            <dt>Shipped, not invoiced</dt>
+            <dd>{{ money(cr.open_shipped) }}</dd>
+            <dt>This order</dt>
+            <dd>{{ money(cr.order_open_value) }}</dd>
+            <dt>Projected exposure</dt>
+            <dd>{{ money(cr.projected) }}{% if cr.would_exceed %} <strong>over the limit by {{ money(cr.over_by) }}</strong>{% elif cr.headroom is not none %} <span class="helper-text">headroom {{ money(cr.headroom) }}</span>{% endif %}</dd>
+          </dl>
+
+          <h3>Order facts</h3>
+          <dl class="kv">
+            <dt>Order date</dt><dd>{{ order.order_date or '—' }}</dd>
+            <dt>Promise ship</dt><dd>{{ order.promise_ship or '—' }}</dd>
+            <dt>Promise delivery</dt><dd>{{ order.promise_del or '—' }}</dd>
+            <dt>Desired ship</dt><dd>{{ order.desired_ship or '—' }}</dd>
+            <dt>Sales rep</dt><dd>{{ order.salesrep_id or '—' }}</dd>
+            <dt>Customer PO</dt><dd>{{ order.po_ref or '—' }}</dd>
+            <dt>Account type</dt><dd>{{ order.discount_code or '—' }}
+              {% set f = order.flags or {} %}
+              {% if f.is_rma %}<span class="hold-pill">RMA</span>{% endif %}
+              {% if f.is_international %}<span class="hold-pill">international</span>{% endif %}
+              {% if f.is_employee %}<span class="hold-pill">employee</span>{% endif %}
+              {% if f.excluded_customer %}<span class="hold-pill">excluded</span>{% endif %}
+            </dd>
+          </dl>
+        </section>
+
+        <section class="card">
+          <h2>Floor status</h2>
+          <dl class="kv">
+            <dt>Today's picklist</dt>
+            <dd>{% if order.on_picklist %}on the list{% elif order.on_picklist is sameas false %}not on the list{% else %}<span class="muted">no run today</span>{% endif %}</dd>
+            {% set pk = order.pick or {} %}
+            <dt>Pick</dt>
+            <dd>{% if pk.ready_for_pack %}picked, ready for pack{% if pk.operator %} ({{ pk.operator }}){% endif %}{% elif pk.claimed %}claimed in an active pick session{% else %}<span class="muted">not started</span>{% endif %}</dd>
+            <dt>Packlist</dt>
+            <dd>{{ pk.packlist_id or '—' }}</dd>
+            {% set g = order.gate %}
+            <dt>Release gate</dt>
+            <dd>{% if g %}<strong>{{ g.decision }}</strong> &middot; {{ g.label }}{% if g.next_release_date %} &middot; next release {{ g.next_release_date }}{% endif %}{% else %}<span class="muted">no decision (gate off or order outside window)</span>{% endif %}</dd>
+          </dl>
+          <h3>Ask for something</h3>
+          <p class="owner-chips">
+            <a href="{{ url_for('requests_page', new='ship_request', so=order.order_id) }}">Ship this now</a>
+            <a href="{{ url_for('requests_page', new='hold_exception', so=order.order_id) }}">Hold / set aside</a>
+            <a href="{{ url_for('requests_page', new='order_problem', so=order.order_id) }}">Report a problem</a>
+          </p>
+        </section>
+      </div>
+
+      <section class="card">
+        <h2>Shipments</h2>
+        {% set ss = order.shipment_summary or {} %}
+        {% if order.shipments_error %}
+        <p class="helper-text">Shipment lookup failed: {{ order.shipments_error }}</p>
+        {% elif order.shipments %}
+        <p class="helper-text">
+          {{ ss.shipped_packlists }} shipped packlist{{ '' if ss.shipped_packlists == 1 else 's' }}
+          &middot; {{ ss.units_shipped|int }} unit{{ '' if ss.units_shipped == 1 else 's' }}
+          {% if ss.last_shipped %}&middot; last shipped {{ ss.last_shipped }}{% endif %}
+          {% if ss.voided %}&middot; {{ ss.voided }} voided{% endif %}
+          {% if ss.missing_tracking %}&middot; <strong>no tracking yet on {{ ss.missing_tracking|join(', ') }}</strong>{% endif %}
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Packlist</th><th>Shipped</th><th>Via</th><th>Tracking</th><th>Units</th><th>Serials</th><th>Invoice</th></tr></thead>
+            <tbody>
+              {% for p in order.shipments %}
+              <tr class="{{ 'muted' if p.voided }}">
+                <td class="mono">{{ p.packlist_id }}{% if p.voided %} <span class="hold-pill blocking">voided</span>{% endif %}</td>
+                <td class="mono">{{ p.shipped_date or '' }}{% if not p.shipped and not p.voided %} <span class="helper-text">packlisted, not shipped</span>{% endif %}</td>
+                <td>{{ p.ship_via }}</td>
+                <td class="mono">
+                  {% for t in p.tracking %}{% if t.url %}<a href="{{ t.url }}" target="_blank" rel="noopener">{{ t.number }}</a>{% else %}{{ t.number }}{% endif %}{% if t.carrier %} <span class="helper-text">{{ t.carrier }}</span>{% endif %}{{ '' if loop.last else ', ' }}{% else %}<span class="muted">none yet</span>{% endfor %}
+                </td>
+                <td>{{ p.units|int }}</td>
+                <td class="mono">{{ p.serials|join(', ') }}</td>
+                <td class="mono">{{ p.invoice_id }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <p class="helper-text">Nothing has been packlisted for this order yet.</p>
+        {% endif %}
+      </section>
+
+      <section class="card">
+        <h2>Lines</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Line</th><th>Part</th><th>Type</th><th>Ordered</th><th>Shipped</th><th>Open</th><th>Pickable</th><th>Where it is</th><th>Promise</th></tr>
+            </thead>
+            <tbody>
+              {% for ln in order.lines %}
+              <tr class="{{ 'muted' if ln.line_status != 'A' or ln.open_qty <= 0 }}">
+                <td>{{ ln.line_no }}<br /><span class="helper-text">{{ ln.line_status }}</span></td>
+                <td class="mono">{{ ln.part_id }}<br /><span class="helper-text">{{ ln.description }}</span></td>
+                <td>{{ ln.item_type }}</td>
+                <td>{{ ln.order_qty|int }}</td>
+                <td>{{ ln.shipped_qty|int }}</td>
+                <td>{{ ln.open_qty|int }}</td>
+                <td>{{ ln.available_qty|int }}</td>
+                <td class="bin-list">
+                  {% set loc = ln.locations or {} %}
+                  {% if loc.bins %}
+                    {% for cls, qty in (loc.by_class or {}).items() %}<strong>{{ bin_labels.get(cls, cls) }}</strong> {{ qty|int }}{{ '' if loop.last else ' · ' }}{% endfor %}
+                    <br />{% for b in loc.bins[:12] %}<span class="mono">{{ b.warehouse }}/{{ b.location }}</span> ({{ b.qty|int }}){{ '' if loop.last else ', ' }}{% endfor %}{% if loc.bins|length > 12 %} &hellip;{% endif %}
+                  {% else %}<span class="muted">nothing on hand</span>{% endif %}
+                  {% if feature_flags.allocation and ln.item_type == 'guns' %}<br /><a href="{{ url_for('allocation_page') }}?part={{ ln.part_id }}">allocation &rarr;</a>{% endif %}
+                </td>
+                <td class="mono">{{ ln.promise_ship or '' }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% if order.locations_error %}<p class="helper-text">Location lookup failed: {{ order.locations_error }}</p>{% endif %}
+      </section>
+
+      <section class="card">
+        <h2>Hold history</h2>
+        {% if order.hold_history %}
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Hold</th><th>Owner</th><th>First seen</th><th>Cleared</th><th>Acknowledged</th></tr></thead>
+            <tbody>
+              {% for h in order.hold_history %}
+              <tr>
+                <td>{{ h.label }}{% if h.line_no %} (line {{ h.line_no }}){% endif %}</td>
+                <td>{{ owner_labels.get(h.owner_team, h.owner_team) }}</td>
+                <td class="mono">{{ (h.first_seen_at or '')[:16]|replace('T', ' ') }}</td>
+                <td class="mono">{% if h.cleared_at %}{{ h.cleared_at[:16]|replace('T', ' ') }} <span class="helper-text">{{ h.cleared_how }}</span>{% else %}<span class="muted">open</span>{% endif %}</td>
+                <td>{% if h.acknowledged_by %}{{ h.acknowledged_by }} {{ (h.acknowledged_at or '')[:16]|replace('T', ' ') }}{% else %}&mdash;{% endif %}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <p class="helper-text">No holds have been recorded for this order.</p>
+        {% endif %}
+        {% if order.hold_events %}
+        <h3>Notes</h3>
+        <ul>
+          {% for e in order.hold_events %}
+          <li><span class="mono">{{ (e.created_at or '')[:16]|replace('T', ' ') }}</span> {{ e.actor }} {{ e.event_type }} <em>{{ e.label }}</em>{% if e.note %}: {{ e.note }}{% endif %}</li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+      </section>
+      {% endif %}
+
+      {% if order_holds or order_requests %}
+      <section class="card">
+        <h2>Holds and requests</h2>
+        {% if order_holds %}
+        <h3>Manual holds</h3>
+        <ul>
+          {% for h in order_holds %}
+          <li>
+            <span class="hold-pill {{ 'blocking' if not h.released_at }}">{{ exception_kinds.get(h.hold_kind, h.hold_kind) }}</span>
+            {{ h.reason }} &middot; by {{ h.created_by }} &middot; until {{ (h.expires_at or '')[:10] }}
+            {% if h.released_at %}<span class="helper-text">released {{ h.released_at[:10] }} by {{ h.released_by }}</span>
+            {% else %}<button type="button" class="button tertiary" data-release-hold="{{ h.id }}">Release</button>{% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+        {% if order_requests %}
+        <h3>Requests on this order</h3>
+        <ul>
+          {% for r in order_requests %}
+          <li><a href="{{ url_for('request_detail_page', request_id=r.id) }}">#{{ r.id }} {{ r.title }}</a> &middot; <span class="hold-pill {{ 'blocking' if r.overdue }}">{{ r.status|replace('_', ' ') }}</span> &middot; {{ r.created_by }}</li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+      </section>
+      {% endif %}
+    </main>
+
+    <script>
+      (function () {
+        var csrf = (document.querySelector("meta[name='csrf-token']") || {}).content || "";
+        var status = document.getElementById("ack-status");
+        function show(message, ok) {
+          if (!status) return;
+          status.hidden = false;
+          status.textContent = message;
+          status.classList.toggle("success", Boolean(ok));
+          status.classList.toggle("error", !ok);
+        }
+        document.querySelectorAll("[data-release-hold]").forEach(function (button) {
+          button.addEventListener("click", async function () {
+            if (!window.confirm("Release this hold? The order will return to the picklist.")) return;
+            button.disabled = true;
+            try {
+              var response = await fetch("/api/holds/" + button.getAttribute("data-release-hold") + "/release", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf },
+                body: "{}",
+              });
+              var data = await response.json().catch(function () { return {}; });
+              if (response.ok && data.ok) { window.location.reload(); return; }
+              show(data.message || "Could not release the hold.", false);
+            } catch (e) {
+              show("Request failed.", false);
+            } finally {
+              button.disabled = false;
+            }
+          });
+        });
+        document.querySelectorAll("[data-ack-form]").forEach(function (form) {
+          form.addEventListener("submit", async function (event) {
+            event.preventDefault();
+            var holdId = form.getAttribute("data-hold-id");
+            var note = (form.querySelector("input[name='note']") || {}).value || "";
+            var button = form.querySelector("button");
+            if (button) button.disabled = true;
+            try {
+              var response = await fetch("{{ url_for('api_order_hold_ack', order_id=order.order_id, hold_id=0) }}".replace("/0/ack", "/" + holdId + "/ack"), {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf },
+                body: JSON.stringify({ note: note }),
+              });
+              var data = await response.json().catch(function () { return {}; });
+              if (response.ok && data.ok) {
+                window.location.reload();
+                return;
+              }
+              show(data.message || (response.status === 400 ? "Pick your name in the top bar first." : "Could not acknowledge."), false);
+            } catch (e) {
+              show("Request failed.", false);
+            } finally {
+              if (button) button.disabled = false;
+            }
+          });
+        });
+      })();
+    </script>
+  </body>
+</html>

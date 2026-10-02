@@ -12,3 +12,8 @@ services:
       - ./data:/app/data
       - ./sql:/app/sql:ro
     restart: unless-stopped
+
+# The VISUAL document share (for FFL document checks) is optional and lives in
+# docker-compose.documents.yml. Start with both files once SMB_USERNAME /
+# SMB_PASSWORD are set in .env:
+#   docker compose -f docker-compose.yml -f docker-compose.documents.yml up -d --build

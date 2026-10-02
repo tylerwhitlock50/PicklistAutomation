@@ -37,6 +37,19 @@ Simple Python app that:
    ```
 6. Open: `http://localhost:5000`
 
+## Navigation
+
+The app is organised by intent, four tabs across the top with a second row for the pages in the active group:
+
+| Tab | Question | Pages |
+|---|---|---|
+| **Work** | I need to do something | Today (`/work`), Run picklist (`/`), Pick orders, Verify boxes, Audit |
+| **Reports** | Is it working? | Scorecard, Holds, Shortages, Reconciliation, Excess packlists, Staged shipments, Audit analytics, Run history (`/runs`) |
+| **Lookup** | Answer a question | Search (`/lookup`), Orders, Shipments, Stock, Serial history, Allocation |
+| **Requests** | Ask another team for something | Requests, with a badge showing the open count (red when any is past its SLA) |
+
+The Lookup search box routes by the shape of what you paste: a sales order opens order detail, a part number opens stock, anything else opens serial history. Feature flags hide the pages they cover; a tab with nothing left in it hides itself. The design notes are in [`docs/app-reorg-proposal.md`](docs/app-reorg-proposal.md).
+
 ## Runtime Settings UI
 
 Open `http://localhost:5000/settings` to set:
@@ -67,7 +80,7 @@ Open `http://localhost:5000/shipping` for the default 30-day management view. It
 - Promise-date/source coverage so missing data is visible rather than scored silently
 - A release queue showing `SHIP NOW`, `ACCUMULATING`, `HOLD`, and `BLOCKED` with reasons and next dates
 
-The home page also displays a compact four-metric strip linked to the full six-metric scorecard. JSON consumers can use `GET /api/shipping/metrics?days=30` and `GET /api/shipping/release-gate`.
+The scorecard is the landing page of the Reports tab. JSON consumers can use `GET /api/shipping/metrics?days=30` and `GET /api/shipping/release-gate`.
 
 The scorecard uses VISUAL packlists as shipment grain and serialized trace units as the gun measure. Metric contracts, rollout steps, and reconciliation checks are documented in [`docs/shipping-kpi-release-gates-plan.md`](docs/shipping-kpi-release-gates-plan.md).
 
@@ -199,3 +212,96 @@ curl -sS -b cookies.txt -X POST http://127.0.0.1:8081/api/run \
 - Request logs include method/path/status/response time.
 - Exports: `exports/`
 - Database: `data/picklist_history.db` (default, configurable via `RUN_HISTORY_DB_PATH`)
+
+
+## Orders, readiness holds, and Teams notifications
+
+The **Orders** tab (and **Shipping > Holds**) replaces the "can this ship?" / "FFL doesn't match" /
+"is this released?" traffic that used to live in the Sales-Shipping Teams chat.
+
+- `sql/readiness_candidates.sql` pulls every open physical line for orders in R/F/H status inside
+  `READINESS_LOOKAHEAD_DAYS`, with the compliance, credit, status and supply facts as columns.
+- `readiness.py` turns those facts into holds. Every hold has a reason code from `HOLD_REASONS`, an
+  owning team (Inside Sales, Finance, Shipping, Production, Compliance) and a blocking flag. Orders
+  are **BLOCKED** (someone must act), **ATTENTION** (can ship, worth a look) or **READY**.
+- `readiness_store.py` keeps the punch list in SQLite so hold age is measurable and so a new hold is
+  announced exactly once; `readiness_service.py` runs the refresh every `READINESS_REFRESH_MINUTES`
+  and after every picklist run.
+- `/orders/<SO>` answers the questions the chat used to ask: holds, ship-to and both FFL records,
+  credit exposure, where each part physically is, pick status, release-gate decision, hold history.
+
+FFL data is read from `CUST_ADDRESS.USER_4/USER_5` (ship-to, authoritative). The ship-to FFL is
+the record the rules run against: expired or unreadable there means "update the ship-to", and the
+hold detail points at the customer-master FFL when that one is current. Only when the ship-to has
+no FFL number at all does `CUSTOMER.USER_4/USER_5` stand in. A master FFL that differs from the
+ship-to FFL is shown on the order page but is not a hold. A firearm order with no FFL on either
+record raises `ffl_missing`, the one *critical* hold (dark red pill). The expiry string is parsed
+defensively in Python.
+
+**Teams**: paste a Teams Workflows incoming-webhook URL into Settings (or `TEAMS_WEBHOOK_URL`) and
+choose which events post. Cards link back to the app via `APP_PUBLIC_URL`. Delivery failures fall
+back to email; every attempt is logged in the `notification_log` table.
+
+**Who did it**: Settings > Operator roster lists everyone who can pick their name in the top bar.
+The browser remembers the choice and sends it as `X-Operator` / `operator` on every request, so
+acknowledgements and (later) requests carry a real name and team.
+
+### Shipments, tracking and stock (self-serve)
+
+- **Shipments** (`/shipments`): packlists with live UPS tracking (Z_UPS_SHIPMENTS, UDF-0000028
+  fallback), serials in each box, voided flags; by order, customer or date range. Each
+  `/orders/<SO>` page carries the same block.
+- **Daily digest**: once per day after `teams_digest_time` (Settings) a "Shipped today" card with
+  order, customer, packlist, tracking and units posts to Teams, split into 25-row cards. It is
+  idempotent per day (`notification_log`), can be previewed at `/api/shipping/digest/preview` and
+  forced with `POST /api/shipping/digest/send`.
+- **Stock** (`/stock`): every bin holding a SKU with its serials, classified (pickable R01-R09,
+  stage, rack 10, international cage, MAIN), plus what is already allocated to orders, protected by
+  the release gate, or held. Serial lookups show where one serial currently sits.
+
+### Requests and sanctioned holds (replacing "set it aside" in Teams)
+
+- **Requests** (`/requests`, Shipping hub tab *Requests*): four typed requests, each with an owning
+  team, an SLA clock and a full timeline. `ship_request` (needed-by, service level, expedite),
+  `hold_exception` (marketing / VIP / international cage / rework / approved special), 
+  `inventory_discrepancy` (part, serial, expected vs actual bin) and `order_problem` (wrong
+  tracking, duplicate unit, RMA on picklist, status correction). Every `/orders/<SO>` page carries
+  prefilled "Ship this now", "Hold / set aside" and "Report a problem" links. The owning team gets a
+  Teams card on create, assign and close.
+- **Expedites feed the release gate**: when Shipping or Management accepts a `ship_request` with
+  *Accept as expedite*, the app writes a `release_gate_exceptions` row (expires at the end of the
+  needed-by day, at most `REQUEST_EXPEDITE_MAX_HOURS` ahead), drops the gate cache and refreshes
+  readiness, so the next picklist includes the order. Closing or declining the request revokes it.
+  Acceptance is refused while a blocking readiness hold (credit, FFL, status) is open; the request
+  page names the hold and its owner.
+- **Holds are the only sanctioned set-aside**: a `hold_exception` must name a sales order or work
+  order and always expires (default 7 days, max 30). Once Shipping acknowledges it, the order is
+  removed from every picklist run (the run notification lists the exclusions) and the release gate
+  reports `HOLD / manual_hold` regardless of account policy. Holds expire on the readiness sweep or
+  can be released from the order page by Shipping / Management (`POST /api/holds/<id>/release`).
+  "Pull one and set it aside, SO coming" has no path: no order, no hold.
+- SLA hours per type can be overridden with `REQUEST_SLA_HOURS_JSON`
+  (for example `{"ship_request": 2, "order_problem": 48}`); `GET /api/requests?scope=mine|team|all`
+  and `GET /api/requests/<id>` expose the queue as JSON.
+
+### FFL document checks (readiness tier 2) and friction analytics
+
+- With `READINESS_OCR_ENABLED=true`, each readiness refresh opens the EZ Check / FFL copy attached
+  to a firearms order (VISUAL `DOCUMENT_REFERENCE` -> `DOCUMENT`, joined through
+  `DOCUMENT_PATH_MAP` onto the `documents` CIFS mount from `docker-compose.documents.yml`,
+  started with `docker compose -f docker-compose.yml -f docker-compose.documents.yml up -d`
+  once `SMB_USERNAME` / `SMB_PASSWORD` are in `.env`), extracts the text (pypdf, then
+  poppler + tesseract for scans), parses the licensee name, trade names and premise, and compares
+  them with the ship-to. Mismatches become `ship_to_vs_ffl_name_mismatch` /
+  `ship_to_vs_ffl_premise_mismatch` holds owned by Sales with both strings in the detail. The same
+  ZIP plus the same street number passes even when the road is spelled two ways.
+  A third, advisory finding (`ffl_record_differs_from_doc`) fires when the license number or
+  expiration printed on the document disagrees with the ship-to record in VISUAL, which is how a
+  dealer whose EZ Check runs to 2029 ends up flagged as "expiring today".
+- Only orders with nothing else blocking them are checked, at most `READINESS_OCR_MAX_DOCS_PER_RUN`
+  new documents per refresh; results are cached per file (`ffl_doc_cache`) so a document is read
+  once until it changes. Missing OCR dependencies or an unmounted share never fail a refresh; the
+  cache row records the error and the order page lists the attachments either way.
+- The management scorecard gains a *Holds and requests* block: open hold count and age, holds
+  cleared and median time to clear by owning team and by reason, open / past-SLA requests and
+  median hours to first response and to close.

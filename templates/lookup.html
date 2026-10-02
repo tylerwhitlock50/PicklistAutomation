@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lookup</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <main class="page-shell">
+      {% set active_nav = 'lookup' %}
+      {% set active_sub = 'search' %}
+      {% include '_topnav.html' %}
+
+      <section class="hero card">
+        <div class="hero-top">
+          <div>
+            <p class="eyebrow">Lookup</p>
+            <h1>Paste what you have. We'll open the right page.</h1>
+          </div>
+        </div>
+        <p class="hero-copy">
+          A sales order opens the order. A part number opens stock. Anything else is treated as a serial.
+          If the guess is wrong, pick a page below and it opens with the same value.
+        </p>
+        <form id="lookup-form" class="serial-search" autocomplete="off">
+          <label for="lookup-input" class="sr-only">Order, part, or serial</label>
+          <input type="text" id="lookup-input" placeholder="SO-131844 · 801-06486-00 · CV163773" autofocus />
+          <button type="submit" class="button" id="lookup-go">Open</button>
+        </form>
+        <p class="helper-text lookup-route" id="lookup-route" aria-live="polite">Type or scan a value to see where it will open.</p>
+        <div class="lookup-as" id="lookup-as" hidden>
+          <span class="helper-text">Or open as:</span>
+          {% if feature_flags.orders %}
+          <button type="button" class="button tertiary" data-as="order">Order</button>
+          <button type="button" class="button tertiary" data-as="shipments">Shipments</button>
+          <button type="button" class="button tertiary" data-as="stock">Stock</button>
+          {% endif %}
+          {% if feature_flags.serial %}
+          <button type="button" class="button tertiary" data-as="serial">Serial history</button>
+          {% endif %}
+          {% if feature_flags.allocation %}
+          <button type="button" class="button tertiary" data-as="allocation">Allocation</button>
+          {% endif %}
+        </div>
+      </section>
+
+      <section class="lookup-grid" aria-label="Lookup pages">
+        {% if feature_flags.orders %}
+        <a class="card lookup-card" href="{{ url_for('orders_page') }}" data-loading-message="Loading orders&hellip;">
+          <h2>Orders</h2>
+          <p>What is holding an order up, and who owns the fix.</p>
+        </a>
+        <a class="card lookup-card" href="{{ url_for('shipments_page') }}">
+          <h2>Shipments</h2>
+          <p>Did it ship, when, and what is the tracking number.</p>
+        </a>
+        <a class="card lookup-card" href="{{ url_for('stock_page') }}">
+          <h2>Stock</h2>
+          <p>Do we really have one, and where is it.</p>
+        </a>
+        {% endif %}
+        {% if feature_flags.serial %}
+        <a class="card lookup-card" href="{{ url_for('serial_history_page') }}">
+          <h2>Serial history</h2>
+          <p>Everything VISUAL knows about one serial number.</p>
+        </a>
+        {% endif %}
+        {% if feature_flags.allocation %}
+        <a class="card lookup-card" href="{{ url_for('allocation_page') }}" data-loading-message="Loading allocation&hellip;">
+          <h2>Allocation</h2>
+          <p>Supply for a SKU and which orders are in line for it.</p>
+        </a>
+        {% endif %}
+      </section>
+    </main>
+
+    <script>
+      (function () {
+        var FLAGS = {{ feature_flags|tojson }};
+        var URLS = {
+          order: {{ url_for('order_detail_page', order_id='__ID__')|tojson }},
+          shipments: {{ url_for('shipments_page')|tojson }},
+          stock: {{ url_for('stock_page')|tojson }},
+          serial: {{ url_for('serial_history_page')|tojson }},
+          allocation: {{ url_for('allocation_page')|tojson }}
+        };
+        var form = document.getElementById("lookup-form");
+        var input = document.getElementById("lookup-input");
+        var routeEl = document.getElementById("lookup-route");
+        var asEl = document.getElementById("lookup-as");
+        var enc = encodeURIComponent;
+
+        function clean(value) {
+          return (value || "").trim().toUpperCase().replace(/\s+/g, "");
+        }
+        function normalizeOrder(value) {
+          var m = value.match(/^(?:SO-?)?(\d{5,7})$/);
+          return m ? "SO-" + m[1] : value;
+        }
+        function urlFor(kind, value) {
+          switch (kind) {
+            case "order": return URLS.order.replace("__ID__", enc(normalizeOrder(value)));
+            case "shipments": return URLS.shipments + "?so=" + enc(normalizeOrder(value)) + "&go=1";
+            case "stock": return URLS.stock + "?part=" + enc(value);
+            case "serial": return URLS.serial + "?serial=" + enc(value);
+            case "allocation": return URLS.allocation + "?part=" + enc(value);
+          }
+          return null;
+        }
+        // Decide from the shape of the input. Order numbers are 5-7 digits with an
+        // optional SO- prefix. Part ids start with three digits and a hyphen
+        // (801-06486-00). Everything else is a serial.
+        function guess(value) {
+          if (!value) return null;
+          if (/^(?:SO-?)?\d{5,7}$/.test(value)) {
+            return FLAGS.orders ? { kind: "order", label: "Order " + normalizeOrder(value) } : null;
+          }
+          if (/^\d{3}-[0-9A-Z]+(?:-[0-9A-Z]+)*$/.test(value)) {
+            if (FLAGS.orders) return { kind: "stock", label: "Stock for part " + value };
+            if (FLAGS.allocation) return { kind: "allocation", label: "Allocation for part " + value };
+            return null;
+          }
+          if (FLAGS.serial && /^[0-9A-Z-]{3,}$/.test(value)) {
+            return { kind: "serial", label: "Serial history for " + value };
+          }
+          return null;
+        }
+        function render() {
+          var value = clean(input.value);
+          var g = guess(value);
+          asEl.hidden = !value;
+          if (!value) {
+            routeEl.textContent = "Type or scan a value to see where it will open.";
+          } else if (g) {
+            routeEl.textContent = "Enter opens: " + g.label + ".";
+          } else {
+            routeEl.textContent = "No obvious match. Pick a page below.";
+          }
+        }
+        input.addEventListener("input", render);
+        form.addEventListener("submit", function (e) {
+          e.preventDefault();
+          var value = clean(input.value);
+          var g = guess(value);
+          if (!g) { render(); input.focus(); return; }
+          window.location.href = urlFor(g.kind, value);
+        });
+        // Barcode scanners often terminate with Tab instead of Enter.
+        input.addEventListener("keydown", function (e) {
+          if (e.key === "Tab" && clean(input.value)) {
+            e.preventDefault();
+            form.requestSubmit ? form.requestSubmit() : form.dispatchEvent(new Event("submit", { cancelable: true }));
+          }
+        });
+        asEl.querySelectorAll("[data-as]").forEach(function (button) {
+          button.addEventListener("click", function () {
+            var value = clean(input.value);
+            if (!value) { input.focus(); return; }
+            window.location.href = urlFor(button.getAttribute("data-as"), value);
+          });
+        });
+        render();
+      })();
+    </script>
+  </body>
+</html>

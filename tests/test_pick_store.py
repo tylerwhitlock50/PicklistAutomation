@@ -252,6 +252,50 @@ class PickStoreOrderFlowTests(unittest.TestCase):
         event_types = {event["event_type"] for event in pick_store.get_order_events(session_id)}
         self.assertTrue({"claimed", "release", "transfer", "exception", "resume"}.issubset(event_types))
 
+    def test_abandon_session_frees_orders_and_serials(self):
+        rows = [
+            self.row("SO-1", "G-1", "guns"),
+            self.row("SO-2", "P-2", "components", qty=2),
+        ]
+        session_id = pick_store.start_order_session(
+            plan_rows=rows, selected_orders=["SO-1", "SO-2"], source_runs={"guns": 1, "components": 1}, operator="TEST",
+        )
+        pick_store.record_scan(
+            session_id, "SER-1", target_order="SO-1", serial="SER-1",
+            part_candidates=[{"part_id": "G-1", "locations": ["A01"]}],
+            operator="TEST", scanned_tote=f"PICK-{session_id}-A", scanned_location="A01",
+            request_id="serial-1",
+        )
+        pick_store.order_action(session_id, "SO-2", "exception", operator="TEST", reason="Damaged")
+        self.assertEqual(pick_store.claimed_orders(), {"SO-1", "SO-2"})
+
+        with self.assertRaisesRegex(ValueError, "reason"):
+            pick_store.abandon_session(session_id, operator="LEAD", reason="")
+        result = pick_store.abandon_session(session_id, operator="LEAD", reason="Operator went home")
+        self.assertEqual(result["status"], "abandoned")
+        self.assertEqual({o["cust_order_id"] for o in result["orders"]}, {"SO-1", "SO-2"})
+        self.assertEqual(result["picked_units"], 1)
+        self.assertEqual(pick_store.claimed_orders(), set())
+        session = pick_store.get_session(session_id)
+        self.assertEqual((session["status"], session["closed_by"], session["closed_reason"]), ("abandoned", "LEAD", "Operator went home"))
+        events = [e for e in pick_store.get_order_events(session_id) if e["event_type"] == "abandoned"]
+        self.assertEqual(len(events), 2)
+        # Scan history survives for the audit trail ...
+        self.assertTrue(any(s["serial"] == "SER-1" for s in pick_store.get_scans(session_id)))
+        # ... but the serial can be picked again in a fresh session.
+        second = pick_store.start_order_session(
+            plan_rows=rows, selected_orders=["SO-1"], source_runs={"guns": 1}, operator="OTHER",
+        )
+        scan = pick_store.record_scan(
+            second, "SER-1", target_order="SO-1", serial="SER-1",
+            part_candidates=[{"part_id": "G-1", "locations": ["A01"]}],
+            operator="OTHER", scanned_tote=f"PICK-{second}-A", scanned_location="A01",
+            request_id="serial-1-again",
+        )
+        self.assertEqual(scan["result"], "ok", scan)
+        with self.assertRaisesRegex(ValueError, "already abandoned"):
+            pick_store.abandon_session(session_id, operator="LEAD", reason="again")
+
 
 if __name__ == "__main__":
     unittest.main()

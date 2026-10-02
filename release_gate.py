@@ -40,6 +40,7 @@ REASON_CODES: dict[str, str] = {
     "scheduled_hold": "Held for the customer's scheduled sweep day",
     "below_batch_threshold": "Held below the customer's batch threshold",
     "waiting_for_completion": "Held until the full order can ship complete",
+    "manual_hold": "Held by an approved set-aside / exception request",
 }
 
 
@@ -354,6 +355,20 @@ def _allocate(
     }
 
 
+def _active_manual_hold_map(holds: Iterable[dict], today: date) -> dict[str, dict]:
+    result = {}
+    for row in holds or ():
+        order_id = _text(_get(row, "cust_order_id", "CUST_ORDER_ID", "order_id"))
+        released = _get(row, "released_at", "RELEASED_AT")
+        expires = _as_date(_get(row, "expires_at", "EXPIRES_AT"))
+        if not order_id or not _is_missing(released):
+            continue
+        if expires is not None and expires < today:
+            continue
+        result[order_id.upper()] = row
+    return result
+
+
 def _active_exception_map(exceptions: Iterable[dict], today: date) -> dict[str, dict]:
     result = {}
     for row in exceptions:
@@ -383,6 +398,7 @@ def evaluate_release_gate(
     policy_version: int = 1,
     evaluated_at: Optional[datetime] = None,
     min_ship_to_cooldown_days: int = 0,
+    manual_holds: Iterable[dict] = (),
 ) -> dict[str, Any]:
     """Return one auditable decision per order, including protected accumulation."""
     normalized_mode = (mode or "advisory").strip().lower()
@@ -544,6 +560,7 @@ def evaluate_release_gate(
         )
 
     active_exceptions = _active_exception_map(exceptions, today)
+    manual_hold_map = _active_manual_hold_map(manual_holds, today)
     decisions: dict[str, dict] = {}
 
     def record(
@@ -629,9 +646,22 @@ def evaluate_release_gate(
 
     ordered = sorted(orders.values(), key=_priority)
 
+    # Manual holds (approved set-aside / exception requests) never reserve supply
+    # and never release, whatever the account policy says. They also count as a
+    # block reason so a held order can never head a consolidation batch.
+    for order in ordered:
+        hold = manual_hold_map.get(order["order_id"].upper())
+        if not hold:
+            continue
+        order["block_reasons"].add("manual hold")
+        kind = _text(_get(hold, "hold_kind", "HOLD_KIND")) or "hold"
+        until = _text(_get(hold, "expires_at", "EXPIRES_AT"))[:10]
+        potential = allocate(order, remaining, require_complete=False)
+        record(order, "HOLD", "manual_hold", f"HOLD - manual {kind} hold until {until}", potential)
+
     # Hard business blocks never reserve supply.
     for order in ordered:
-        if not order["block_reasons"]:
+        if not order["block_reasons"] or order["order_id"].upper() in decisions:
             continue
         potential = allocate(order, remaining, require_complete=False)
         reasons = ", ".join(sorted(order["block_reasons"]))

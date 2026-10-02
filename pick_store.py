@@ -139,6 +139,8 @@ def initialize(get_conn: Callable[[], sqlite3.Connection]) -> None:
         _ensure_column(conn, "pick_lines", "upc", "TEXT")
         _ensure_column(conn, "pick_scans", "target_order", "TEXT")
         _ensure_column(conn, "pick_scans", "request_id", "TEXT")
+        _ensure_column(conn, "pick_sessions", "closed_by", "TEXT")
+        _ensure_column(conn, "pick_sessions", "closed_reason", "TEXT")
         _ensure_column(conn, "pick_scans", "scanned_tote", "TEXT")
         _ensure_column(conn, "pick_scans", "scanned_location", "TEXT")
         _ensure_column(conn, "pick_orders", "packlist_id", "TEXT")
@@ -883,6 +885,91 @@ def complete_session(session_id: int) -> dict:
     return session
 
 
+def abandon_session(session_id: int, *, operator: str, reason: str) -> dict:
+    """Close an in-progress session short.
+
+    Every order still being picked (or parked in exception) is set to
+    ``abandoned`` so it can be claimed again, serials scanned in this session
+    stop counting as picked, and the scan history stays for the audit trail.
+    Orders already marked ready for pack are left alone: they are done.
+    """
+    actor = (operator or "").strip()
+    reason_text = (reason or "").strip()
+    if not actor:
+        raise ValueError("Operator is required to close a pick session.")
+    if not reason_text:
+        raise ValueError("Enter a reason for closing this pick session.")
+    with _conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        session = conn.execute(
+            "SELECT * FROM pick_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if not session:
+            raise ValueError("Pick session not found.")
+        if session["status"] in ("completed", "abandoned"):
+            raise ValueError(f"Pick session #{session_id} is already {session['status']}.")
+        rows = conn.execute(
+            "SELECT * FROM pick_orders WHERE session_id = ? AND status IN ('picking', 'exception')",
+            (session_id,),
+        ).fetchall()
+        now = _now_iso()
+        released: list[dict] = []
+        total_picked = 0
+        for row in rows:
+            picked = conn.execute(
+                """
+                SELECT COALESCE(SUM(MIN(picked_qty, planned_qty)), 0) AS picked
+                FROM pick_lines WHERE session_id = ? AND cust_order_id = ?
+                """,
+                (session_id, row["cust_order_id"]),
+            ).fetchone()["picked"]
+            total_picked += int(picked)
+            conn.execute(
+                "UPDATE pick_orders SET status = 'abandoned' WHERE id = ?", (row["id"],)
+            )
+            conn.execute(
+                """
+                INSERT INTO pick_order_events
+                    (session_id, cust_order_id, event_type, reason, operator,
+                     from_operator, to_operator, created_at, details_json)
+                VALUES (?, ?, 'abandoned', ?, ?, ?, NULL, ?, ?)
+                """,
+                (
+                    session_id, row["cust_order_id"], reason_text, actor,
+                    row["assigned_operator"], now,
+                    json.dumps({"picked_units": int(picked), "previous_status": row["status"]}),
+                ),
+            )
+            released.append({
+                "cust_order_id": row["cust_order_id"],
+                "picked_units": int(picked),
+                "previous_status": row["status"],
+            })
+        if not rows:
+            # Legacy (whole-picklist) session: count what was pulled so the
+            # operator knows what to put back.
+            total_picked = int(conn.execute(
+                "SELECT COALESCE(SUM(MIN(picked_qty, planned_qty)), 0) AS picked FROM pick_lines WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()["picked"])
+        conn.execute(
+            """
+            UPDATE pick_sessions
+            SET status = 'abandoned', completed_at = ?, closed_by = ?, closed_reason = ?
+            WHERE id = ?
+            """,
+            (now, actor, reason_text, session_id),
+        )
+    return {
+        "session_id": session_id,
+        "status": "abandoned",
+        "orders": released,
+        "picked_units": total_picked,
+        "closed_by": actor,
+        "reason": reason_text,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Scan allocation
 # ---------------------------------------------------------------------------
@@ -1039,10 +1126,15 @@ def _legacy_record_scan(
 def _global_serial_pick(
     conn: sqlite3.Connection, serial: str
 ) -> Optional[sqlite3.Row]:
+    # A serial picked in a session that was later closed short is back on the
+    # shelf (or should be), so it must not block the next pick.
     return conn.execute(
         """
-        SELECT session_id, target_order FROM pick_scans
-        WHERE serial = ? AND result = 'ok' LIMIT 1
+        SELECT sc.session_id, sc.target_order
+        FROM pick_scans sc
+        JOIN pick_sessions ps ON ps.id = sc.session_id
+        WHERE sc.serial = ? AND sc.result = 'ok' AND ps.status != 'abandoned'
+        LIMIT 1
         """,
         (serial,),
     ).fetchone()

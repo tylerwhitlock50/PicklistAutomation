@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Shipments &middot; Tracking lookup</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <main class="page-shell">
+      {% set active_nav = 'lookup' %}
+      {% set active_sub = 'shipments' %}
+      {% include '_topnav.html' %}
+
+      <section class="hero card">
+        <div class="hero-top">
+          <div>
+            <p class="eyebrow">Shipments</p>
+            <h1>Did it ship? What is the tracking number?</h1>
+          </div>
+        </div>
+        <p class="hero-copy">
+          Every packlist VISUAL knows about, with the live UPS tracking numbers and the serials in each box.
+          Look up one sales order, a customer, or a date range. A daily digest with the same information
+          posts to Teams at the configured time.
+        </p>
+      </section>
+
+      <section class="card">
+        <form method="get" action="{{ url_for('shipments_page') }}" class="filters-row" data-no-loading>
+          <label>Sales order
+            <input type="text" name="so" value="{{ params.so }}" placeholder="SO-132000" />
+          </label>
+          <label>Customer
+            <input type="text" name="customer" value="{{ params.customer }}" placeholder="id or name" />
+          </label>
+          <label>Shipped from
+            <input type="date" name="start" value="{{ params.start }}" />
+          </label>
+          <label>to
+            <input type="date" name="end" value="{{ params.end }}" />
+          </label>
+          <label>Serial number
+            <input type="text" name="serial" value="" placeholder="jumps to serial history" />
+          </label>
+          <input type="hidden" name="go" value="1" />
+          <button type="submit" class="button tertiary">Look up</button>
+        </form>
+
+        {% if result.error %}
+        <p class="flash error">Lookup failed: {{ result.error }}</p>
+        {% elif searched %}
+        {% set s = result.summary %}
+        <div class="table-controls">
+          <h3>{{ result.packlists|length }} packlist{{ '' if result.packlists|length == 1 else 's' }}
+            <span class="helper-text">&middot; {{ s.shipped_packlists }} shipped &middot; {{ s.units_shipped|int }} units
+            {% if s.voided %}&middot; {{ s.voided }} voided{% endif %}
+            {% if s.missing_tracking %}&middot; <strong>{{ s.missing_tracking|length }} without tracking</strong>{% endif %}</span>
+          </h3>
+        </div>
+        {% if result.packlists %}
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Packlist</th><th>Order</th><th>Customer</th><th>Shipped</th><th>Via</th><th>Tracking</th><th>Units</th><th>Serials</th><th>Invoice</th></tr>
+            </thead>
+            <tbody>
+              {% for p in result.packlists %}
+              <tr class="{{ 'muted' if p.voided }}">
+                <td class="mono">{{ p.packlist_id }}{% if p.voided %} <span class="hold-pill blocking">voided</span>{% endif %}</td>
+                <td class="mono"><a href="{{ url_for('order_detail_page', order_id=p.order_id) }}">{{ p.order_id }}</a></td>
+                <td>{{ p.customer_name or p.customer_id }}</td>
+                <td class="mono">{{ p.shipped_date or '' }}{% if not p.shipped and not p.voided %}<br /><span class="helper-text">not shipped yet</span>{% endif %}</td>
+                <td>{{ p.ship_via }}</td>
+                <td class="mono">
+                  {% for t in p.tracking %}{% if t.url %}<a href="{{ t.url }}" target="_blank" rel="noopener">{{ t.number }}</a>{% else %}{{ t.number }}{% endif %}{% if t.carrier %} <span class="helper-text">{{ t.carrier }}</span>{% endif %}{{ '' if loop.last else ', ' }}{% else %}<span class="muted">none yet</span>{% endfor %}
+                </td>
+                <td>{{ p.units|int }}</td>
+                <td class="mono">{{ p.serials|join(', ') }}</td>
+                <td class="mono">{{ p.invoice_id }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <p class="work-clear">No packlists match. Widen the dates or check the order id.</p>
+        {% endif %}
+        {% else %}
+        <p class="helper-text">Enter an order, a customer, or pick dates and press <strong>Look up</strong>.</p>
+        {% endif %}
+      </section>
+    </main>
+  </body>
+</html>

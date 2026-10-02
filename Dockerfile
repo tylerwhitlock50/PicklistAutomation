@@ -14,6 +14,9 @@ RUN apt-get update \
        gpg \
        unixodbc \
        unixodbc-dev \
+       poppler-utils \
+       tesseract-ocr \
+       tesseract-ocr-eng \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
        | gpg --dearmor -o /etc/apt/keyrings/microsoft-prod.gpg \

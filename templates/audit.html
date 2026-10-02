@@ -8,7 +8,8 @@
   </head>
   <body>
     <main class="page-shell">
-      {% set active_nav = 'audit' %}
+      {% set active_nav = 'work' %}
+      {% set active_sub = 'audit' %}
       {% include '_topnav.html' %}
       <section class="hero card">
         <div class="hero-top">
@@ -18,7 +19,7 @@
           </div>
           <div class="actions">
             <a class="button secondary" href="{{ url_for('audit_analytics_page') }}">Analytics</a>
-            <a class="button tertiary" href="{{ url_for('index') }}">&larr; Dashboard</a>
+            <a class="button tertiary" href="{{ url_for('work_page') }}">&larr; Today</a>
           </div>
         </div>
         <p class="hero-copy">

@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Stock &middot; Where is it?</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <main class="page-shell">
+      {% set active_nav = 'lookup' %}
+      {% set active_sub = 'stock' %}
+      {% include '_topnav.html' %}
+
+      <section class="hero card">
+        <div class="hero-top">
+          <div>
+            <p class="eyebrow">Stock</p>
+            <h1>Do we really have one, and where?</h1>
+          </div>
+        </div>
+        <p class="hero-copy">
+          Every bin holding a SKU, the serials sitting in it, and how much of it is already allocated to an
+          order, protected for an account, or held. If the pickable count says 2 and nobody has claimed them,
+          enter the order and it will pull.
+        </p>
+      </section>
+
+      <section class="card">
+        <form method="get" action="{{ url_for('stock_page') }}" class="filters-row" data-no-loading>
+          <label>SKU / part
+            <input type="text" name="part" id="stock-part" value="{{ part }}" list="stock-part-options" placeholder="801-06486-00" autocomplete="off" />
+            <datalist id="stock-part-options"></datalist>
+          </label>
+          <label>or serial number
+            <input type="text" name="serial" value="{{ serial }}" placeholder="CV163773" />
+          </label>
+          <button type="submit" class="button tertiary">Look up</button>
+        </form>
+
+        {% if error %}
+        <p class="flash error">Lookup failed: {{ error }}</p>
+        {% endif %}
+
+        {% if payload %}
+          {% if not payload.found %}
+          <p class="work-clear">Nothing on hand for <span class="mono">{{ payload.part_id }}</span> in SHIPPING, DISTRIBUTION or MAIN.</p>
+          {% else %}
+          <h2 class="mono">{{ payload.part_id }}</h2>
+          <p class="helper-text">{{ payload.description }}{% if payload.product_code %} &middot; {{ payload.product_code }}{% endif %}</p>
+          <div class="audit-tiles analytics-tiles">
+            <div class="audit-tile {{ 'tile-verified' if payload.pickable_qty else 'tile-missing' }}">
+              <span class="audit-tile-num">{{ payload.pickable_qty|int }}</span>
+              <span class="audit-tile-label">Pickable</span>
+              <span class="audit-tile-sub">R01-R09, not staged</span>
+            </div>
+            <div class="audit-tile tile-pending">
+              <span class="audit-tile-num">{{ payload.allocated_qty|int }}</span>
+              <span class="audit-tile-label">Allocated</span>
+              <span class="audit-tile-sub">to open orders, in priority</span>
+            </div>
+            <div class="audit-tile {{ 'tile-verified' if payload.free_qty else 'tile-misplaced' }}">
+              <span class="audit-tile-num">{{ payload.free_qty|int }}</span>
+              <span class="audit-tile-label">Unclaimed</span>
+              <span class="audit-tile-sub">pickable minus allocated</span>
+            </div>
+            <div class="audit-tile tile-pending">
+              <span class="audit-tile-num">{{ payload.total_qty|int }}</span>
+              <span class="audit-tile-label">Everywhere</span>
+              <span class="audit-tile-sub">{% for c in payload.classes %}{{ c.label }} {{ c.qty|int }}{{ '' if loop.last else ' · ' }}{% endfor %}</span>
+            </div>
+          </div>
+
+          <div class="table-controls"><h3>Bins</h3></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Warehouse / bin</th><th>Class</th><th>Qty</th><th>Serials</th><th>Oldest arrival</th></tr></thead>
+              <tbody>
+                {% for b in payload.bins %}
+                <tr>
+                  <td class="mono"><strong>{{ b.warehouse }}/{{ b.location }}</strong></td>
+                  <td><span class="hold-pill {{ '' if b.class == 'pickable' else 'blocking' if b.class in ['stage', 'international', 'rack10'] else '' }}">{{ b.class_label }}</span></td>
+                  <td>{{ b.qty|int }}</td>
+                  <td class="mono bin-list">{{ b.serials|join(', ') }}{% if b.serials_truncated %} &hellip; ({{ b.serial_count }} total){% endif %}</td>
+                  <td class="mono">{{ (b.oldest_transaction_at or '')[:10] }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+
+          <div class="detail-grid" style="margin-top: 16px;">
+            <section class="card">
+              <h3>Already allocated</h3>
+              {% if payload.allocation_error %}
+              <p class="helper-text">Allocation engine unavailable: {{ payload.allocation_error }}</p>
+              {% elif payload.allocated_to %}
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>#</th><th>Order</th><th>Customer</th><th>Qty</th><th>Promise</th><th>Status</th></tr></thead>
+                  <tbody>
+                    {% for a in payload.allocated_to %}
+                    <tr>
+                      <td>{{ a.position or '' }}</td>
+                      <td class="mono"><a href="{{ url_for('order_detail_page', order_id=a.order_id) }}">{{ a.order_id }}</a> <span class="helper-text">line {{ a.line_no }}</span></td>
+                      <td>{{ a.customer_name or a.customer_id }}</td>
+                      <td>{{ a.qty|int }}</td>
+                      <td class="mono">{{ a.promise }}</td>
+                      <td>{{ a.status }}{% if a.order_id in (payload.held_for|map(attribute='order_id')|list) %} <span class="hold-pill blocking">held</span>{% endif %}</td>
+                    </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+              {% else %}
+              <p class="work-clear">No open order is allocated pickable stock for this SKU.</p>
+              {% endif %}
+              {% if feature_flags.allocation %}<p class="helper-text"><a href="{{ url_for('allocation_page') }}?part={{ payload.part_id }}">Open the allocation screen &rarr;</a></p>{% endif %}
+            </section>
+            <section class="card">
+              <h3>Protected serials</h3>
+              {% if payload.reserved_serials %}
+              <ul>
+                {% for r in payload.reserved_serials %}
+                <li><span class="mono">{{ r.serial_no }}</span> &rarr; <a href="{{ url_for('order_detail_page', order_id=r.order_id) }}">{{ r.order_id }}</a>{% if r.customer_id %} ({{ r.customer_id }}){% endif %}{% if r.since %} <span class="helper-text">since {{ r.since[:10] }}</span>{% endif %}</li>
+                {% endfor %}
+              </ul>
+              {% else %}
+              <p class="helper-text">No serials of this SKU are protected by the release gate.</p>
+              {% endif %}
+            </section>
+          </div>
+          {% endif %}
+        {% elif serial_payload %}
+          <h2 class="mono">{{ serial_payload.serial }}</h2>
+          {% if serial_payload.found %}
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Part</th><th>Warehouse / bin</th><th>Class</th><th>Qty</th></tr></thead>
+              <tbody>
+                {% for l in serial_payload.locations %}
+                <tr>
+                  <td class="mono"><a href="{{ url_for('stock_page', part=l.part_id) }}">{{ l.part_id }}</a></td>
+                  <td class="mono">{{ l.warehouse }}/{{ l.location }}</td>
+                  <td>{{ l.class_label }}</td>
+                  <td>{{ l.qty|int }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          {% else %}
+          <p class="work-clear">That serial is not on hand anywhere. {% if feature_flags.serial %}<a href="{{ url_for('serial_history_page') }}?serial={{ serial_payload.serial }}">See its history &rarr;</a>{% endif %}</p>
+          {% endif %}
+        {% else %}
+        <p class="helper-text">Enter a SKU or a serial number and press <strong>Look up</strong>.</p>
+        {% endif %}
+      </section>
+    </main>
+
+    <script>
+      (function () {
+        var input = document.getElementById("stock-part");
+        var list = document.getElementById("stock-part-options");
+        if (!input || !list) return;
+        var timer = null;
+        input.addEventListener("input", function () {
+          var term = (input.value || "").trim();
+          if (timer) clearTimeout(timer);
+          if (term.length < 2) return;
+          timer = setTimeout(async function () {
+            try {
+              var response = await fetch("{{ url_for('api_stock_parts') }}?q=" + encodeURIComponent(term));
+              var data = await response.json();
+              list.innerHTML = "";
+              (data.parts || []).forEach(function (p) {
+                var opt = document.createElement("option");
+                opt.value = p.part_id;
+                opt.label = (p.description || "") + " · on hand " + p.on_hand + " · open demand " + p.open_demand;
+                list.appendChild(opt);
+              });
+            } catch (e) {}
+          }, 250);
+        });
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="csrf-token" content="{{ csrf_token() }}" />
+    <title>Request #{{ req.id }} &middot; {{ req.title }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <main class="page-shell">
+      {% set active_nav = 'requests' %}
+      {% include '_topnav.html' %}
+
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          {% for category, message in messages %}
+          <div class="flash {{ category }}">{{ message }}</div>
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
+
+      {% set f = req.fields or {} %}
+      <section class="hero card">
+        <div class="hero-top">
+          <div>
+            <p class="eyebrow"><a href="{{ url_for('requests_page') }}">Requests</a> &rsaquo; #{{ req.id }} &middot; {{ req.type_label }}</p>
+            <h1>{{ req.title }}</h1>
+          </div>
+          <div><span class="hold-pill status-pill-{{ req.status }} {{ 'blocking' if req.overdue }}">{{ req.status|replace('_', ' ') }}{% if req.overdue %} · past due{% endif %}</span></div>
+        </div>
+        <p class="hero-copy">
+          From <strong>{{ req.created_by }}</strong> ({{ options.team_labels.get(req.created_team, req.created_team or 'unknown') }})
+          to <strong>{{ options.team_labels.get(req.owner_team, req.owner_team) }}</strong>
+          &middot; opened {{ (req.created_at)|local_dt }}
+          {% if req.sla_due_at %}&middot; due {{ req.sla_due_at|local_dt }}{% endif %}
+          {% if req.assigned_to %}&middot; assigned to {{ req.assigned_to }}{% endif %}
+          {% if req.priority == 'urgent' %}&middot; <strong>urgent</strong>{% endif %}
+        </p>
+      </section>
+
+      <div class="detail-grid">
+        <section class="card">
+          <h2>What was asked</h2>
+          <dl class="kv">
+            {% if req.cust_order_id %}<dt>Order</dt><dd class="mono"><a href="{{ url_for('order_detail_page', order_id=req.cust_order_id) }}">{{ req.cust_order_id }}</a></dd>{% endif %}
+            {% if req.work_order_id %}<dt>Work order</dt><dd class="mono">{{ req.work_order_id }}</dd>{% endif %}
+            {% if req.customer_id %}<dt>Customer</dt><dd>{{ req.customer_id }}</dd>{% endif %}
+            {% if req.request_type == 'ship_request' %}
+              <dt>Needed by</dt><dd>{{ f.needed_by or '—' }}</dd>
+              <dt>Service</dt><dd>{{ options.service_levels.get(f.service_level, f.service_level) }}</dd>
+              <dt>Expedite</dt><dd>{{ 'yes' if f.expedite else 'no' }}</dd>
+              <dt>Ship complete</dt><dd>{{ 'yes' if f.ship_complete else 'no' }}</dd>
+            {% elif req.request_type == 'hold_exception' %}
+              <dt>Hold type</dt><dd>{{ options.exception_kinds.get(f.exception_kind, f.exception_kind) }}</dd>
+              <dt>Expires</dt><dd class="mono">{{ (f.expires_at or '')[:10] }}</dd>
+            {% elif req.request_type == 'inventory_discrepancy' %}
+              <dt>Part</dt><dd class="mono">{{ f.part_id or '—' }}</dd>
+              <dt>Serial</dt><dd class="mono">{{ f.serial_no or '—' }}</dd>
+              <dt>Expected / actual</dt><dd class="mono">{{ f.expected_location or '?' }} / {{ f.actual_location or '?' }}</dd>
+              {% if f.qty %}<dt>Qty</dt><dd>{{ f.qty|int }}</dd>{% endif %}
+            {% elif req.request_type == 'order_problem' %}
+              <dt>Problem</dt><dd>{{ options.problem_kinds.get(f.problem_kind, f.problem_kind) }}</dd>
+            {% endif %}
+            {% if req.body %}<dt>Details</dt><dd>{{ req.body }}</dd>{% endif %}
+            {% if req.resolution %}<dt>Resolution</dt><dd>{{ req.resolution }}</dd>{% endif %}
+            {% if req.linked_exception_id %}<dt>Release gate</dt><dd>exception #{{ req.linked_exception_id }} (see Shipping &rsaquo; Scorecard)</dd>{% endif %}
+            {% if hold %}<dt>Manual hold</dt><dd>#{{ hold.id }} {{ options.exception_kinds.get(hold.hold_kind, hold.hold_kind) }} until {{ (hold.expires_at or '')[:10] }}{% if hold.released_at %} &middot; released {{ hold.released_at[:10] }} by {{ hold.released_by }}{% endif %}</dd>{% endif %}
+          </dl>
+          {% if blockers %}
+          <p class="flash error" style="margin-top: 12px;">
+            This order has blocking holds that a request cannot override:
+            {% for b in blockers %}<strong>{{ b.label }}</strong> ({{ options.team_labels.get(b.owner_team, b.owner_team) }}){{ '' if loop.last else ', ' }}{% endfor %}.
+            Clear them on the <a href="{{ url_for('order_detail_page', order_id=req.cust_order_id) }}">order page</a> first.
+          </p>
+          {% endif %}
+        </section>
+
+        <section class="card">
+          <h2>Act on it</h2>
+          {% if not operator %}
+          <p class="flash error">Pick your name in the top bar to act on requests.</p>
+          {% endif %}
+          {% if legal %}
+          <form method="post" action="{{ url_for('requests_transition', request_id=req.id) }}" class="request-form-grid">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+            <label>Move to
+              <select name="to_status">
+                {% for s in legal %}<option value="{{ s }}">{{ s|replace('_', ' ')|capitalize }}</option>{% endfor %}
+              </select>
+            </label>
+            {% if req.request_type == 'ship_request' and req.is_open and not req.linked_exception_id %}
+            <label class="checkbox-row" style="flex-direction: row; align-items: center;"><input type="checkbox" name="accept_expedite" value="1" {% if f.expedite %}checked{% endif %} /> Accept as expedite (release-gate exception, next picklist)</label>
+            {% endif %}
+            <label class="wide">Note<input type="text" name="note" maxlength="300" placeholder="What you did / why" /></label>
+            <label class="wide">Resolution (when closing)<input type="text" name="resolution" maxlength="300" placeholder="e.g. Shipped NDA, tracking 1Z..." /></label>
+            <p class="wide"><button type="submit" class="button">Update</button></p>
+          </form>
+          {% else %}
+          <p class="helper-text">No further transitions.</p>
+          {% endif %}
+          <form method="post" action="{{ url_for('requests_assign', request_id=req.id) }}" class="hold-ack-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+            <input type="text" name="assignee" value="{{ req.assigned_to or '' }}" placeholder="Assign to (name)" maxlength="60" />
+            <button type="submit" class="button tertiary">Assign</button>
+          </form>
+          <form method="post" action="{{ url_for('requests_comment', request_id=req.id) }}" class="hold-ack-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+            <input type="text" name="note" placeholder="Add a comment" maxlength="500" />
+            <button type="submit" class="button tertiary">Comment</button>
+          </form>
+        </section>
+      </div>
+
+      <section class="card">
+        <h2>Timeline</h2>
+        <ul class="timeline">
+          {% for e in req.events %}
+          <li>
+            <span class="mono">{{ (e.created_at)|local_dt }}</span>
+            <strong>{{ e.actor }}</strong>{% if e.actor_team %} ({{ options.team_labels.get(e.actor_team, e.actor_team) }}){% endif %}
+            {% if e.event_type == 'transition' %}moved it from {{ (e.from_status or '')|replace('_', ' ') }} to <strong>{{ (e.to_status or '')|replace('_', ' ') }}</strong>
+            {% elif e.event_type == 'created' %}opened the request
+            {% else %}{{ e.event_type|replace('_', ' ') }}{% endif %}
+            {% if e.note %}&mdash; {{ e.note }}{% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

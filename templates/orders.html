@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="csrf-token" content="{{ csrf_token() }}" />
+    <title>Orders &middot; Readiness</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <main class="page-shell">
+      {% set active_nav = 'lookup' %}
+      {% set active_sub = 'orders' %}
+      {% include '_topnav.html' %}
+
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          {% for category, message in messages %}
+          <div class="flash {{ category }}">{{ message }}</div>
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
+
+      {% set rs = payload.summary or {} %}
+      <section class="hero card">
+        <div class="hero-top">
+          <div>
+            <p class="eyebrow">Order readiness</p>
+            <h1>What is holding orders up?</h1>
+          </div>
+          <div>
+            <button type="button" class="button tertiary" id="refresh-readiness" data-no-loading>Re-check now</button>
+          </div>
+        </div>
+        <p class="hero-copy">
+          {% if payload.never_run %}
+          No evaluation has run yet. Click <strong>Re-check now</strong> to pull every open order from VISUAL and score it.
+          {% else %}
+          Every open order inside the window, with the reason it cannot ship and the team that owns the fix.
+          Evaluated {{ (payload.evaluated_at or '')[:16]|replace('T', ' ') }} UTC
+          {% if payload.stale_minutes is not none and payload.stale_minutes > 45 %}<strong>({{ payload.stale_minutes }} minutes ago)</strong>{% endif %}.
+          {% if payload.error %}<strong>Last refresh failed:</strong> {{ payload.error }}{% endif %}
+          {% endif %}
+        </p>
+        <p class="inline-status" id="refresh-status" hidden></p>
+
+        {% if not payload.never_run %}
+        <div class="audit-tiles analytics-tiles">
+          <a class="audit-tile {{ 'tile-missing' if rs.blocked else 'tile-verified' }}" href="{{ url_for('orders_page', state='BLOCKED', owner='') }}">
+            <span class="audit-tile-num">{{ rs.blocked }}</span>
+            <span class="audit-tile-label">Blocked</span>
+            <span class="audit-tile-sub">someone must act</span>
+          </a>
+          <a class="audit-tile {{ 'tile-misplaced' if rs.attention else 'tile-verified' }}" href="{{ url_for('orders_page', state='ATTENTION', owner='') }}">
+            <span class="audit-tile-num">{{ rs.attention }}</span>
+            <span class="audit-tile-label">Attention</span>
+            <span class="audit-tile-sub">can ship, worth a look</span>
+          </a>
+          <a class="audit-tile tile-verified" href="{{ url_for('orders_page', state='READY', owner='') }}">
+            <span class="audit-tile-num">{{ rs.ready }}</span>
+            <span class="audit-tile-label">Ready</span>
+            <span class="audit-tile-sub">no holds</span>
+          </a>
+          <div class="audit-tile tile-pending">
+            <span class="audit-tile-num">{{ rs.holds }}</span>
+            <span class="audit-tile-label">Open holds</span>
+            <span class="audit-tile-sub">{{ rs.firearms_orders or 0 }} firearms orders in window</span>
+          </div>
+        </div>
+        <div class="owner-chips" aria-label="Filter by owning team">
+          <a class="{{ 'active' if not filters.owner }}" href="{{ url_for('orders_page', owner='', state=filters.state, reason=filters.reason, q=filters.q, window=filters.window) }}">Everyone</a>
+          {% for team, count in (rs.by_owner or {}).items() %}
+          <a class="{{ 'active' if filters.owner == team }}" href="{{ url_for('orders_page', owner=team, state=filters.state, reason=filters.reason, q=filters.q, window=filters.window) }}">{{ owner_labels.get(team, team) }} &middot; {{ count }}</a>
+          {% endfor %}
+        </div>
+        {% endif %}
+      </section>
+
+      <section class="card">
+        <form method="get" action="{{ url_for('orders_page') }}" class="filters-row" data-no-loading>
+          <label>Owner
+            <select name="owner">
+              <option value="" {% if not filters.owner %}selected{% endif %}>Everyone</option>
+              {% for team, label in owner_labels.items() %}
+              <option value="{{ team }}" {% if filters.owner == team %}selected{% endif %}>{{ label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Due
+            <select name="window">
+              {% for key, label in windows.items() %}
+              <option value="{{ key }}" {% if filters.window == key %}selected{% endif %}>{{ label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>State
+            <select name="state">
+              <option value="">Any</option>
+              {% for state in states %}
+              <option value="{{ state }}" {% if filters.state == state %}selected{% endif %}>{{ state|capitalize }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Hold reason
+            <select name="reason">
+              <option value="">Any</option>
+              {% for r in hold_reasons %}
+              <option value="{{ r.code }}" {% if filters.reason == r.code %}selected{% endif %}>{{ r.label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Search
+            <input type="text" name="q" value="{{ filters.q }}" placeholder="SO, customer, PO, part" />
+          </label>
+          <label class="checkbox-row" style="flex-direction: row; align-items: center;">
+            <input type="checkbox" name="firearms" value="1" {% if filters.firearms %}checked{% endif %} /> Firearms only
+          </label>
+          <label class="checkbox-row" style="flex-direction: row; align-items: center;">
+            <input type="checkbox" name="blocking" value="1" {% if filters.blocking %}checked{% endif %} /> Blocking holds only
+          </label>
+          <button type="submit" class="button tertiary">Apply</button>
+          <a class="button tertiary" href="{{ url_for('orders_page', owner='') }}">Clear</a>
+        </form>
+
+        <div class="table-controls">
+          <h3>{{ orders|length }} order{{ '' if orders|length == 1 else 's' }}{% if filters.owner %} needing {{ owner_labels.get(filters.owner, filters.owner) }}{% endif %} &middot; <span class="helper-text">{{ windows[filters.window] }}{% if filters.due_after %} (overdue older than {{ filters.due_after }} hidden)</span>{% else %}</span>{% endif %}</h3>
+        </div>
+        {% if orders %}
+        <div class="table-wrap">
+          <table class="orders-table">
+            <thead>
+              <tr>
+                <th>Order</th>
+                <th>Customer</th>
+                <th>State</th>
+                <th>Holds</th>
+                <th>Owner</th>
+                <th>Oldest hold</th>
+                <th>Due</th>
+                <th>Open</th>
+                <th>Picklist</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for o in orders %}
+              <tr>
+                <td class="mono">
+                  <a href="{{ url_for('order_detail_page', order_id=o.order_id) }}"><strong>{{ o.order_id }}</strong></a>
+                  <br /><span class="helper-text">{{ o.order_status }}{% if o.po_ref %} &middot; PO {{ o.po_ref }}{% endif %}</span>
+                </td>
+                <td>{{ o.customer_name or o.customer_id }}<br /><span class="helper-text">{{ o.ship_to.name if o.ship_to else '' }}</span></td>
+                <td><span class="state-badge state-{{ o.state }}">{{ o.state }}</span></td>
+                <td>
+                  {% if o.holds %}
+                  {% for h in o.holds %}<span class="hold-pill {{ 'blocking' if h.blocking }} {{ 'critical' if h.critical }} {{ 'acked' if h.acknowledged_at }}" title="{{ h.owner_label }}{% if h.acknowledged_by %} · acknowledged by {{ h.acknowledged_by }}{% endif %}">{{ h.label }}{% if h.line_no %} (line {{ h.line_no }}){% endif %}</span>{% endfor %}
+                  {% else %}<span class="muted">none</span>{% endif %}
+                </td>
+                <td>{{ o.owner_labels|join(', ') }}</td>
+                <td>{% if o.oldest_hold_hours is not none %}{% if o.oldest_hold_hours >= 48 %}{{ (o.oldest_hold_hours / 24)|round(0, 'floor')|int }} d{% else %}{{ o.oldest_hold_hours|round(0)|int }} h{% endif %}{% endif %}</td>
+                <td class="mono">{{ o.due or '' }}</td>
+                <td>{{ o.open_qty|int }} unit{{ '' if o.open_qty == 1 else 's' }}<br /><span class="helper-text">${{ '%.0f'|format(o.open_value or 0) }}</span></td>
+                <td>{% if o.on_picklist %}on list{% elif o.on_picklist is sameas false %}<span class="muted">not on list</span>{% else %}&mdash;{% endif %}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% elif payload.never_run %}
+        <p class="empty-state">Nothing to show until the first evaluation runs.</p>
+        {% else %}
+        <p class="work-clear">No orders match these filters.</p>
+        {% endif %}
+      </section>
+    </main>
+
+    <script>
+      (function () {
+        var button = document.getElementById("refresh-readiness");
+        var status = document.getElementById("refresh-status");
+        var csrf = (document.querySelector("meta[name='csrf-token']") || {}).content || "";
+        if (!button) return;
+        button.addEventListener("click", async function () {
+          button.disabled = true;
+          button.textContent = "Checking VISUAL...";
+          try {
+            var response = await fetch("{{ url_for('api_readiness_refresh') }}", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf },
+              body: "{}",
+            });
+            var data = await response.json();
+            if (data.ok) {
+              window.location.reload();
+              return;
+            }
+            status.hidden = false;
+            status.textContent = "Refresh failed: " + (data.error || "unknown error");
+            status.classList.add("error");
+          } catch (e) {
+            status.hidden = false;
+            status.textContent = "Refresh request failed.";
+            status.classList.add("error");
+          } finally {
+            button.disabled = false;
+            button.textContent = "Re-check now";
+          }
+        });
+      })();
+    </script>
+  </body>
+</html>

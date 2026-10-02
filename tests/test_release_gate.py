@@ -435,6 +435,7 @@ class ReleaseGateTests(unittest.TestCase):
                 "first_assigned_at": started.isoformat(),
                 "accumulation_started_at": started.isoformat(),
             }],
+            local_now=datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc),
         )
         self.assertEqual(decision(result, "SO-URGENT")["reason_code"], "no_supply")
         self.assertEqual(decision(result, "SO-MAJOR")["protected_guns"], 1)
@@ -547,11 +548,43 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertEqual(acc_label, f"ACCUMULATING - {suffix}protected until 2026-08-29")
         self.assertEqual(accumulating["summary"]["ship_to_cooldown_accumulating"], 1)
 
+    def test_manual_hold_never_releases_or_reserves_supply(self):
+        holds = [
+            {"cust_order_id": "so-held", "hold_kind": "marketing", "expires_at": "2026-09-05T00:00:00"},
+            {"cust_order_id": "SO-RELEASED", "hold_kind": "vip", "expires_at": "2026-09-05", "released_at": "2026-08-20T10:00:00"},
+            {"cust_order_id": "SO-EXPIRED", "hold_kind": "vip", "expires_at": "2026-08-01"},
+        ]
+        result = self.build(
+            [
+                candidate("SO-HELD", part="GUN-X", open_qty=1, available=1),
+                candidate("SO-NEXT", part="GUN-X", open_qty=1, available=1),
+                candidate("SO-RELEASED", part="GUN-Y"),
+                candidate("SO-EXPIRED", part="GUN-Z"),
+            ],
+            manual_holds=holds,
+        )
+        held = decision(result, "SO-HELD")
+        self.assertEqual((held["decision"], held["reason_code"]), ("HOLD", "manual_hold"))
+        self.assertEqual(held["label"], "HOLD - manual marketing hold until 2026-09-05")
+        # The single GUN-X goes to the next order because a held order never reserves supply.
+        self.assertEqual(decision(result, "SO-NEXT")["decision"], "RELEASE")
+        self.assertEqual(decision(result, "SO-RELEASED")["decision"], "RELEASE")
+        self.assertEqual(decision(result, "SO-EXPIRED")["decision"], "RELEASE")
+
+    def test_manual_hold_beats_approved_exception(self):
+        result = self.build(
+            [candidate("SO-1")],
+            exceptions=[{"cust_order_id": "SO-1", "expires_at": "2026-09-30", "reason": "ship request"}],
+            manual_holds=[{"cust_order_id": "SO-1", "hold_kind": "rework", "expires_at": "2026-09-30"}],
+        )
+        self.assertEqual(decision(result, "SO-1")["reason_code"], "manual_hold")
+
     def test_all_emitted_reason_codes_are_registered(self):
         scenarios = [
             self.build([candidate("SO-1", open_qty=2, available=2)]),
             self.build([candidate("SO-2", open_qty=2, available=1)]),
             self.build([candidate("SO-3", ORDER_RELEASED=0)]),
+            self.build([candidate("SO-M")], manual_holds=[{"cust_order_id": "SO-M", "hold_kind": "vip", "expires_at": "2026-12-31"}]),
             self.build(
                 [candidate("SO-4", open_qty=3, available=2, customer="BIG")],
                 customer_policies={"BIG": {"accumulate": True}},

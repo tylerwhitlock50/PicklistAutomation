@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Today</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <main class="page-shell">
+      {% set active_nav = 'work' %}
+      {% set active_sub = 'today' %}
+      {% include '_topnav.html' %}
+
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          {% for category, message in messages %}
+          <div class="flash {{ category }}">{{ message }}</div>
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
+
+      {% set active_picks = pick_sessions|selectattr('status', 'equalto', 'active')|list %}
+      {% set active_verifications = verify_sessions|selectattr('status', 'equalto', 'active')|list %}
+
+      <section class="hero card">
+        <div class="hero-top">
+          <div>
+            <p class="eyebrow">Work</p>
+            <h1>What needs doing today?</h1>
+          </div>
+        </div>
+        <p class="hero-copy">
+          Start or resume the day's shipping work, in the order the day runs.
+          Reports and lookups have their own tabs.
+        </p>
+      </section>
+
+      {% if shipping_requests %}
+      <section class="card">
+        <div class="table-controls">
+          <h3>Waiting on Shipping ({{ shipping_requests|length }}) <span class="helper-text">&middot; <a href="{{ url_for('requests_page', scope='team') }}">all requests</a></span></h3>
+        </div>
+        <div class="work-queue">
+          {% for r in shipping_requests[:5] %}
+          <a class="work-queue-item {{ 'is-overdue' if r.overdue }}" href="{{ url_for('request_detail_page', request_id=r.id) }}">
+            <span><strong>{{ r.title }}</strong><small>{{ r.type_label }} &middot; from {{ r.created_by }} &middot; due {{ (r.sla_due_at)|local_dt }}{% if r.overdue %} &middot; past due{% endif %}</small></span>
+            <span aria-hidden="true">&rarr;</span>
+          </a>
+          {% endfor %}
+        </div>
+      </section>
+      {% endif %}
+
+      <section class="shipping-work-grid" aria-label="Today's work">
+        <article class="card workflow-card workflow-primary">
+          <span class="workflow-step">1</span>
+          <p class="eyebrow">Plan the day</p>
+          <h2>Run picklist</h2>
+          <p>Generate the morning picklists and export them for the floor.</p>
+          <div class="workflow-links">
+            {% for option in query_options %}
+            {% set latest = latest_success_by_type.get(option) %}
+            {% set state = run_state_by_type.get(option, {}) %}
+            <a href="{{ url_for('index', query_type=option) }}">
+              <strong>{{ option|capitalize }}</strong>
+              <span>
+                {% if state.get('running') %}Running now
+                {% elif latest %}{{ latest.row_count }} rows &middot; {{ latest.run_timestamp_display }}
+                {% else %}No successful run yet{% endif %}
+                &rarr;
+              </span>
+            </a>
+            {% endfor %}
+          </div>
+          <a class="button" href="{{ url_for('index') }}">Open run picklist</a>
+        </article>
+
+        {% if feature_flags.shipping %}
+        <article class="card workflow-card workflow-primary">
+          <span class="workflow-step">2</span>
+          <p class="eyebrow">Pull inventory</p>
+          <h2>Pick orders</h2>
+          <p>Scan the sales order, then confirm each item pulled for that customer.</p>
+          {% if active_picks %}
+          <div class="work-queue">
+            {% for session in active_picks[:3] %}
+            <a class="work-queue-item" href="{{ url_for('pick_session_page', session_id=session.id) }}">
+              <span><strong>Resume {{ session.query_type }} pick</strong><small>{{ session.picked_units }}/{{ session.planned_units }} units &middot; started {{ session.started_display }}</small></span>
+              <span aria-hidden="true">&rarr;</span>
+            </a>
+            {% endfor %}
+          </div>
+          {% else %}
+          <p class="work-clear">No active pick sessions.</p>
+          {% endif %}
+          <a class="button {{ 'tertiary' if active_picks else '' }}" href="{{ url_for('shipping_page', view='pick') }}">{{ 'View pick work' if active_picks else 'Start a pick' }}</a>
+        </article>
+
+        <article class="card workflow-card workflow-primary">
+          <span class="workflow-step">3</span>
+          <p class="eyebrow">Check the box</p>
+          <h2>Verify boxes</h2>
+          <p>Scan a packlist and confirm every serialized item before the box leaves.</p>
+          {% if active_verifications %}
+          <div class="work-queue">
+            {% for session in active_verifications[:3] %}
+            <a class="work-queue-item" href="{{ url_for('verify_session_page', session_id=session.id) }}">
+              <span><strong>Resume {{ session.packlist_id }}</strong><small>{{ session.customer_name or session.customer_id or 'Customer not listed' }} &middot; started {{ session.started_display }}</small></span>
+              <span aria-hidden="true">&rarr;</span>
+            </a>
+            {% endfor %}
+          </div>
+          {% else %}
+          <p class="work-clear">No verifications in progress.</p>
+          {% endif %}
+          <a class="button {{ 'tertiary' if active_verifications else '' }}" href="{{ url_for('shipping_page', view='verify') }}#verify-start">{{ 'View verification work' if active_verifications else 'Verify a box' }}</a>
+        </article>
+        {% endif %}
+
+        {% if feature_flags.audit %}
+        <article class="card workflow-card workflow-support">
+          <span class="workflow-step">4</span>
+          <p class="eyebrow">Count the cage</p>
+          <h2>Audit</h2>
+          <p>Scan a location and every serial in it. Locations that are due show on the audit page.</p>
+          <a class="button tertiary" href="{{ url_for('audit_dashboard') }}" data-loading-message="Loading audit&hellip;">Open audit</a>
+        </article>
+        {% endif %}
+      </section>
+    </main>
+  </body>
+</html>

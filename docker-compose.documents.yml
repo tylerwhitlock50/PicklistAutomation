@@ -1,0 +1,26 @@
+# Optional override: mounts the VISUAL document share (V:\ on Windows =
+# \\2CARMS\CARMS$) read-only at /mnt/carms so readiness tier 2 can open the
+# FFL / EZ Check attached to an order.
+#
+# Requires in .env:  SMB_USERNAME, SMB_PASSWORD (an account that can read the
+# share), optionally SMB_DOMAIN and SMB_DEVICE, plus
+#   DOCUMENT_ROOTS=/mnt/carms
+#   DOCUMENT_PATH_MAP=V:\=/mnt/carms;\\2CARMS\CARMS$=/mnt/carms
+#   READINESS_OCR_ENABLED=true
+#
+# Start:  docker compose -f docker-compose.yml -f docker-compose.documents.yml up -d --build
+#
+# Volume options are fixed when the volume is first created. After changing any
+# SMB_* value run:  docker volume rm picklistautomation_documents
+services:
+  picklist-app:
+    volumes:
+      - documents:/mnt/carms:ro
+
+volumes:
+  documents:
+    driver: local
+    driver_opts:
+      type: cifs
+      device: ${SMB_DEVICE:-//2CARMS/CARMS$$}
+      o: "username=${SMB_USERNAME:?set SMB_USERNAME in .env},password=${SMB_PASSWORD:?set SMB_PASSWORD in .env}${SMB_DOMAIN:+,domain=${SMB_DOMAIN}},ro,vers=3.0,iocharset=utf8,file_mode=0444,dir_mode=0555"

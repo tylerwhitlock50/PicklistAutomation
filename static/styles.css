@@ -1366,6 +1366,7 @@ button.analytics-window {
 --------------------------------------------------------------------------- */
 .topnav {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 18px;
   background: var(--panel);
@@ -1383,7 +1384,7 @@ button.analytics-window {
   display: flex;
   align-items: center;
   gap: 12px;
-  min-width: 0;
+  flex: 0 0 auto;
   text-decoration: none;
   color: inherit;
 }
@@ -1430,6 +1431,9 @@ button.analytics-window {
   font-weight: 600;
 }
 
+/* With every feature flag on there are eight tabs, more than the 1080px
+   shell can hold beside the brand and the operator block. The strip gives
+   way and scrolls sideways instead of crushing its neighbours to nothing. */
 .topnav-tabs {
   display: flex;
   gap: 4px;
@@ -1437,6 +1441,28 @@ button.analytics-window {
   background: #f4efe4;
   padding: 4px;
   border-radius: 12px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.topnav-tab {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* Added by the top-bar script when the strip overflows: the tabs drop to
+   their own full-width row under the brand and operator block. */
+.topnav.is-crowded {
+  flex-wrap: wrap;
+  row-gap: 10px;
+}
+
+.topnav.is-crowded .topnav-tabs {
+  order: 3;
+  flex: 1 1 100%;
+  margin-left: 0;
 }
 
 .topnav-tab {
@@ -1467,6 +1493,7 @@ button.analytics-window {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex: 0 0 auto;
 }
 
 .topnav-user-meta {
@@ -1474,6 +1501,8 @@ button.analytics-window {
   line-height: 1.15;
   display: flex;
   flex-direction: column;
+  align-items: flex-end;
+  flex: 0 0 auto;
 }
 
 .topnav-user-name {
@@ -2428,9 +2457,32 @@ details.detail-section > .table-wrap {
 
 .scorecard-quality { margin-bottom: 28px; }
 
+/* Dashboard scorecard banner: a steel-blue variant of the green audit CTA.
+   It keeps the CTA's white title/button, so every colour below must stay
+   legible on the dark background (the old light-blue fill hid all of it). */
 .shipping-scorecard-banner {
-  border-color: #8fb3e0;
-  background: #f4f8fd;
+  background: #2a5480;
+  box-shadow: 0 14px 34px rgba(42, 84, 128, 0.24);
+}
+
+.shipping-scorecard-banner .audit-cta-icon span {
+  border-color: #dbe8f7;
+}
+
+.shipping-scorecard-banner .audit-cta-icon span::after {
+  background: #dbe8f7;
+}
+
+.shipping-scorecard-banner .audit-cta-sub {
+  color: #c9dcf0;
+}
+
+.shipping-scorecard-banner .audit-cta-btn {
+  color: #2a5480;
+}
+
+.shipping-scorecard-banner .audit-cta-btn:hover {
+  background: #eaf2fb;
 }
 
 .scorecard-banner-metrics {
@@ -2438,12 +2490,13 @@ details.detail-section > .table-wrap {
   flex-wrap: wrap;
   gap: 7px 14px;
   margin: 4px 0;
-  color: var(--muted);
+  color: #c9dcf0;
   font-size: 12px;
+  font-weight: 600;
 }
 
 .scorecard-banner-metrics strong {
-  color: var(--ink);
+  color: #fff;
   font-family: var(--font-mono);
   font-size: 15px;
 }
@@ -2517,4 +2570,302 @@ details.detail-section > .table-wrap {
     align-items: stretch;
     flex-direction: column;
   }
+}
+
+/* --- Operator picker (identity v1) --- */
+/* The top bar is a light panel, so the controls need real (not white)
+   borders to be noticed. Amber marks a picker that has not been set yet.
+   Scoped under .topnav-user-meta to outrank the global input[type="text"]
+   rule (full width, 10px padding) that otherwise swells the name box. */
+.topnav-user-meta .topnav-operator-select,
+.topnav-user-meta .topnav-operator-input {
+  appearance: none;
+  -webkit-appearance: none;
+  background: #fff;
+  border: 1px solid #d9d1c2;
+  border-radius: 6px;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 3px 8px;
+  width: auto;
+  max-width: 220px;
+  min-height: 26px;
+}
+.topnav-user-meta .topnav-operator-select {
+  cursor: pointer;
+  padding-right: 22px;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 12px) 55%, calc(100% - 8px) 55%;
+  background-size: 4px 4px, 4px 4px;
+  background-repeat: no-repeat;
+}
+.topnav-operator-select option {
+  color: #111;
+}
+.topnav-user-meta .topnav-operator-select.is-unset,
+.topnav-user-meta .topnav-operator-input.is-unset {
+  border-color: #e0a52a;
+  color: #9a6508;
+}
+.topnav-user-meta .topnav-operator-input.is-unset::placeholder {
+  color: #b7791f;
+}
+.topnav-user-meta .topnav-operator-select:focus,
+.topnav-user-meta .topnav-operator-input:focus {
+  outline: 2px solid rgba(47, 111, 82, 0.35);
+  outline-offset: 1px;
+}
+/* Free-typed identity (no roster configured): name box + team picker. */
+.topnav-operator-free {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.topnav-user-meta .topnav-operator-input {
+  width: 140px;
+  flex: 0 0 auto;
+}
+.topnav-user-meta .topnav-operator-team {
+  max-width: 130px;
+}
+.roster-row {
+  display: grid;
+  grid-template-columns: 2fr 1fr 2fr auto;
+  gap: 8px;
+  align-items: end;
+  margin-bottom: 8px;
+}
+.roster-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.85rem;
+}
+.teams-events-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 4px 16px;
+  margin: 8px 0;
+}
+
+
+/* --- Order readiness (holds, states, detail page) --- */
+.hold-pill {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  background: #eef2f7;
+  color: #2c465a;
+  border: 1px solid #d6e0ea;
+  margin: 2px 4px 2px 0;
+  white-space: nowrap;
+}
+.hold-pill.blocking { background: #fde4df; color: #983a2f; border-color: #f3b7ab; }
+.hold-pill.critical { background: #983a2f; color: #fff; border-color: #7a2a21; font-weight: 700; }
+.hold-pill.acked { opacity: 0.65; }
+.hold-pill.acked::after { content: " \2713"; }
+.state-badge {
+  display: inline-block;
+  font-weight: 700;
+  font-size: 0.78rem;
+  letter-spacing: 0.03em;
+  padding: 2px 10px;
+  border-radius: 6px;
+}
+.state-BLOCKED { background: #fde4df; color: #983a2f; }
+.state-ATTENTION { background: #fbe9d2; color: #8a5314; }
+.state-READY { background: #dff2e7; color: #1d5b3f; }
+.owner-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 0; }
+.owner-chips a {
+  text-decoration: none;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid #d6e0ea;
+  background: #f6f8fb;
+  color: #2c465a;
+  font-size: 0.85rem;
+}
+.owner-chips a.active { background: #2c465a; color: #fff; border-color: #2c465a; }
+.filters-row { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: flex-end; margin-bottom: 12px; }
+.filters-row label { display: flex; flex-direction: column; gap: 4px; font-size: 0.8rem; color: #5c6b7a; }
+.filters-row input[type="text"], .filters-row select { min-width: 160px; }
+.detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; }
+.detail-grid .card { margin: 0; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font-size: 0.9rem; margin: 0; }
+.kv dt { color: #5c6b7a; }
+.kv dd { margin: 0; }
+.hold-item { border: 1px solid #e3e8ee; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; background: #fff; }
+.hold-item.blocking { border-left: 4px solid #e0674f; }
+.hold-item.non-blocking { border-left: 4px solid #f0b429; }
+.hold-item-head { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+.hold-detail { font-size: 0.82rem; color: #4a5a6a; margin: 6px 0 0; }
+.hold-detail code { font-size: 0.8rem; }
+.hold-ack-form { display: flex; gap: 6px; margin-top: 8px; align-items: center; flex-wrap: wrap; }
+.hold-ack-form input[type="text"] { flex: 1; min-width: 160px; }
+.bin-list { font-size: 0.82rem; color: #4a5a6a; }
+.bin-list .mono { font-size: 0.8rem; }
+.orders-table td { vertical-align: top; }
+.muted { color: #7a8794; }
+
+
+/* --- Request queue --- */
+.request-form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px 14px; }
+.request-form-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: #5c6b7a; }
+.request-form-grid label.wide { grid-column: 1 / -1; }
+.request-form-grid input, .request-form-grid select, .request-form-grid textarea { font: inherit; }
+.request-type-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.request-type-tabs button { border: 1px solid #d6e0ea; background: #f6f8fb; border-radius: 999px; padding: 6px 14px; cursor: pointer; font: inherit; }
+.request-type-tabs button.active { background: #2c465a; color: #fff; border-color: #2c465a; }
+.timeline { list-style: none; padding: 0; margin: 0; }
+.timeline li { padding: 8px 0; border-bottom: 1px solid #eef2f7; font-size: 0.9rem; }
+.timeline .mono { color: #5c6b7a; }
+.status-pill-open { background: #eef2f7; color: #2c465a; }
+.status-pill-acknowledged { background: #dde9f7; color: #2a5480; }
+.status-pill-in_progress { background: #fbe9d2; color: #8a5314; }
+.status-pill-done { background: #dff2e7; color: #1d5b3f; }
+.status-pill-declined { background: #f3e0f5; color: #6d3a76; }
+
+.doc-list { list-style: none; margin: 6px 0 4px; padding: 0; display: grid; gap: 4px; }
+.doc-list li { font-size: 0.85rem; }
+
+.button.danger { background: #b23a3a; color: #fff; }
+.button.danger:hover { background: #932c2c; }
+.pill.abandoned { background: #f3dede; color: #8a2b2b; }
+.inline-form.close-session { display: inline-flex; gap: 6px; align-items: center; }
+.inline-form.close-session input[type="text"] { width: 150px; }
+
+
+/* Four-tab nav: Work / Reports / Lookup / Requests, with a second row of
+   pages for the active group and a count on Requests. */
+.topnav-subnav {
+  order: 4;
+  flex: 1 1 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding-top: 10px;
+  margin-top: -4px;
+  border-top: 1px solid var(--line);
+}
+
+.topnav-sub {
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #8a8272;
+  text-decoration: none;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  transition: color 0.12s ease, border-color 0.12s ease;
+}
+
+.topnav-sub:hover {
+  color: var(--ink);
+  border-color: var(--line);
+}
+
+.topnav-sub.is-active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
+.topnav-tab-badged {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.topnav-badge {
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--primary);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.topnav-badge.is-overdue {
+  background: #c0392b;
+}
+
+.topnav-settings {
+  font-size: 12px;
+  font-weight: 700;
+  color: #8a8272;
+  text-decoration: none;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.topnav-settings:hover {
+  color: var(--ink);
+}
+
+.work-queue-item.is-overdue strong {
+  color: #c0392b;
+}
+
+/* Lookup landing page. */
+.lookup-route {
+  margin-top: 10px;
+  min-height: 1.4em;
+}
+
+.lookup-as {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.lookup-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+}
+
+.lookup-card {
+  text-decoration: none;
+  color: inherit;
+  display: block;
+}
+
+.lookup-card:hover {
+  border-color: var(--primary);
+}
+
+.lookup-card h2 {
+  margin: 0 0 6px;
+  font-size: 1.05rem;
+}
+
+.lookup-card p {
+  margin: 0;
+  color: #8a8272;
+  font-size: 0.9rem;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
 }

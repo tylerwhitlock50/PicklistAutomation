@@ -119,6 +119,10 @@
               <input id="feature_allocation" name="feature_allocation" type="checkbox" {% if feature_flags.allocation %}checked{% endif %} />
               Show Allocation (SKU supply/demand priority + Promise Del Date editing)
             </label>
+            <label class="checkbox-row" for="feature_orders">
+              <input id="feature_orders" name="feature_orders" type="checkbox" {% if feature_flags.orders %}checked{% endif %} />
+              Show Orders (readiness holds, per-order status for Inside Sales)
+            </label>
           </section>
 
           <section class="settings-section">
@@ -404,6 +408,83 @@
             <p class="inline-status" id="smtp-test-status" hidden></p>
           </section>
 
+          <section class="settings-section">
+            <div class="settings-section-header">
+              <h2>Microsoft Teams</h2>
+              <p class="helper-text">
+                Webhook source: <strong>{{ teams_webhook_source }}</strong>
+                (configured: {{ "yes" if teams_webhook_configured else "no" }})
+              </p>
+            </div>
+            <label for="teams_webhook_url">
+              Incoming webhook URL
+              <span class="required-indicator">(Teams Workflows: "Post to a channel when a webhook request is received")</span>
+            </label>
+            <input
+              id="teams_webhook_url"
+              name="teams_webhook_url"
+              type="password"
+              autocomplete="off"
+              placeholder="Enter only to set or replace"
+            />
+            {% if teams_webhook_source == 'database' and teams_webhook_configured %}
+            <label class="checkbox-row" for="clear_teams_webhook_url">
+              <input id="clear_teams_webhook_url" name="clear_teams_webhook_url" type="checkbox" />
+              Clear saved Teams webhook URL
+            </label>
+            {% endif %}
+
+            <p class="helper-text">Events to post</p>
+            <div class="teams-events-grid">
+              {% for event_key, event_label in teams_events %}
+              <label class="checkbox-row" for="teams_event_{{ event_key }}">
+                <input id="teams_event_{{ event_key }}" name="teams_event_{{ event_key }}" type="checkbox" {% if event_key in teams_enabled_events %}checked{% endif %} />
+                {{ event_label }}
+              </label>
+              {% endfor %}
+            </div>
+
+            <label for="teams_digest_time">Daily shipped digest time <span class="required-indicator">(HH:MM, plant time)</span></label>
+            <input id="teams_digest_time" name="teams_digest_time" type="time" value="{{ teams_digest_time }}" />
+
+            <label for="app_public_url">App public URL <span class="required-indicator">(used for links inside cards)</span></label>
+            <input id="app_public_url" name="app_public_url" type="text" value="{{ app_public_url }}" placeholder="http://ops.local:8081" />
+
+            <section class="settings-test-row">
+              <button type="button" class="button tertiary" id="test-teams-btn">Send Test Card</button>
+              <p class="helper-text">Blank URL field uses the currently saved webhook for testing.</p>
+            </section>
+            <p class="inline-status" id="teams-test-status" hidden></p>
+          </section>
+
+          <section class="settings-section">
+            <div class="settings-section-header">
+              <h2>Operator roster</h2>
+              <p class="helper-text">
+                People who can pick their name in the top bar. Team decides which holds and
+                requests they see first. Leave empty to allow any typed name.
+              </p>
+            </div>
+            <div id="roster-rows">
+              {% for member in operator_roster %}
+              <div class="roster-row" data-roster-row>
+                <label>Name<input data-roster-field="name" type="text" value="{{ member.name }}" maxlength="60" /></label>
+                <label>Team
+                  <select data-roster-field="team">
+                    {% for team_key, team_label in operator_teams %}
+                    <option value="{{ team_key }}" {% if member.team == team_key %}selected{% endif %}>{{ team_label }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                <label>Email (optional)<input data-roster-field="email" type="text" value="{{ member.email }}" /></label>
+                <button type="button" class="button tertiary" data-remove-roster>Remove</button>
+              </div>
+              {% endfor %}
+            </div>
+            <button type="button" class="button tertiary" id="add-roster-row">Add person</button>
+            <textarea id="operator_roster_json" name="operator_roster_json" hidden>{{ operator_roster_json }}</textarea>
+          </section>
+
           <button type="submit" class="settings-primary-submit">Save Settings</button>
 
           <section class="settings-action-bar" id="settings-action-bar" hidden>
@@ -475,6 +556,7 @@
           ["#mssql_connection_string", "#clear_mssql_connection_string"],
           ["#telegram_bot_token", "#clear_telegram_bot_token"],
           ["#smtp_password", "#clear_smtp_password"],
+          ["#teams_webhook_url", "#clear_teams_webhook_url"],
         ];
         const releasePolicyRows = document.getElementById("release-policy-rows");
         const releasePolicyJson = document.getElementById("release_gate_customer_policies_json");
@@ -747,6 +829,87 @@
             } finally {
               telegramButton.disabled = false;
               telegramButton.textContent = "Send Test Telegram";
+            }
+          });
+        }
+
+        const rosterRows = document.getElementById("roster-rows");
+        const rosterJson = document.getElementById("operator_roster_json");
+        const addRosterButton = document.getElementById("add-roster-row");
+        const rosterTeamOptions = {{ operator_teams | tojson }};
+
+        function rosterRowMarkup() {
+          const options = rosterTeamOptions
+            .map(function (team) { return '<option value="' + team[0] + '">' + team[1] + "</option>"; })
+            .join("");
+          return (
+            '<label>Name<input data-roster-field="name" type="text" maxlength="60" placeholder="First name" /></label>' +
+            '<label>Team<select data-roster-field="team">' + options + "</select></label>" +
+            '<label>Email (optional)<input data-roster-field="email" type="text" /></label>' +
+            '<button type="button" class="button tertiary" data-remove-roster>Remove</button>'
+          );
+        }
+
+        function serializeRoster() {
+          if (!rosterRows || !rosterJson) return;
+          const people = [];
+          rosterRows.querySelectorAll("[data-roster-row]").forEach(function (row) {
+            const get = function (field) {
+              const node = row.querySelector("[data-roster-field='" + field + "']");
+              return node ? (node.value || "").trim() : "";
+            };
+            if (!get("name")) return;
+            people.push({ name: get("name"), team: get("team"), email: get("email") });
+          });
+          rosterJson.value = JSON.stringify(people);
+        }
+
+        function bindRosterRow(row) {
+          const removeButton = row.querySelector("[data-remove-roster]");
+          if (removeButton) {
+            removeButton.addEventListener("click", function () {
+              row.remove();
+              serializeRoster();
+              updateDirtyState();
+            });
+          }
+        }
+
+        if (rosterRows) {
+          rosterRows.querySelectorAll("[data-roster-row]").forEach(bindRosterRow);
+          rosterRows.addEventListener("input", function () { serializeRoster(); updateDirtyState(); });
+          rosterRows.addEventListener("change", function () { serializeRoster(); updateDirtyState(); });
+        }
+        if (addRosterButton && rosterRows) {
+          addRosterButton.addEventListener("click", function () {
+            const row = document.createElement("div");
+            row.className = "roster-row";
+            row.dataset.rosterRow = "";
+            row.innerHTML = rosterRowMarkup();
+            rosterRows.appendChild(row);
+            bindRosterRow(row);
+            row.querySelector("[data-roster-field='name']").focus();
+            serializeRoster();
+            updateDirtyState();
+          });
+        }
+
+        const teamsButton = document.getElementById("test-teams-btn");
+        if (teamsButton) {
+          teamsButton.addEventListener("click", async function () {
+            teamsButton.disabled = true;
+            teamsButton.textContent = "Testing...";
+            setInlineStatus("teams-test-status", "", false);
+            try {
+              const result = await postJson("{{ url_for('api_test_teams_settings') }}", {
+                webhook_url: (form.querySelector("#teams_webhook_url").value || "").trim(),
+              });
+              setInlineStatus("teams-test-status", result.message, result.ok);
+            } catch (_error) {
+              setInlineStatus("teams-test-status", "Teams test request failed.", false);
+            } finally {
+              teamsButton.disabled = false;
+              teamsButton.textContent = "Send Test Card";
             }
           });
         }

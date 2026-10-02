@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Run history</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <main class="page-shell">
+      {% set active_nav = 'reports' %}
+      {% set active_sub = 'runs' %}
+      {% include '_topnav.html' %}
+
+      <section class="hero card">
+        <div class="hero-top">
+          <div>
+            <p class="eyebrow">Reports</p>
+            <h1>Picklist run history</h1>
+          </div>
+        </div>
+        <p class="hero-copy">
+          Every picklist run, newest first, with its row count and export. Start a new run from
+          <a href="{{ url_for('index') }}">Run picklist</a>.
+        </p>
+        <div class="audit-tiles analytics-tiles">
+          {% for option in query_options %}
+          {% set latest = latest_runs_by_type.get(option) %}
+          <div class="audit-tile {{ 'tile-verified' if latest and latest.status == 'success' else 'tile-pending' }}">
+            <span class="audit-tile-num">{{ latest.row_count if latest else '&ndash;'|safe }}</span>
+            <span class="audit-tile-label">{{ option|capitalize }} rows</span>
+            <span class="audit-tile-sub">{{ latest_success_age_by_type.get(option) or 'No successful run yet' }}</span>
+          </div>
+          {% endfor %}
+        </div>
+      </section>
+
+      {% set ns = namespace(total=0) %}
+      {% for option in query_options %}
+      {% set ns.total = ns.total + (recent_runs_by_type[option]|length) %}
+      {% endfor %}
+      <section class="card">
+        <div class="table-header">
+          <h2>Recent runs</h2>
+          <p>Last {{ ns.total }}</p>
+        </div>
+        {% if ns.total > 0 %}
+        <div class="table-controls">
+          <label for="filter-run-history">Search rows</label>
+          <input id="filter-run-history" type="search" data-table-filter placeholder="Filter this table" aria-label="Filter runs" />
+        </div>
+        <div class="table-wrap">
+          <table id="run-history-table" data-filterable-table>
+            <thead>
+              <tr>
+                <th>Type</th>
+                <th>Run ID</th>
+                <th>Status</th>
+                <th>Rows</th>
+                <th>Run Time ({{ timezone_label }})</th>
+                <th>Export</th>
+                <th>Error</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for option in query_options %}
+              {% for run in recent_runs_by_type[option] %}
+              <tr>
+                <td><span class="pill run-type {{ option }}">{{ option|capitalize }}</span></td>
+                <td>#{{ run['id'] }}</td>
+                <td><span class="pill {{ run['status'] }}">{{ run['status'] }}</span></td>
+                <td>{{ run['row_count'] }}</td>
+                <td>{{ run['formatted_run_timestamp'] }}</td>
+                <td>
+                  {% if run['status'] == 'success' %}
+                  <a class="button secondary table-button" data-no-loading href="{{ url_for('export_run', run_id=run['id'], query_type=option) }}">Download</a>
+                  {% else %}
+                  -
+                  {% endif %}
+                </td>
+                <td class="error-cell">
+                  {% if run['error_message'] %}
+                    {% if run['error_message']|length > 96 %}
+                    <p class="error-preview">{{ run['error_message'][:96] }}...</p>
+                    <button type="button" class="button tertiary table-inline-button" data-error-toggle>Show</button>
+                    <pre class="error-full" hidden>{{ run['error_message'] }}</pre>
+                    {% else %}
+                    <span class="error-inline">{{ run['error_message'] }}</span>
+                    {% endif %}
+                  {% else %}
+                  -
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <p class="empty-state">No historical runs yet.</p>
+        {% endif %}
+      </section>
+    </main>
+
+    <script>
+      (function () {
+        var input = document.querySelector("[data-table-filter]");
+        var table = document.getElementById("run-history-table");
+        if (input && table) {
+          input.addEventListener("input", function () {
+            var term = input.value.trim().toLowerCase();
+            table.querySelectorAll("tbody tr").forEach(function (row) {
+              row.hidden = !!term && row.textContent.toLowerCase().indexOf(term) === -1;
+            });
+          });
+        }
+        document.querySelectorAll("[data-error-toggle]").forEach(function (button) {
+          button.addEventListener("click", function () {
+            var full = button.parentElement.querySelector(".error-full");
+            if (!full) return;
+            full.hidden = !full.hidden;
+            button.textContent = full.hidden ? "Show" : "Hide";
+          });
+        });
+      })();
+    </script>
+  </body>
+</html>

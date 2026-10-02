@@ -23,8 +23,10 @@ import pandas as pd
 import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from dotenv import load_dotenv
 from flask import (
+    g,
     Flask,
     abort,
     flash,
@@ -43,13 +45,23 @@ import allocation_store
 import audit_store
 import audit_universe
 import excess
+import identity
+import notifier
 import pick_store
+import readiness
+import readiness_service
+import readiness_store
 import recon
+import ffl_docs
 import release_gate
+import request_service
+import request_store
 import serial_history
+import shipments
 import shipping_metrics
 import shipping_store
 import shortage
+import stock
 import verify_store
 
 try:
@@ -205,6 +217,21 @@ RELEASE_GATE_FILTER_TOKEN = "__RELEASE_GATE_FILTER__"
 RELEASE_LOOKAHEAD_TOKEN = "__RELEASE_LOOKAHEAD_DAYS__"
 RELEASE_COMPONENT_CODES_TOKEN = "__COMPONENT_PRODUCT_CODES__"
 RELEASE_EXCLUDED_CUSTOMERS_TOKEN = "__RELEASE_EXCLUDED_CUSTOMERS__"
+
+# Order readiness ("why can't this ship?")
+READINESS_SQL_DIR = Path(__file__).resolve().parent / "sql"
+READINESS_CANDIDATES_FILE = READINESS_SQL_DIR / "readiness_candidates.sql"
+ORDER_DETAIL_FILE = READINESS_SQL_DIR / "order_detail.sql"
+ORDER_PART_LOCATIONS_FILE = READINESS_SQL_DIR / "order_part_locations.sql"
+ORDER_DOCUMENTS_FILE = READINESS_SQL_DIR / "order_documents.sql"
+READINESS_LOOKAHEAD_DAYS = int(os.getenv("READINESS_LOOKAHEAD_DAYS", "30"))
+READINESS_REFRESH_MINUTES = int(os.getenv("READINESS_REFRESH_MINUTES", "15"))
+READINESS_CACHE_SECONDS = int(os.getenv("READINESS_CACHE_SECONDS", "300"))
+ORDER_SHIPMENTS_FILE = READINESS_SQL_DIR / "order_shipments.sql"
+SHIPMENTS_LOOKUP_FILE = READINESS_SQL_DIR / "shipments_lookup.sql"
+STOCK_BY_PART_FILE = READINESS_SQL_DIR / "stock_by_part.sql"
+SHIPPED_DIGEST_CHECK_MINUTES = int(os.getenv("SHIPPED_DIGEST_CHECK_MINUTES", "5"))
+SHIPMENTS_LOOKUP_MAX_DAYS = int(os.getenv("SHIPMENTS_LOOKUP_MAX_DAYS", "120"))
 RELEASE_SERIAL_PART_FILTER_TOKEN = "__RELEASE_SERIAL_PART_FILTER__"
 # Allocation screen: per-SKU supply/demand model + Promise Del Date editing.
 ALLOC_SUPPLY_FILE = resolve_path_setting(
@@ -249,6 +276,7 @@ SENSITIVE_SETTING_KEYS = {
     "mssql_write_connection_string",
     "telegram_bot_token",
     "smtp_password",
+    "teams_webhook_url",
 }
 
 SCHEDULER_LOCK_FILE = None
@@ -694,6 +722,24 @@ def validate_csrf() -> None:
 app.jinja_env.globals["csrf_token"] = get_csrf_token
 
 
+@app.template_filter("local_dt")
+def _local_dt_filter(value, fmt: str = "%Y-%m-%d %H:%M") -> str:
+    """Render an ISO timestamp (any zone) in plant time for templates."""
+    if not value:
+        return ""
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value).strip()
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return text[:16].replace("T", " ")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(resolve_timezone()).strftime(fmt)
+
+
 def get_query_type(value: Optional[str]) -> str:
     if value in QUERY_FILES:
         return value
@@ -1012,6 +1058,10 @@ def fetch_picklist_from_mssql(
     engine = get_erp_engine()
     with engine.connect() as connection:
         df = pd.read_sql_query(query, connection)
+    try:
+        df = _apply_manual_hold_exclusions(df)
+    except Exception as exc:  # noqa: BLE001 - a hold ledger problem must not fail the run
+        logger.exception("Manual hold exclusion failed: %s", exc)
     if gate_payload is not None:
         df.attrs["release_gate_payload"] = gate_payload
         if gate_payload and not gate_payload.get("error") and not df.empty:
@@ -1388,6 +1438,20 @@ def ensure_release_gate_policy_version(changed_by: str = "system") -> dict[str, 
         return latest
     version = shipping_store.save_policy_config(changed_by=changed_by, **desired)
     return {"version": version, **desired, "changed_by": changed_by}
+
+
+def get_operator_roster() -> list[dict[str, str]]:
+    """Roster for the operator picker (Settings overrides OPERATOR_ROSTER_JSON)."""
+    raw = get_config_value("operator_roster_json", "OPERATOR_ROSTER_JSON", "[]")
+    try:
+        return identity.parse_roster(raw)
+    except ValueError as exc:
+        logger.error("Invalid operator roster configuration: %s", exc)
+        return []
+
+
+def get_teams_digest_time() -> str:
+    return (get_config_value("teams_digest_time", "TEAMS_DIGEST_TIME", "16:30") or "16:30").strip()
 
 
 def get_max_runs_per_day() -> int:
@@ -2008,6 +2072,16 @@ def _execute_picklist_run_core(
             )
         except Exception as exc:  # noqa: BLE001 — recon snapshot must never fail the run
             logger.exception("Failed to save plan snapshot for run %s: %s", run_id, exc)
+        try:
+            if feature_enabled("orders"):
+                threading.Thread(
+                    target=readiness_service.refresh,
+                    kwargs={"trigger": "picklist_run", "force": True},
+                    name="readiness-after-picklist",
+                    daemon=True,
+                ).start()
+        except Exception as exc:  # noqa: BLE001 — readiness refresh must never fail the run
+            logger.exception("Failed to start readiness refresh after run %s: %s", run_id, exc)
         export_path = generate_export(
             df=df,
             run_id=run_id,
@@ -2047,6 +2121,17 @@ def _execute_picklist_run_core(
                     )
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Shortage note for run notification failed: %s", exc)
+        exclusions = df.attrs.get("manual_hold_exclusions") or []
+        if exclusions:
+            message += (
+                f" {len(exclusions)} order{'s' if len(exclusions) != 1 else ''} excluded by manual holds: "
+                + ", ".join(
+                    f"{row['order_id']} ({row.get('hold_kind') or 'hold'} until {row.get('expires_at') or '?'})"
+                    for row in exclusions[:10]
+                )
+                + (" ..." if len(exclusions) > 10 else "")
+                + "."
+            )
         logger.info(message)
         try:
             send_telegram_notification(message)
@@ -2219,6 +2304,25 @@ def start_scheduler() -> None:
         id="daily_picklist_run",
         replace_existing=True,
     )
+    if READINESS_REFRESH_MINUTES > 0:
+        scheduler.add_job(
+            scheduled_readiness_refresh,
+            trigger=IntervalTrigger(minutes=READINESS_REFRESH_MINUTES),
+            id="readiness_refresh",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        logger.info("Scheduled order readiness refresh every %d minutes.", READINESS_REFRESH_MINUTES)
+    if SHIPPED_DIGEST_CHECK_MINUTES > 0:
+        scheduler.add_job(
+            scheduled_shipped_digest_check,
+            trigger=IntervalTrigger(minutes=SHIPPED_DIGEST_CHECK_MINUTES),
+            id="shipped_digest_check",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
     scheduler.start()
     logger.info(
         "Scheduled daily picklist run at %02d:%02d (%s).",
@@ -2289,6 +2393,23 @@ FEATURE_FLAGS = {
         "label": "Allocation",
         "path_prefixes": ("/allocation", "/api/allocation"),
     },
+    "orders": {
+        "setting_key": "feature_orders_enabled",
+        "label": "Orders",
+        "path_prefixes": (
+            "/orders",
+            "/api/orders",
+            "/api/readiness",
+            "/shipments",
+            "/api/shipments",
+            "/stock",
+            "/api/stock",
+            "/api/shipping/digest",
+            "/requests",
+            "/api/requests",
+            "/api/holds",
+        ),
+    },
 }
 
 
@@ -2303,6 +2424,27 @@ def get_feature_flags() -> dict[str, bool]:
 @app.context_processor
 def inject_feature_flags():
     return {"feature_flags": get_feature_flags()}
+
+
+@app.context_processor
+def inject_request_badge():
+    """Open-request count for the Requests tab. Best effort: a missing or
+    unconfigured request store must never break a page render."""
+    badge = {"open": 0, "overdue": 0}
+    if feature_enabled("orders"):
+        try:
+            badge = request_store.open_counts()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Request badge unavailable: %s", exc)
+    return {"request_badge": badge}
+
+
+@app.context_processor
+def inject_operator_roster():
+    return {
+        "operator_roster": get_operator_roster(),
+        "operator_teams": [(team, identity.TEAM_LABELS[team]) for team in identity.TEAMS],
+    }
 
 
 @app.before_request
@@ -2491,6 +2633,401 @@ def check_audit_universe_sql() -> None:
             )
 
 
+def get_readiness_config() -> dict[str, Any]:
+    codes = get_config_value("readiness_credit_check_codes", "READINESS_CREDIT_CHECK_CODES", "C") or "C"
+    return {
+        "require_ffl_doc": parse_bool(
+            get_config_value("readiness_require_ffl_doc", "READINESS_REQUIRE_FFL_DOC", "true"),
+            default=True,
+        ),
+        "credit_check_codes": tuple(
+            code.strip().upper() for code in str(codes).split(",") if code.strip()
+        ),
+    }
+
+
+def get_ffl_doc_config() -> dict[str, Any]:
+    """Tier-2 (document OCR) settings. Off unless READINESS_OCR_ENABLED is true."""
+    def _float(key: str, env: str, default: float) -> float:
+        try:
+            return float(get_config_value(key, env, str(default)) or default)
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "enabled": parse_bool(get_config_value("readiness_ocr_enabled", "READINESS_OCR_ENABLED", "false"), default=False),
+        "path_map": get_config_value("document_path_map", "DOCUMENT_PATH_MAP", "") or "",
+        "roots": get_config_value("document_roots", "DOCUMENT_ROOTS", "") or "",
+        "ocr_dpi": _int_setting("readiness_ocr_dpi", "READINESS_OCR_DPI", ffl_docs.DEFAULT_OCR_DPI),
+        "ocr_pages": _int_setting("readiness_ocr_pages", "READINESS_OCR_PAGES", ffl_docs.DEFAULT_OCR_PAGES),
+        "max_docs_per_run": _int_setting("readiness_ocr_max_docs_per_run", "READINESS_OCR_MAX_DOCS_PER_RUN", ffl_docs.DEFAULT_MAX_DOCS_PER_RUN),
+        "name_threshold": _float("readiness_ffl_name_threshold", "READINESS_FFL_NAME_THRESHOLD", ffl_docs.DEFAULT_NAME_THRESHOLD),
+        "addr_threshold": _float("readiness_ffl_addr_threshold", "READINESS_FFL_ADDR_THRESHOLD", ffl_docs.DEFAULT_ADDR_THRESHOLD),
+    }
+
+
+def fetch_order_documents(order_id: str) -> list[dict]:
+    df = run_erp_query_file(ORDER_DOCUMENTS_FILE, {"so": str(order_id).strip().upper()}, f"order documents {order_id}")
+    return df.to_dict(orient="records")
+
+
+def _readiness_doc_findings(orders: list[dict]) -> dict[str, list[dict]]:
+    """Tier-2 FFL document comparison for the readiness refresh (flag-gated)."""
+    cfg = get_ffl_doc_config()
+    if not cfg["enabled"]:
+        return {}
+    ffl_docs.configure(
+        path_map=cfg["path_map"],
+        roots=cfg["roots"],
+        ocr_enabled=True,
+        ocr_dpi=cfg["ocr_dpi"],
+        ocr_pages=cfg["ocr_pages"],
+        max_docs_per_run=cfg["max_docs_per_run"],
+        name_threshold=cfg["name_threshold"],
+        addr_threshold=cfg["addr_threshold"],
+        logger=logger,
+    )
+    return ffl_docs.findings_for_orders(
+        orders,
+        fetch_documents=fetch_order_documents,
+        cache_get=readiness_store.get_doc_cache,
+        cache_put=readiness_store.put_doc_cache,
+    )
+
+
+def _order_documents_view(order_id: str) -> list[dict]:
+    """Attachments for the order page, classified; never fails the page."""
+    try:
+        rows = fetch_order_documents(order_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Order documents lookup failed for %s: %s", order_id, exc)
+        return []
+    out = []
+    for row in rows:
+        document_id = str(row.get("DOCUMENT_ID") or "").strip()
+        folder = str(row.get("DOC_FILE_PATH") or "").strip()
+        created = row.get("CREATE_DATE")
+        out.append({
+            "document_id": document_id,
+            "folder": folder,
+            "kind": ffl_docs.classify_kind(document_id, folder),
+            "description": str(row.get("DESCRIPTION") or "").strip() or None,
+            "created": created.strftime("%Y-%m-%d") if hasattr(created, "strftime") else (str(created)[:10] if created else None),
+        })
+    return out
+
+
+def _render_readiness_sql(path: Path) -> str:
+    if not path.exists():
+        raise FileNotFoundError(f"Readiness query not found at: {path}")
+    template = path.read_text(encoding="utf-8")
+    return render_release_candidates_query(
+        template, query_options={"lookahead_days": READINESS_LOOKAHEAD_DAYS}
+    )
+
+
+def fetch_readiness_candidate_rows() -> list[dict]:
+    query = _render_readiness_sql(READINESS_CANDIDATES_FILE)
+    engine = get_erp_engine()
+    logger.info("Running order readiness candidate query")
+    with engine.connect() as connection:
+        df = pd.read_sql_query(query, connection)
+    logger.info("Order readiness candidate query returned %d rows.", len(df.index))
+    return df.to_dict(orient="records")
+
+
+def fetch_order_detail_rows(order_id: str) -> list[dict]:
+    query = _render_readiness_sql(ORDER_DETAIL_FILE)
+    engine = get_erp_engine()
+    logger.info("Running order detail query for %s", order_id)
+    with engine.connect() as connection:
+        df = pd.read_sql_query(text(query), connection, params={"so": order_id})
+    return df.to_dict(orient="records")
+
+
+def fetch_order_part_locations(order_id: str) -> list[dict]:
+    df = run_erp_query_file(
+        ORDER_PART_LOCATIONS_FILE, {"so": order_id}, f"order part locations query ({order_id})"
+    )
+    return df.to_dict(orient="records")
+
+
+def _picklist_orders_today() -> Optional[set[str]]:
+    """Order ids on today's latest guns + components runs; None when no run today."""
+    today = _today_local()
+    orders: set[str] = set()
+    found = False
+    for query_type in QUERY_FILES:
+        run, rows = get_latest_successful_run(query_type=query_type)
+        if not run:
+            continue
+        try:
+            run_day = parse_run_timestamp(run["run_timestamp"]).astimezone(resolve_timezone()).date()
+        except Exception:  # noqa: BLE001
+            continue
+        if run_day != today:
+            continue
+        found = True
+        for row in rows:
+            order_id = str(row.get("Cust Order ID") or "").strip().upper()
+            if order_id:
+                orders.add(order_id)
+    return orders if found else None
+
+
+def _readiness_gate_decisions() -> dict[str, dict]:
+    if get_release_gate_mode() == "off":
+        return {}
+    payload = build_release_gate_payload()
+    if not payload or payload.get("error"):
+        return {}
+    return {
+        str(row.get("order_id") or "").upper(): row
+        for row in payload.get("decisions") or []
+        if row.get("order_id")
+    }
+
+
+def _readiness_pick_status(order_id: str) -> dict[str, Any]:
+    claimed = order_id in pick_store.claimed_orders()
+    ready = [
+        row for row in pick_store.ready_for_pack_orders(limit=500)
+        if str(row.get("cust_order_id") or "").upper() == order_id
+    ]
+    return {
+        "claimed": claimed,
+        "ready_for_pack": bool(ready),
+        "packlist_id": next((row.get("packlist_id") for row in ready if row.get("packlist_id")), None),
+        "operator": next((row.get("operator") for row in ready if row.get("operator")), None),
+    }
+
+
+def _active_manual_holds() -> list[dict]:
+    """Manual holds from approved set-aside / exception requests."""
+    try:
+        return request_store.active_manual_holds()
+    except Exception:  # noqa: BLE001 - never let the hold ledger break a page
+        logger.exception("Manual hold read failed")
+        return []
+
+
+def invalidate_release_gate_cache() -> None:
+    _release_gate_cache.update({"payload": None, "fetched_at": None, "signature": None})
+
+
+def _int_setting(setting_key: str, env_key: str, default: int) -> int:
+    raw = get_config_value(setting_key, env_key, str(default))
+    try:
+        return max(1, int(str(raw).strip()))
+    except (TypeError, ValueError):
+        return default
+
+
+def get_request_sla_overrides() -> dict[str, int]:
+    raw = get_config_value("request_sla_hours_json", "REQUEST_SLA_HOURS_JSON", "{}") or "{}"
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.error("Invalid REQUEST_SLA_HOURS_JSON; using defaults")
+        return {}
+    out: dict[str, int] = {}
+    for key, value in (data or {}).items():
+        try:
+            out[str(key)] = max(0, int(value))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _readiness_blocking_holds(order_id: str) -> list[dict]:
+    return [
+        row for row in readiness_store.open_holds(cust_order_id=order_id)
+        if row.get("blocking")
+    ]
+
+
+def _apply_manual_hold_exclusions(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop picklist rows for orders under an active manual hold; note them on df.attrs."""
+    order_column = "Cust Order ID"
+    held = {str(h.get("cust_order_id") or "").upper(): h for h in _active_manual_holds()}
+    df.attrs["manual_hold_exclusions"] = []
+    if not held or df.empty or order_column not in df.columns:
+        return df
+    mask = df[order_column].map(lambda value: str(value).strip().upper() in held)
+    if not mask.any():
+        return df
+    excluded_ids = sorted({str(v).strip().upper() for v in df.loc[mask, order_column]})
+    trimmed = df.loc[~mask].reset_index(drop=True)
+    trimmed.attrs.update(df.attrs)
+    trimmed.attrs["manual_hold_exclusions"] = [
+        {
+            "order_id": order_id,
+            "hold_kind": held[order_id].get("hold_kind"),
+            "expires_at": str(held[order_id].get("expires_at") or "")[:10],
+            "created_by": held[order_id].get("created_by"),
+        }
+        for order_id in excluded_ids
+    ]
+    logger.info("Manual holds excluded %d order(s) from the picklist: %s", len(excluded_ids), ", ".join(excluded_ids))
+    return trimmed
+
+
+def fetch_order_shipment_rows(order_id: str) -> list[dict]:
+    df = run_erp_query_file(ORDER_SHIPMENTS_FILE, {"so": order_id}, f"order shipments ({order_id})")
+    return df.to_dict(orient="records")
+
+
+def fetch_shipment_lookup_rows(
+    start_date: str, end_date: str, customer: str = "", so: str = ""
+) -> list[dict]:
+    customer_term = (customer or "").strip().upper()
+    so_term = (so or "").strip().upper()
+    df = run_erp_query_file(
+        SHIPMENTS_LOOKUP_FILE,
+        {
+            "start_date": start_date,
+            "end_date": end_date,
+            "customer_pattern": f"%{customer_term}%" if customer_term else "%",
+            "so_pattern": f"%{so_term}%" if so_term else "%",
+        },
+        f"shipment lookup {start_date}..{end_date}",
+    )
+    return df.to_dict(orient="records")
+
+
+def fetch_stock_rows(part_id: str) -> list[dict]:
+    df = run_erp_query_file(STOCK_BY_PART_FILE, {"part_id": part_id}, f"stock lookup ({part_id})")
+    return df.to_dict(orient="records")
+
+
+def build_stock_lookup(part_id: str) -> dict[str, Any]:
+    part = (part_id or "").strip().upper()
+    rows = fetch_stock_rows(part)
+    allocation_payload: Optional[dict[str, Any]]
+    try:
+        allocation_payload = _build_allocation_payload(part)
+    except Exception as exc:  # noqa: BLE001 - allocation is supplemental here
+        logger.exception("Allocation lookup for stock page failed (%s)", part)
+        allocation_payload = {"error": str(exc)}
+    try:
+        reservations = shipping_store.serial_reservations_for_gate()
+    except Exception:  # noqa: BLE001
+        logger.exception("Serial reservation read failed for stock page")
+        reservations = []
+    return stock.build_stock_payload(
+        part,
+        location_rows=rows,
+        allocation=allocation_payload,
+        reservations=reservations,
+        manual_holds=_active_manual_holds(),
+    )
+
+
+def _search_parts(term: str) -> list[dict[str, Any]]:
+    df = run_erp_query_file(
+        ALLOC_PARTS_FILE,
+        {"pattern": f"%{term}%", "prefix": f"{term}%"},
+        f"part search '{term}'",
+    )
+    return [
+        {
+            "part_id": str(row.get("PART_ID") or ""),
+            "description": row.get("DESCRIPTION") if row.get("DESCRIPTION") == row.get("DESCRIPTION") else None,
+            "on_hand": int(row.get("ON_HAND") or 0),
+            "open_demand": int(row.get("OPEN_DEMAND") or 0),
+        }
+        for row in df.to_dict(orient="records")
+    ]
+
+
+def build_shipped_digest_payload(day: Optional[date] = None) -> dict[str, Any]:
+    day = day or _today_local()
+    rows = fetch_shipment_lookup_rows(day.isoformat(), (day + timedelta(days=1)).isoformat())
+    return shipments.build_shipped_digest(rows, day=day)
+
+
+def send_shipped_digest(day: Optional[date] = None, *, force: bool = False) -> dict[str, Any]:
+    payload = build_shipped_digest_payload(day)
+    result = {
+        "day": payload["day"],
+        "packlists": payload["packlist_count"],
+        "orders": payload["order_count"],
+        "missing_tracking": payload["missing_tracking"],
+        "sent": False,
+        "reason": None,
+    }
+    if payload["packlist_count"] == 0 and not force:
+        result["reason"] = "nothing shipped"
+        return result
+    missing = payload["missing_tracking"]
+    footer = (
+        f"{len(missing)} packlist{'s' if len(missing) != 1 else ''} still without a tracking number: "
+        + ", ".join(missing[:10])
+        + (" ..." if len(missing) > 10 else "")
+        if missing
+        else None
+    )
+    chunks = notifier.chunk_rows(payload["rows"])
+    sent_all = True
+    for index, chunk in enumerate(chunks):
+        suffix = f" ({index + 1}/{len(chunks)})" if len(chunks) > 1 else ""
+        sent = notifier.send_teams_notification(
+            "shipped_digest",
+            title=payload["title"] + suffix,
+            text=None if chunk else "Nothing shipped today.",
+            rows=chunk or None,
+            columns=payload["columns"] if chunk else None,
+            link=notifier.public_url("/shipments"),
+            footer=footer if index == len(chunks) - 1 else None,
+            event_key=payload["event_key"] + (f":part{index + 1}" if index else ""),
+            force=force,
+        )
+        sent_all = sent_all and bool(sent)
+    result["sent"] = sent_all
+    result["cards"] = len(chunks)
+    if not sent:
+        result["reason"] = "not delivered (see notification log)"
+    return result
+
+
+def scheduled_shipped_digest_check() -> None:
+    """Runs every few minutes; posts the digest once per day after the configured time."""
+    if not feature_enabled("orders"):
+        return
+    if not notifier.webhook_url() or not notifier.event_enabled("shipped_digest"):
+        return
+    try:
+        hour, minute = parse_schedule_time(get_teams_digest_time())
+    except ValueError:
+        logger.warning("Invalid Teams digest time '%s'; digest skipped.", get_teams_digest_time())
+        return
+    now_local = datetime.now(resolve_timezone())
+    if (now_local.hour, now_local.minute) < (hour, minute):
+        return
+    day = _today_local()
+    if notifier.already_sent("teams", f"shipped_digest:{day.isoformat()}"):
+        return
+    try:
+        result = send_shipped_digest(day)
+        if result["sent"]:
+            logger.info("Shipped digest posted for %s (%d packlists).", day, result["packlists"])
+    except Exception:  # noqa: BLE001 - scheduler job must never die
+        logger.exception("Shipped digest failed")
+
+
+def scheduled_readiness_refresh() -> None:
+    if not feature_enabled("orders"):
+        return
+    try:
+        request_service.expire_holds()
+    except Exception:  # noqa: BLE001
+        logger.exception("Manual hold expiry sweep failed")
+    try:
+        readiness_service.refresh("schedule", force=True)
+    except Exception:  # noqa: BLE001 - scheduler job must never die
+        logger.exception("Scheduled readiness refresh failed")
+
+
 initialize_db()
 migrate_sensitive_settings_encryption()
 audit_store.initialize()
@@ -2498,6 +3035,52 @@ pick_store.initialize(get_sqlite_conn)
 verify_store.initialize(get_sqlite_conn)
 allocation_store.initialize(get_sqlite_conn)
 shipping_store.initialize(get_sqlite_conn)
+notifier.initialize(get_sqlite_conn)
+notifier.configure(
+    get_config_value=get_config_value,
+    send_email_notification=send_email_notification,
+    logger=logger,
+)
+identity.configure(get_roster=get_operator_roster)
+readiness_store.initialize(get_sqlite_conn)
+readiness_service.configure(
+    fetch_candidates=fetch_readiness_candidate_rows,
+    fetch_order_rows=fetch_order_detail_rows,
+    fetch_order_locations=fetch_order_part_locations,
+    picklist_orders_today=_picklist_orders_today,
+    picklist_horizon=lambda: _today_local()
+    + timedelta(days=int(get_default_guns_query_options()["lookahead_days"])),
+    gate_decisions=_readiness_gate_decisions,
+    manual_holds=_active_manual_holds,
+    pick_status=_readiness_pick_status,
+    fetch_order_shipments=fetch_order_shipment_rows,
+    today=lambda: _today_local(),
+    config=get_readiness_config,
+    notify=notifier.send_teams_notification,
+    public_url=notifier.public_url,
+    cache_seconds=READINESS_CACHE_SECONDS,
+    doc_findings=_readiness_doc_findings,
+    logger=logger,
+)
+request_store.initialize(get_sqlite_conn)
+request_store.configure(sla_overrides=get_request_sla_overrides())
+request_service.configure(
+    add_exception=lambda order_id, reason, actor, expires_at: shipping_store.add_exception(
+        cust_order_id=order_id, reason=reason, created_by=actor, expires_at=expires_at
+    ),
+    revoke_exception=lambda exception_id, actor: shipping_store.revoke_exception(exception_id, actor),
+    invalidate_gate_cache=invalidate_release_gate_cache,
+    refresh_readiness=lambda: threading.Thread(
+        target=readiness_service.refresh, kwargs={"trigger": "request", "force": True},
+        name="readiness-after-request", daemon=True,
+    ).start(),
+    blocking_holds=_readiness_blocking_holds,
+    notify=notifier.send_teams_notification,
+    public_url=notifier.public_url,
+    now=lambda: datetime.now(resolve_timezone()),
+    expedite_max_hours=_int_setting("request_expedite_max_hours", "REQUEST_EXPEDITE_MAX_HOURS", 72),
+    logger=logger,
+)
 backfill_plan_snapshots()
 check_audit_universe_sql()
 start_scheduler()
@@ -2683,6 +3266,56 @@ def settings():
         else:
             delete_setting("smtp_recipient")
 
+        teams_webhook_url = (request.form.get("teams_webhook_url") or "").strip()
+        if request.form.get("clear_teams_webhook_url"):
+            delete_setting("teams_webhook_url")
+        elif teams_webhook_url:
+            if not teams_webhook_url.lower().startswith("https://"):
+                flash("Teams webhook URL must start with https://.", "error")
+                return redirect(url_for("settings"))
+            set_setting("teams_webhook_url", teams_webhook_url)
+
+        selected_events = [
+            name for name in notifier.TEAMS_EVENTS if request.form.get(f"teams_event_{name}")
+        ]
+        if len(selected_events) == len(notifier.TEAMS_EVENTS):
+            set_setting("teams_enabled_events", "all")
+        elif selected_events:
+            set_setting("teams_enabled_events", ",".join(selected_events))
+        else:
+            set_setting("teams_enabled_events", "none")
+
+        teams_digest_time = (request.form.get("teams_digest_time") or "").strip()
+        if teams_digest_time:
+            try:
+                parse_schedule_time(teams_digest_time)
+            except ValueError:
+                flash("Teams digest time must be HH:MM (24-hour).", "error")
+                return redirect(url_for("settings"))
+            set_setting("teams_digest_time", teams_digest_time)
+        else:
+            delete_setting("teams_digest_time")
+
+        app_public_url = (request.form.get("app_public_url") or "").strip().rstrip("/")
+        if app_public_url:
+            if not re.match(r"^https?://", app_public_url, re.IGNORECASE):
+                flash("App public URL must start with http:// or https://.", "error")
+                return redirect(url_for("settings"))
+            set_setting("app_public_url", app_public_url)
+        else:
+            delete_setting("app_public_url")
+
+        roster_raw = (request.form.get("operator_roster_json") or "").strip()
+        try:
+            roster = identity.parse_roster(roster_raw)
+        except ValueError as exc:
+            flash(f"Operator roster: {exc}", "error")
+            return redirect(url_for("settings"))
+        if roster:
+            set_setting("operator_roster_json", json.dumps(roster, separators=(",", ":")))
+        else:
+            delete_setting("operator_roster_json")
+
         max_runs_per_day = (request.form.get("max_runs_per_day") or "").strip()
         if max_runs_per_day:
             try:
@@ -2827,6 +3460,13 @@ def settings():
             release_policies, indent=2, sort_keys=True
         ),
         release_gate_customer_policies=release_policies,
+        teams_webhook_configured=bool(get_config_value("teams_webhook_url", "TEAMS_WEBHOOK_URL")),
+        teams_webhook_source=get_config_source("teams_webhook_url", "TEAMS_WEBHOOK_URL"),
+        teams_events=list(notifier.TEAMS_EVENTS.items()),
+        teams_enabled_events=notifier.enabled_events(),
+        teams_digest_time=get_teams_digest_time(),
+        app_public_url=get_config_value("app_public_url", "APP_PUBLIC_URL", "") or "",
+        operator_roster_json=json.dumps(get_operator_roster(), separators=(",", ":")),
     )
 
 
@@ -4610,6 +5250,7 @@ def build_release_gate_payload(
             policy_version=policy["version"],
             evaluated_at=evaluated_at,
             min_ship_to_cooldown_days=get_release_gate_min_ship_to_cooldown_days(),
+            manual_holds=_active_manual_holds(),
         )
         if persist and serial_rows is not None:
             payload["reservation_sync"] = shipping_store.sync_serial_reservations(
@@ -5070,17 +5711,27 @@ def build_verify_daily_payload(
     return payload
 
 
-# Task views come first and reporting views come last. The overview uses local
-# session data only, so opening Shipping never blocks on an ERP report query.
-SHIPPING_VIEWS = {
-    "scorecard": "Scorecard",
-    "work": "Overview",
+# /shipping?view=... serves two kinds of page. WORK_VIEWS are the scan-and-do
+# screens that sit under the Work tab; REPORT_VIEWS are read-only and sit
+# under Reports. The nav in _topnav.html groups them accordingly.
+WORK_VIEWS = {
     "pick": "Pick orders",
     "verify": "Verify boxes",
-    "stage": "Staged shipments",
+}
+REPORT_VIEWS = {
+    "scorecard": "Scorecard",
     "shortages": "Shortages",
     "recon": "Reconciliation",
     "excess": "Excess packlists",
+    "stage": "Staged shipments",
+}
+SHIPPING_VIEWS = {**WORK_VIEWS, **REPORT_VIEWS}
+# Sub-views that used to live here and now have their own page. Old links and
+# bookmarks land on the replacement.
+RETIRED_SHIPPING_VIEWS = {
+    "work": "work_page",
+    "holds": "orders_page",
+    "requests": "requests_page",
 }
 
 
@@ -5145,12 +5796,87 @@ def build_pick_order_queue() -> dict[str, Any]:
     return {"orders": orders, "plan_rows": plan_rows, "source_runs": source_runs}
 
 
+def _recent_sessions_for_display(store: Any, limit: int = 10) -> list[dict[str, Any]]:
+    rows = store.recent_sessions(limit=limit)
+    for row in rows:
+        row["started_display"] = _audit_dt_display(row.get("started_at"))
+        row["completed_display"] = _audit_dt_display(row.get("completed_at"))
+    return rows
+
+
+def _latest_success_by_type() -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for query_type in QUERY_FILES:
+        summary = get_latest_successful_run_summary(query_type)
+        out[query_type] = (
+            {
+                "id": summary["id"],
+                "row_count": summary["row_count"],
+                "run_timestamp_display": format_run_timestamp(summary["run_timestamp"]),
+            }
+            if summary
+            else None
+        )
+    return out
+
+
+@app.get("/work")
+@require_trusted_client
+def work_page():
+    """Today: the one screen that starts or resumes the day's shipping work."""
+    flags = get_feature_flags()
+    pick_sessions: list[dict[str, Any]] = []
+    verify_sessions: list[dict[str, Any]] = []
+    if flags["shipping"]:
+        pick_sessions = _recent_sessions_for_display(pick_store)
+        verify_sessions = _recent_sessions_for_display(verify_store)
+    shipping_requests: list[dict[str, Any]] = []
+    if flags["orders"]:
+        try:
+            shipping_requests = request_store.list_requests(owner_team="shipping", open_only=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Open request list failed: %s", exc)
+    return render_template(
+        "work.html",
+        pick_sessions=pick_sessions,
+        verify_sessions=verify_sessions,
+        latest_success_by_type=_latest_success_by_type(),
+        run_state_by_type=get_run_state_snapshot(),
+        query_options=list(QUERY_FILES.keys()),
+        shipping_requests=_audit_json_safe(shipping_requests),
+    )
+
+
+@app.get("/runs")
+@require_trusted_client
+def run_history_page():
+    query_types, latest_runs_by_type, recent_runs_by_type, latest_success_age_by_type = (
+        build_dashboard_data(recent_limit=25)
+    )
+    return render_template(
+        "run_history.html",
+        query_options=query_types,
+        latest_runs_by_type=latest_runs_by_type,
+        recent_runs_by_type=recent_runs_by_type,
+        latest_success_age_by_type=latest_success_age_by_type,
+        timezone_label=get_timezone_label(),
+    )
+
+
+@app.get("/lookup")
+@require_trusted_client
+def lookup_page():
+    return render_template("lookup.html")
+
+
 @app.get("/shipping")
 @require_trusted_client
 def shipping_page():
     view = request.args.get("view") or "scorecard"
+    if view in RETIRED_SHIPPING_VIEWS:
+        return redirect(url_for(RETIRED_SHIPPING_VIEWS[view]))
     if view not in SHIPPING_VIEWS:
-        view = "work"
+        view = "scorecard"
 
     recon_payload = None
     stage = None
@@ -5158,12 +5884,13 @@ def shipping_page():
     excess_payload = None
     verify_daily = None
     pick_sessions: list[dict[str, Any]] = []
-    verify_sessions: list[dict[str, Any]] = []
     latest_success_by_type: dict[str, Any] = {}
     pick_orders: list[dict[str, Any]] = []
     ready_for_pack: list[dict[str, Any]] = []
     scorecard = None
     release_gate_payload = None
+    hold_stats = None
+    request_stats = None
     scorecard_days = parse_scorecard_days(request.args.get("days"))
 
     if view == "scorecard":
@@ -5171,6 +5898,14 @@ def shipping_page():
             build_shipping_scorecard_payload(scorecard_days)
         )
         release_gate_payload = _audit_json_safe(build_release_gate_payload())
+        try:
+            hold_stats = readiness_store.hold_durations(scorecard_days)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Hold duration stats failed: %s", exc)
+        try:
+            request_stats = request_store.queue_summary(scorecard_days)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Request queue stats failed: %s", exc)
     elif view == "recon":
         recon_payload = _audit_json_safe(build_recon_payload(request.args.get("date")))
     elif view == "shortages":
@@ -5183,34 +5918,13 @@ def shipping_page():
         verify_daily = _audit_json_safe(
             build_verify_daily_payload(request.args.get("date"))
         )
-    elif view in ("work", "pick"):
-        pick_sessions = pick_store.recent_sessions(limit=10)
-        for row in pick_sessions:
-            row["started_display"] = _audit_dt_display(row.get("started_at"))
+    elif view == "pick":
+        pick_sessions = _recent_sessions_for_display(pick_store)
+        latest_success_by_type = _latest_success_by_type()
+        pick_orders = build_pick_order_queue()["orders"]
+        ready_for_pack = pick_store.ready_for_pack_orders(limit=100)
+        for row in ready_for_pack:
             row["completed_display"] = _audit_dt_display(row.get("completed_at"))
-
-        if view == "work":
-            verify_sessions = verify_store.recent_sessions(limit=10)
-            for row in verify_sessions:
-                row["started_display"] = _audit_dt_display(row.get("started_at"))
-                row["completed_display"] = _audit_dt_display(row.get("completed_at"))
-
-        for query_type in QUERY_FILES:
-            summary = get_latest_successful_run_summary(query_type)
-            latest_success_by_type[query_type] = (
-                {
-                    "id": summary["id"],
-                    "row_count": summary["row_count"],
-                    "run_timestamp_display": format_run_timestamp(summary["run_timestamp"]),
-                }
-                if summary
-                else None
-            )
-        if view == "pick":
-            pick_orders = build_pick_order_queue()["orders"]
-            ready_for_pack = pick_store.ready_for_pack_orders(limit=100)
-            for row in ready_for_pack:
-                row["completed_display"] = _audit_dt_display(row.get("completed_at"))
 
     return render_template(
         "shipping.html",
@@ -5222,7 +5936,6 @@ def shipping_page():
         excess=excess_payload,
         verify_daily=verify_daily,
         pick_sessions=pick_sessions,
-        verify_sessions=verify_sessions,
         latest_success_by_type=latest_success_by_type,
         query_options=list(QUERY_FILES.keys()),
         pick_orders=pick_orders,
@@ -5232,7 +5945,577 @@ def shipping_page():
         scorecard=scorecard,
         scorecard_days=scorecard_days,
         release_gate=release_gate_payload,
+        hold_stats=hold_stats,
+        request_stats=request_stats,
+        hold_reason_labels={code: meta["label"] for code, meta in readiness.HOLD_REASONS.items()},
+        hold_reasons=readiness_service.reason_options(),
+        owner_labels=readiness.OWNER_LABELS,
+        exception_kinds=request_store.EXCEPTION_KINDS,
     )
+
+
+READINESS_WINDOWS = {
+    "7": "Due in the next 7 days",
+    "14": "Due in the next 14 days",
+    "30": "Due in the next 30 days",
+    "overdue": "Overdue only",
+    "all": "Everything in the window",
+}
+READINESS_STALE_DAYS = int(os.getenv("READINESS_STALE_DAYS", "60"))
+
+
+def _readiness_filters() -> dict[str, Any]:
+    operator = identity.current_operator()
+    if "owner" in request.args:
+        owner = (request.args.get("owner") or "").strip().lower()
+    else:
+        owner = operator.team if operator and operator.team in ("sales", "finance", "shipping") else ""
+    window = (request.args.get("window") or "14").strip().lower()
+    if window not in READINESS_WINDOWS:
+        window = "14"
+    today = _today_local()
+    due_before = due_after = None
+    if window == "overdue":
+        due_before = (today - timedelta(days=1)).isoformat()
+    elif window != "all":
+        due_before = (today + timedelta(days=int(window))).isoformat()
+        due_after = (today - timedelta(days=READINESS_STALE_DAYS)).isoformat()
+    return {
+        "owner": owner,
+        "state": (request.args.get("state") or "").strip().upper(),
+        "reason": (request.args.get("reason") or "").strip().lower(),
+        "customer": (request.args.get("customer") or "").strip(),
+        "q": (request.args.get("q") or "").strip(),
+        "firearms": request.args.get("firearms") == "1",
+        "blocking": request.args.get("blocking") == "1",
+        "window": window,
+        "due_before": due_before,
+        "due_after": due_after,
+    }
+
+
+def _readiness_sorted(orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rank = {"BLOCKED": 0, "ATTENTION": 1, "READY": 2}
+    return sorted(
+        orders,
+        key=lambda o: (rank.get(o.get("state"), 3), o.get("due") or "9999-12-31", o.get("order_id") or ""),
+    )
+
+
+@app.get("/orders")
+@require_trusted_client
+def orders_page():
+    payload = _audit_json_safe(readiness_service.current_payload())
+    filters = _readiness_filters()
+    orders = _readiness_sorted(
+        readiness_service.filter_orders(
+            payload.get("orders") or [],
+            owner=filters["owner"] or None,
+            state=filters["state"] or None,
+            reason=filters["reason"] or None,
+            customer=filters["customer"] or None,
+            query=filters["q"] or None,
+            firearms_only=filters["firearms"],
+            due_before=filters["due_before"],
+            due_after=filters["due_after"],
+            blocking_only=filters["blocking"],
+        )
+    )
+    return render_template(
+        "orders.html",
+        windows=READINESS_WINDOWS,
+        payload=payload,
+        orders=orders,
+        filters=filters,
+        hold_reasons=readiness_service.reason_options(),
+        owner_labels=readiness.OWNER_LABELS,
+        states=readiness.ORDER_STATES,
+        operator=identity.current_operator(),
+    )
+
+
+@app.get("/orders/<order_id>")
+@require_trusted_client
+def order_detail_page(order_id: str):
+    detail = _audit_json_safe(readiness_service.order_detail(order_id))
+    status = 200 if detail.get("found") or detail.get("error") else 404
+    so = order_id.strip().upper()
+    return (
+        render_template(
+            "order_detail.html",
+            order=detail,
+            owner_labels=readiness.OWNER_LABELS,
+            bin_labels=readiness.BIN_CLASS_LABELS,
+            operator=identity.current_operator(),
+            order_requests=request_store.list_requests(cust_order_id=so, limit=50),
+            order_holds=request_store.manual_holds_for_order(so),
+            order_documents=_order_documents_view(so) if detail.get("found") else [],
+            ocr_enabled=get_ffl_doc_config()["enabled"],
+            exception_kinds=request_store.EXCEPTION_KINDS,
+        ),
+        status,
+    )
+
+
+@app.get("/api/orders")
+@require_trusted_client
+def api_orders():
+    payload = _audit_json_safe(readiness_service.current_payload())
+    filters = _readiness_filters()
+    orders = _readiness_sorted(
+        readiness_service.filter_orders(
+            payload.get("orders") or [],
+            owner=filters["owner"] or None,
+            state=filters["state"] or None,
+            reason=filters["reason"] or None,
+            customer=filters["customer"] or None,
+            query=filters["q"] or None,
+            firearms_only=filters["firearms"],
+            due_before=filters["due_before"],
+            due_after=filters["due_after"],
+            blocking_only=filters["blocking"],
+        )
+    )
+    return jsonify(
+        {
+            "evaluated_at": payload.get("evaluated_at"),
+            "summary": payload.get("summary"),
+            "error": payload.get("error"),
+            "filters": filters,
+            "orders": orders,
+        }
+    )
+
+
+@app.get("/api/orders/<order_id>")
+@require_trusted_client
+def api_order_detail(order_id: str):
+    detail = _audit_json_safe(readiness_service.order_detail(order_id))
+    if not detail.get("found") and not detail.get("error"):
+        return jsonify({"error": f"{order_id} was not found.", **detail}), 404
+    return jsonify(detail)
+
+
+@app.post("/api/orders/<order_id>/holds/<int:hold_id>/ack")
+@require_trusted_client
+@require_csrf
+@identity.require_operator
+def api_order_hold_ack(order_id: str, hold_id: int):
+    body = request.get_json(silent=True) or {}
+    note = (body.get("note") or request.form.get("note") or "").strip() or None
+    try:
+        hold = readiness_service.acknowledge(
+            hold_id, actor=g.operator.name, actor_team=g.operator.team, note=note
+        )
+    except LookupError:
+        return jsonify({"ok": False, "message": "Hold not found."}), 404
+    except ValueError as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
+    if str(hold.get("cust_order_id") or "").upper() != order_id.strip().upper():
+        return jsonify({"ok": False, "message": "Hold does not belong to this order."}), 400
+    return jsonify({"ok": True, "hold": _audit_json_safe(hold)})
+
+
+@app.post("/api/readiness/refresh")
+@require_trusted_client
+@require_csrf
+def api_readiness_refresh():
+    payload = readiness_service.refresh("manual", force=True)
+    return jsonify(
+        {
+            "ok": payload.get("error") is None,
+            "error": payload.get("error"),
+            "evaluated_at": payload.get("evaluated_at"),
+            "summary": payload.get("summary"),
+            "reconcile": payload.get("reconcile"),
+        }
+    ), (200 if payload.get("error") is None else 502)
+
+
+def _shipment_lookup_params() -> dict[str, Any]:
+    today = _today_local()
+    end_raw = (request.args.get("end") or "").strip()
+    start_raw = (request.args.get("start") or "").strip()
+    try:
+        end_day = date.fromisoformat(end_raw) if end_raw else today
+    except ValueError:
+        end_day = today
+    try:
+        start_day = date.fromisoformat(start_raw) if start_raw else end_day - timedelta(days=7)
+    except ValueError:
+        start_day = end_day - timedelta(days=7)
+    if start_day > end_day:
+        start_day, end_day = end_day, start_day
+    if (end_day - start_day).days > SHIPMENTS_LOOKUP_MAX_DAYS:
+        start_day = end_day - timedelta(days=SHIPMENTS_LOOKUP_MAX_DAYS)
+    return {
+        "so": (request.args.get("so") or "").strip().upper(),
+        "customer": (request.args.get("customer") or "").strip(),
+        "serial": (request.args.get("serial") or "").strip().upper(),
+        "start": start_day.isoformat(),
+        "end": end_day.isoformat(),
+        "end_exclusive": (end_day + timedelta(days=1)).isoformat(),
+    }
+
+
+def _shipment_lookup(params: dict[str, Any]) -> dict[str, Any]:
+    if params["so"] and not params.get("customer"):
+        # A specific order: ignore the date window so old shipments are found too.
+        rows = fetch_order_shipment_rows(params["so"]) if "-" in params["so"] else fetch_shipment_lookup_rows(
+            "1900-01-01", params["end_exclusive"], "", params["so"]
+        )
+    else:
+        rows = fetch_shipment_lookup_rows(params["start"], params["end_exclusive"], params["customer"], params["so"])
+    packlists = shipments.group_packlists(rows)
+    return {"packlists": packlists, "summary": shipments.summarize(packlists), "params": params, "error": None}
+
+
+@app.get("/api/orders/<order_id>/shipments")
+@require_trusted_client
+def api_order_shipments(order_id: str):
+    try:
+        packlists = shipments.group_packlists(fetch_order_shipment_rows(order_id.strip().upper()))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Order shipments lookup failed for %s", order_id)
+        return jsonify({"error": str(exc), "order_id": order_id}), 502
+    return jsonify(_audit_json_safe({
+        "order_id": order_id.strip().upper(),
+        "packlists": packlists,
+        "summary": shipments.summarize(packlists),
+    }))
+
+
+@app.get("/shipments")
+@require_trusted_client
+def shipments_page():
+    params = _shipment_lookup_params()
+    if params["serial"]:
+        return redirect(url_for("serial_history_page", serial=params["serial"]))
+    result: dict[str, Any] = {"packlists": [], "summary": shipments.summarize([]), "params": params, "error": None}
+    searched = bool(params["so"] or params["customer"] or request.args.get("start") or request.args.get("end") or request.args.get("go"))
+    if searched:
+        try:
+            result = _shipment_lookup(params)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Shipment lookup failed")
+            result["error"] = str(exc)
+    return render_template(
+        "shipments.html",
+        result=_audit_json_safe(result),
+        params=params,
+        searched=searched,
+        operator=identity.current_operator(),
+    )
+
+
+@app.get("/api/shipments")
+@require_trusted_client
+def api_shipments():
+    params = _shipment_lookup_params()
+    try:
+        result = _shipment_lookup(params)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Shipment lookup failed")
+        return jsonify({"error": str(exc), "params": params}), 502
+    return jsonify(_audit_json_safe(result))
+
+
+@app.get("/api/shipping/digest/preview")
+@require_trusted_client
+def api_shipping_digest_preview():
+    day_raw = (request.args.get("date") or "").strip()
+    try:
+        day = date.fromisoformat(day_raw) if day_raw else _today_local()
+    except ValueError:
+        return jsonify({"error": "date must be YYYY-MM-DD"}), 400
+    try:
+        payload = build_shipped_digest_payload(day)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Digest preview failed")
+        return jsonify({"error": str(exc)}), 502
+    payload.pop("packlists", None)
+    return jsonify(_audit_json_safe(payload))
+
+
+@app.post("/api/shipping/digest/send")
+@require_trusted_client
+@require_csrf
+def api_shipping_digest_send():
+    day_raw = (request.args.get("date") or (request.get_json(silent=True) or {}).get("date") or "").strip()
+    try:
+        day = date.fromisoformat(day_raw) if day_raw else _today_local()
+    except ValueError:
+        return jsonify({"ok": False, "message": "date must be YYYY-MM-DD"}), 400
+    try:
+        result = send_shipped_digest(day, force=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Digest send failed")
+        return jsonify({"ok": False, "message": str(exc)}), 502
+    return jsonify({"ok": result["sent"], **result}), (200 if result["sent"] else 400)
+
+
+@app.get("/stock")
+@require_trusted_client
+def stock_page():
+    part = _clean_part_id(request.args.get("part")) or ""
+    serial = (request.args.get("serial") or "").strip().upper()
+    payload: Optional[dict[str, Any]] = None
+    serial_payload: Optional[dict[str, Any]] = None
+    error: Optional[str] = None
+    if part:
+        try:
+            payload = build_stock_lookup(part)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Stock lookup failed for %s", part)
+            error = str(exc)
+    elif serial:
+        try:
+            serial_payload = stock.serial_locations_payload(serial, fetch_serial_onhand_locations([serial]))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Serial stock lookup failed for %s", serial)
+            error = str(exc)
+    return render_template(
+        "stock.html",
+        part=part,
+        serial=serial,
+        payload=_audit_json_safe(payload) if payload else None,
+        serial_payload=_audit_json_safe(serial_payload) if serial_payload else None,
+        error=error,
+        operator=identity.current_operator(),
+    )
+
+
+@app.get("/api/stock")
+@require_trusted_client
+def api_stock():
+    part = _clean_part_id(request.args.get("part")) or ""
+    serial = (request.args.get("serial") or "").strip().upper()
+    if not part and not serial:
+        return jsonify({"error": "part or serial is required"}), 400
+    try:
+        if part:
+            return jsonify(_audit_json_safe(build_stock_lookup(part)))
+        return jsonify(_audit_json_safe(stock.serial_locations_payload(serial, fetch_serial_onhand_locations([serial]))))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Stock lookup failed")
+        return jsonify({"error": str(exc)}), 502
+
+
+@app.get("/api/stock/parts")
+@require_trusted_client
+def api_stock_parts():
+    term = (request.args.get("q") or "").strip().upper()
+    if len(term) < ALLOC_PART_SEARCH_MIN_CHARS:
+        return jsonify({"parts": []}), 200
+    try:
+        return jsonify({"parts": _search_parts(term)}), 200
+    except Exception:  # noqa: BLE001
+        logger.exception("Part search failed for %s", term)
+        return jsonify({"error": "lookup_failed", "parts": []}), 500
+
+
+def _request_options() -> dict[str, Any]:
+    return {
+        "request_types": request_store.REQUEST_TYPES,
+        "exception_kinds": request_store.EXCEPTION_KINDS,
+        "problem_kinds": request_store.PROBLEM_KINDS,
+        "service_levels": request_store.SERVICE_LEVELS,
+        "statuses": request_store.STATUSES,
+        "priorities": request_store.PRIORITIES,
+        "team_labels": request_service.TEAM_LABELS,
+        "transitions": {k: sorted(v) for k, v in request_store.TRANSITIONS.items()},
+    }
+
+
+def _request_list_for_args(operator) -> tuple[list[dict], dict[str, Any]]:
+    scope = (request.args.get("scope") or ("mine" if operator else "all")).strip().lower()
+    status = (request.args.get("status") or "open").strip().lower()
+    rtype = (request.args.get("type") or "").strip()
+    so = (request.args.get("so") or "").strip().upper()
+    kwargs: dict[str, Any] = {"limit": 300}
+    if rtype in request_store.REQUEST_TYPES:
+        kwargs["request_type"] = rtype
+    if so:
+        kwargs["cust_order_id"] = so
+    if status == "open":
+        kwargs["open_only"] = True
+    elif status == "overdue":
+        kwargs["overdue_only"] = True
+    elif status in request_store.STATUSES:
+        kwargs["status"] = status
+    if scope == "team" and operator and operator.team:
+        rows = request_store.list_requests(owner_team=operator.team, **kwargs)
+    elif scope == "mine" and operator:
+        seen: dict[int, dict] = {}
+        for row in request_store.list_requests(created_by=operator.name, **kwargs):
+            seen[row["id"]] = row
+        for row in request_store.list_requests(assigned_to=operator.name, **kwargs):
+            seen.setdefault(row["id"], row)
+        rows = sorted(seen.values(), key=lambda r: (not r["is_open"], r.get("sla_due_at") or r["created_at"]))
+    else:
+        scope = "all"
+        rows = request_store.list_requests(**kwargs)
+    return rows, {"scope": scope, "status": status, "type": rtype, "so": so}
+
+
+@app.get("/requests")
+@require_trusted_client
+def requests_page():
+    operator = identity.current_operator()
+    rows, filters = _request_list_for_args(operator)
+    prefill = {
+        "type": (request.args.get("new") or request.args.get("type") or "").strip(),
+        "so": (request.args.get("so") or "").strip().upper(),
+        "wo": (request.args.get("wo") or "").strip().upper(),
+        "part": (request.args.get("part") or "").strip().upper(),
+        "serial": (request.args.get("serial") or "").strip().upper(),
+    }
+    return render_template(
+        "requests.html",
+        rows=_audit_json_safe(rows),
+        filters=filters,
+        summary=request_store.queue_summary(),
+        options=_request_options(),
+        prefill=prefill,
+        operator=operator,
+        open_form=bool(request.args.get("new")),
+        manual_holds=_active_manual_holds(),
+    )
+
+
+@app.post("/requests")
+@require_trusted_client
+@require_csrf
+@identity.require_operator
+def requests_create():
+    form = request.form
+    request_type = (form.get("request_type") or "").strip()
+    fields = {key: form.get(key) for key in (
+        "needed_by", "expedite", "service_level", "ship_complete", "exception_kind", "expires_at",
+        "expected_location", "actual_location", "qty", "problem_kind",
+    ) if form.get(key) is not None}
+    try:
+        req = request_service.create(
+            request_type=request_type,
+            actor=g.operator.name,
+            actor_team=g.operator.team,
+            title=form.get("title"),
+            body=form.get("body") or "",
+            cust_order_id=form.get("cust_order_id"),
+            work_order_id=form.get("work_order_id"),
+            customer_id=form.get("customer_id"),
+            part_id=form.get("part_id"),
+            serial_no=form.get("serial_no"),
+            fields=fields,
+            priority=form.get("priority") or "normal",
+        )
+    except ValueError as exc:
+        flash(str(exc), "error")
+        return redirect(url_for("requests_page", new=request_type or None, so=form.get("cust_order_id") or None))
+    flash(f"Request #{req['id']} sent to {request_service.TEAM_LABELS.get(req['owner_team'], req['owner_team'])}.", "success")
+    return redirect(url_for("request_detail_page", request_id=req["id"]))
+
+
+@app.get("/requests/<int:request_id>")
+@require_trusted_client
+def request_detail_page(request_id: int):
+    req = request_store.get_request(request_id)
+    if req is None:
+        abort(404)
+    hold = request_store.get_manual_hold(req["linked_manual_hold_id"]) if req.get("linked_manual_hold_id") else None
+    blockers = _readiness_blocking_holds(req["cust_order_id"]) if req.get("cust_order_id") else []
+    return render_template(
+        "request_detail.html",
+        req=_audit_json_safe(req),
+        hold=hold,
+        blockers=[b for b in blockers if b.get("reason_code") != "manual_hold"],
+        legal=sorted(request_store.TRANSITIONS.get(req["status"], set())),
+        options=_request_options(),
+        operator=identity.current_operator(),
+    )
+
+
+@app.post("/requests/<int:request_id>/transition")
+@require_trusted_client
+@require_csrf
+@identity.require_operator
+def requests_transition(request_id: int):
+    to_status = (request.form.get("to_status") or "").strip().lower()
+    try:
+        request_service.transition(
+            request_id,
+            to_status,
+            actor=g.operator.name,
+            actor_team=g.operator.team,
+            note=request.form.get("note"),
+            resolution=request.form.get("resolution"),
+            accept_expedite=bool(request.form.get("accept_expedite")),
+        )
+    except LookupError:
+        abort(404)
+    except ValueError as exc:
+        flash(str(exc), "error")
+    else:
+        flash(f"Request #{request_id} is now {to_status.replace('_', ' ')}.", "success")
+    return redirect(url_for("request_detail_page", request_id=request_id))
+
+
+@app.post("/requests/<int:request_id>/assign")
+@require_trusted_client
+@require_csrf
+@identity.require_operator
+def requests_assign(request_id: int):
+    try:
+        request_service.assign(request_id, request.form.get("assignee") or "", actor=g.operator.name, actor_team=g.operator.team)
+    except LookupError:
+        abort(404)
+    except ValueError as exc:
+        flash(str(exc), "error")
+    return redirect(url_for("request_detail_page", request_id=request_id))
+
+
+@app.post("/requests/<int:request_id>/comment")
+@require_trusted_client
+@require_csrf
+@identity.require_operator
+def requests_comment(request_id: int):
+    try:
+        request_service.comment(request_id, request.form.get("note") or "", actor=g.operator.name, actor_team=g.operator.team)
+    except LookupError:
+        abort(404)
+    except ValueError as exc:
+        flash(str(exc), "error")
+    return redirect(url_for("request_detail_page", request_id=request_id))
+
+
+@app.get("/api/requests")
+@require_trusted_client
+def api_requests():
+    rows, filters = _request_list_for_args(identity.current_operator())
+    return jsonify(_audit_json_safe({"requests": rows, "filters": filters, "summary": request_store.queue_summary()}))
+
+
+@app.get("/api/requests/<int:request_id>")
+@require_trusted_client
+def api_request_detail(request_id: int):
+    req = request_store.get_request(request_id)
+    if req is None:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(_audit_json_safe(req))
+
+
+@app.post("/api/holds/<int:hold_id>/release")
+@require_trusted_client
+@require_csrf
+@identity.require_operator
+def api_hold_release(hold_id: int):
+    if g.operator.team not in ("shipping", "management"):
+        return jsonify({"ok": False, "message": "Only Shipping or Management can release a hold."}), 403
+    try:
+        released = request_service.release_hold(hold_id, actor=g.operator.name, actor_team=g.operator.team)
+    except LookupError:
+        return jsonify({"ok": False, "message": "Hold not found."}), 404
+    return jsonify({"ok": True, "released": released})
 
 
 @app.get("/api/shipping/metrics")
@@ -5730,6 +7013,55 @@ def api_pick_complete(session_id: int):
     ), 200
 
 
+def _abandon_pick_session(session_id: int, operator: str, reason: str) -> dict:
+    session_row = pick_store.get_session(session_id)
+    if not session_row:
+        raise LookupError("Pick session not found.")
+    current = identity.current_operator()
+    actor = (operator or "").strip() or (current.name if current else "") or (session_row.get("operator") or "")
+    result = pick_store.abandon_session(session_id, operator=actor, reason=reason)
+    logger.info(
+        "Pick session #%s closed short by %s (%s): %d order(s) released, %d picked unit(s) to put back.",
+        session_id, actor, reason, len(result["orders"]), result["picked_units"],
+    )
+    return result
+
+
+@app.post("/api/pick/session/<int:session_id>/abandon")
+@require_trusted_client
+@require_csrf
+def api_pick_abandon(session_id: int):
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = _abandon_pick_session(
+            session_id, str(payload.get("operator") or ""), str(payload.get("reason") or "")
+        )
+    except LookupError as exc:
+        return jsonify({"error": "not_found", "message": str(exc)}), 404
+    except ValueError as exc:
+        return jsonify({"error": "invalid_action", "message": str(exc)}), 409
+    result["redirect"] = url_for("pick_session_page", session_id=session_id)
+    return jsonify(result), 200
+
+
+@app.post("/pick/session/<int:session_id>/abandon")
+@require_trusted_client
+@require_csrf
+def pick_session_abandon(session_id: int):
+    try:
+        result = _abandon_pick_session(
+            session_id, request.form.get("operator") or "", request.form.get("reason") or ""
+        )
+    except LookupError as exc:
+        flash(str(exc), "error")
+    except ValueError as exc:
+        flash(str(exc), "error")
+    else:
+        note = f" {result['picked_units']} picked unit(s) need to go back on the shelf." if result["picked_units"] else ""
+        flash(f"Pick session #{session_id} closed; {len(result['orders'])} order(s) released.{note}", "success")
+    return redirect(url_for("shipping_page", view="pick"))
+
+
 @app.get("/pick/session/<int:session_id>/export")
 @require_trusted_client
 def pick_session_export(session_id: int):
@@ -5988,6 +7320,31 @@ def parse_recipient_addresses(raw_value: str) -> list[str]:
 
 def recipients_are_valid(recipients: list[str]) -> bool:
     return all(email_address_is_valid(address) for address in recipients)
+
+
+@app.get("/api/me")
+@require_trusted_client
+def api_me():
+    operator = identity.current_operator()
+    return jsonify(
+        {
+            "operator": operator.as_dict() if operator else None,
+            "roster_size": len(get_operator_roster()),
+            "teams": [{"key": team, "label": identity.TEAM_LABELS[team]} for team in identity.TEAMS],
+        }
+    )
+
+
+@app.post("/api/settings/test-teams")
+@require_trusted_client
+@require_csrf
+def api_test_teams_settings():
+    if not settings_access_granted():
+        return jsonify({"ok": False, "message": "Unlock settings before testing."}), 403
+    payload = request.get_json(silent=True) or {}
+    webhook = (payload.get("webhook_url") or "").strip()
+    ok, message = notifier.send_test(webhook)
+    return jsonify({"ok": ok, "message": message}), 200 if ok else 400
 
 
 @app.post("/api/settings/test-telegram")

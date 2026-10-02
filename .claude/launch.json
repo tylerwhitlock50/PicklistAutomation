@@ -7,6 +7,12 @@
       "runtimeArgs": ["scripts/run_dev_windows.py"],
       "port": 5000,
       "autoPort": true
+    },
+    {
+      "name": "picklist-dev-recovered-db",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-c", "import os, runpy; os.environ['PORT'] = '5055'; os.environ['RUN_HISTORY_DB_PATH'] = 'data/picklist_history.recovered2.db'; runpy.run_path('scripts/run_dev_windows.py', run_name='__main__')"],
+      "port": 5055
     }
   ]
 }
