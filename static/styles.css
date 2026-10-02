@@ -2719,7 +2719,8 @@ details.detail-section > .table-wrap {
 .request-form-grid label.wide { grid-column: 1 / -1; }
 .request-form-grid input, .request-form-grid select, .request-form-grid textarea { font: inherit; }
 .request-type-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
-.request-type-tabs button { border: 1px solid #d6e0ea; background: #f6f8fb; border-radius: 999px; padding: 6px 14px; cursor: pointer; font: inherit; }
+.request-type-tabs button { border: 1px solid #d6e0ea; background: #f6f8fb; color: #2c465a; border-radius: 999px; padding: 6px 14px; cursor: pointer; font: inherit; font-weight: 600; }
+.request-type-tabs button:hover { background: #e9eef5; }
 .request-type-tabs button.active { background: #2c465a; color: #fff; border-color: #2c465a; }
 .timeline { list-style: none; padding: 0; margin: 0; }
 .timeline li { padding: 8px 0; border-bottom: 1px solid #eef2f7; font-size: 0.9rem; }

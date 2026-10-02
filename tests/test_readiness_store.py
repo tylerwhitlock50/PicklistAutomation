@@ -159,7 +159,7 @@ class ReadinessServiceTests(unittest.TestCase):
         return row(**overrides)
 
     def test_refresh_persists_notifies_and_overlays(self):
-        self.rows = [self._row(ORDER_STATUS="F"), self._row(order="SO-2", SHIP_VIA=None)]
+        self.rows = [self._row(ORDER_STATUS="F"), self._row(order="SO-2", CREDIT_STATUS="H")]
         payload = readiness_service.refresh("manual")
         self.assertIsNone(payload["error"])
         self.assertEqual(payload["reconcile"]["new"], 2)

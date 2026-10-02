@@ -36,7 +36,7 @@
         </p>
       </section>
 
-      {% if shipping_requests %}
+      {% if feature_flags.requests and shipping_requests %}
       <section class="card">
         <div class="table-controls">
           <h3>Waiting on Shipping ({{ shipping_requests|length }}) <span class="helper-text">&middot; <a href="{{ url_for('requests_page', scope='team') }}">all requests</a></span></h3>

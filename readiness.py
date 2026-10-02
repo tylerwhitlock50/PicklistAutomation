@@ -59,7 +59,9 @@ HOLD_REASONS: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         ("ship_to_vs_ffl_premise_mismatch", {"label": "Ship-to address does not match FFL premise", "owner": OWNER_SALES, "blocking": True, "tier": 2}),
         ("ffl_record_differs_from_doc", {"label": "Ship-to FFL record differs from the attached license (expiry or number)", "owner": OWNER_SALES, "blocking": False, "tier": 2}),
         ("ship_to_missing", {"label": "No ship-to address on the order", "owner": OWNER_SALES, "blocking": True, "tier": 1}),
-        ("ship_via_missing", {"label": "Ship via is blank on the order and the customer master", "owner": OWNER_SALES, "blocking": False, "tier": 1}),
+        # Retired 2026-10-02: Sales leaves ship via blank as a matter of course and
+        # Shipping picks the carrier at pack time. Kept so stored history resolves.
+        ("ship_via_missing", {"label": "Ship via is blank on the order and the customer master", "owner": OWNER_SALES, "blocking": False, "tier": 1, "retired": True}),
         ("rma_excluded", {"label": "RMA order, handled outside the picklist", "owner": OWNER_SHIPPING, "blocking": True, "tier": 1}),
         ("excluded_class", {"label": "International / employee / excluded account, handled outside the picklist", "owner": OWNER_SHIPPING, "blocking": True, "tier": 1}),
         ("no_supply", {"label": "No pickable stock for this part", "owner": OWNER_PRODUCTION, "blocking": True, "tier": 1}),
@@ -71,6 +73,11 @@ HOLD_REASONS: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
 )
 
 FIREARM_DOC_KINDS = ("ffl_ez_check", "ffl_master")
+
+# Supply holds answer "do we have it?", not "why is this order stuck?". The
+# Orders page hides them by default: an order with nothing else wrong will
+# appear on the picklist as soon as stock exists.
+STOCK_REASONS = ("no_supply", "partial_supply")
 
 DEFAULT_CONFIG: dict[str, Any] = {
     # SHIP_CREDIT_LIMIT_CTL codes that mean VISUAL checks the limit at ship time.
@@ -566,8 +573,8 @@ def evaluate_readiness(
             # --- ship-to / ship via
             if not handled_outside and not head["shipto"]["present"] and not head["ship_to_id"]:
                 holds.append(_hold(order_id, "ship_to_missing"))
-            if not handled_outside and not head["ship_via"] and not head["master_ship_via"]:
-                holds.append(_hold(order_id, "ship_via_missing"))
+            # A blank ship via is not a hold (retired ship_via_missing); the value
+            # still shows on the order page via ship_via / ship_via_source.
 
             # --- FFL (firearms orders only; international/employee handled above)
             # Ship-to FFL first. Stale or unreadable on the ship-to -> fix the ship-to,
@@ -751,6 +758,59 @@ def evaluate_readiness(
             "by_owner": {team: len(ids) for team, ids in by_owner_orders.items()},
         },
     }
+
+
+def summarize_orders(orders: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    """Recompute the payload summary block from a list of order dicts."""
+    orders = list(orders)
+    state_counts = {s: 0 for s in ORDER_STATES}
+    by_reason: dict[str, int] = {}
+    by_owner_orders: dict[str, set] = {}
+    hold_total = 0
+    for order in orders:
+        state = order.get("state", STATE_READY)
+        state_counts[state] = state_counts.get(state, 0) + 1
+        for h in order.get("holds", []):
+            hold_total += 1
+            by_reason[h["reason_code"]] = by_reason.get(h["reason_code"], 0) + 1
+            by_owner_orders.setdefault(h["owner_team"], set()).add(order["order_id"])
+    return {
+        "orders": len(orders),
+        "blocked": state_counts[STATE_BLOCKED],
+        "attention": state_counts[STATE_ATTENTION],
+        "ready": state_counts[STATE_READY],
+        "holds": hold_total,
+        "firearms_orders": sum(1 for o in orders if o.get("firearms")),
+        "by_reason": by_reason,
+        "by_owner": {team: len(ids) for team, ids in by_owner_orders.items()},
+    }
+
+
+def without_reasons(orders: Iterable[dict[str, Any]], reasons: Iterable[str]) -> list[dict[str, Any]]:
+    """Shallow-copy orders with the given hold reasons removed and state,
+    counts and owners recomputed. ``hidden_hold_count`` records what was
+    dropped so the page can still hint "awaiting stock"."""
+    drop = set(reasons)
+    out = []
+    for order in orders:
+        holds = [h for h in order.get("holds", []) if h.get("reason_code") not in drop]
+        hidden = len(order.get("holds", [])) - len(holds)
+        if not hidden:
+            out.append({**order, "hidden_hold_count": 0})
+            continue
+        blocking = any(h.get("blocking") for h in holds)
+        owner_teams = sorted({h["owner_team"] for h in holds})
+        out.append({
+            **order,
+            "holds": holds,
+            "state": STATE_BLOCKED if blocking else (STATE_ATTENTION if holds else STATE_READY),
+            "blocking_count": sum(1 for h in holds if h.get("blocking")),
+            "hold_count": len(holds),
+            "owner_teams": owner_teams,
+            "owner_labels": [OWNER_LABELS.get(t, t) for t in owner_teams],
+            "hidden_hold_count": hidden,
+        })
+    return out
 
 
 def hold_key(hold: Mapping[str, Any]) -> tuple[str, str, str]:

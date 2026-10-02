@@ -184,12 +184,14 @@
             <dt>Release gate</dt>
             <dd>{% if g %}<strong>{{ g.decision }}</strong> &middot; {{ g.label }}{% if g.next_release_date %} &middot; next release {{ g.next_release_date }}{% endif %}{% else %}<span class="muted">no decision (gate off or order outside window)</span>{% endif %}</dd>
           </dl>
+          {% if feature_flags.requests %}
           <h3>Ask for something</h3>
           <p class="owner-chips">
             <a href="{{ url_for('requests_page', new='ship_request', so=order.order_id) }}">Ship this now</a>
             <a href="{{ url_for('requests_page', new='hold_exception', so=order.order_id) }}">Hold / set aside</a>
             <a href="{{ url_for('requests_page', new='order_problem', so=order.order_id) }}">Report a problem</a>
           </p>
+          {% endif %}
         </section>
       </div>
 

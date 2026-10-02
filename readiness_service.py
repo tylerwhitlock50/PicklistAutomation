@@ -324,6 +324,31 @@ def _minutes_since(stamp: Optional[str]) -> Optional[int]:
     return int(hours * 60) if hours is not None else None
 
 
+def orders_view(payload: dict[str, Any], *, hide_stock: bool = True, hide_rma: bool = True) -> dict[str, Any]:
+    """Orders-page view of a payload. ``hide_stock`` removes supply holds (see
+    ``readiness.STOCK_REASONS``); ``hide_rma`` drops RMA / warranty orders, which
+    are worked outside the picklist. Summary tiles and owner chips are recomputed
+    from what is left. The stored payload is never mutated."""
+    orders = list(payload.get("orders") or [])
+    rma_hidden = 0
+    if hide_rma:
+        kept = [o for o in orders if not (o.get("flags") or {}).get("is_rma")]
+        rma_hidden = len(orders) - len(kept)
+        orders = kept
+    if hide_stock:
+        orders = readiness.without_reasons(orders, readiness.STOCK_REASONS)
+    summary = dict(payload.get("summary") or {})
+    summary.update(readiness.summarize_orders(orders))
+    return {
+        **payload, "orders": orders, "summary": summary,
+        "stock_holds_hidden": bool(hide_stock), "rma_hidden": rma_hidden if hide_rma else 0,
+    }
+
+
+def hide_stock_holds(payload: dict[str, Any]) -> dict[str, Any]:
+    return orders_view(payload, hide_stock=True, hide_rma=False)
+
+
 def filter_orders(orders: Iterable[dict[str, Any]], *, owner: Optional[str] = None,
                   state: Optional[str] = None, reason: Optional[str] = None,
                   customer: Optional[str] = None, query: Optional[str] = None,

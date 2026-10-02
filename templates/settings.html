@@ -123,6 +123,10 @@
               <input id="feature_orders" name="feature_orders" type="checkbox" {% if feature_flags.orders %}checked{% endif %} />
               Show Orders (readiness holds, per-order status for Inside Sales)
             </label>
+            <label class="checkbox-row" for="feature_requests">
+              <input id="feature_requests" name="feature_requests" type="checkbox" {% if feature_flags.requests %}checked{% endif %} />
+              Show Requests (ship-now requests, sanctioned holds, problem reports)
+            </label>
           </section>
 
           <section class="settings-section">

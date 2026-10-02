@@ -36,7 +36,9 @@
           {% if payload.never_run %}
           No evaluation has run yet. Click <strong>Re-check now</strong> to pull every open order from VISUAL and score it.
           {% else %}
-          Every open order inside the window, with the reason it cannot ship and the team that owns the fix.
+          Every open order inside the window, with the reason it is not on the picklist and the team that owns the fix.
+          {% if payload.stock_holds_hidden %}Stock holds are hidden: an order with no other hold will be picked as soon as we have the parts.{% endif %}
+          {% if payload.rma_hidden %}{{ payload.rma_hidden }} RMA order{{ '' if payload.rma_hidden == 1 else 's' }} hidden.{% endif %}
           Evaluated {{ (payload.evaluated_at or '')[:16]|replace('T', ' ') }} UTC
           {% if payload.stale_minutes is not none and payload.stale_minutes > 45 %}<strong>({{ payload.stale_minutes }} minutes ago)</strong>{% endif %}.
           {% if payload.error %}<strong>Last refresh failed:</strong> {{ payload.error }}{% endif %}
@@ -64,7 +66,7 @@
           <div class="audit-tile tile-pending">
             <span class="audit-tile-num">{{ rs.holds }}</span>
             <span class="audit-tile-label">Open holds</span>
-            <span class="audit-tile-sub">{{ rs.firearms_orders or 0 }} firearms orders in window</span>
+            <span class="audit-tile-sub">{{ rs.firearms_orders or 0 }} firearms orders in window{% if payload.stock_holds_hidden %} &middot; stock holds hidden{% endif %}</span>
           </div>
         </div>
         <div class="owner-chips" aria-label="Filter by owning team">
@@ -118,6 +120,12 @@
           <label class="checkbox-row" style="flex-direction: row; align-items: center;">
             <input type="checkbox" name="blocking" value="1" {% if filters.blocking %}checked{% endif %} /> Blocking holds only
           </label>
+          <label class="checkbox-row" style="flex-direction: row; align-items: center;" title="Show the no-pickable-stock holds. Hidden by default because missing stock is why most orders are not on the list.">
+            <input type="checkbox" name="stock" value="1" {% if filters.stock %}checked{% endif %} /> Show stock holds
+          </label>
+          <label class="checkbox-row" style="flex-direction: row; align-items: center;" title="RMA and warranty orders are worked outside the picklist and are hidden by default.">
+            <input type="checkbox" name="rma" value="1" {% if filters.rma %}checked{% endif %} /> Show RMA orders
+          </label>
           <button type="submit" class="button tertiary">Apply</button>
           <a class="button tertiary" href="{{ url_for('orders_page', owner='') }}">Clear</a>
         </form>
@@ -153,13 +161,13 @@
                 <td>
                   {% if o.holds %}
                   {% for h in o.holds %}<span class="hold-pill {{ 'blocking' if h.blocking }} {{ 'critical' if h.critical }} {{ 'acked' if h.acknowledged_at }}" title="{{ h.owner_label }}{% if h.acknowledged_by %} · acknowledged by {{ h.acknowledged_by }}{% endif %}">{{ h.label }}{% if h.line_no %} (line {{ h.line_no }}){% endif %}</span>{% endfor %}
-                  {% else %}<span class="muted">none</span>{% endif %}
+                  {% else %}<span class="muted">none{% if o.hidden_hold_count %} &middot; awaiting stock{% endif %}</span>{% endif %}
                 </td>
                 <td>{{ o.owner_labels|join(', ') }}</td>
                 <td>{% if o.oldest_hold_hours is not none %}{% if o.oldest_hold_hours >= 48 %}{{ (o.oldest_hold_hours / 24)|round(0, 'floor')|int }} d{% else %}{{ o.oldest_hold_hours|round(0)|int }} h{% endif %}{% endif %}</td>
                 <td class="mono">{{ o.due or '' }}</td>
                 <td>{{ o.open_qty|int }} unit{{ '' if o.open_qty == 1 else 's' }}<br /><span class="helper-text">${{ '%.0f'|format(o.open_value or 0) }}</span></td>
-                <td>{% if o.on_picklist %}on list{% elif o.on_picklist is sameas false %}<span class="muted">not on list</span>{% else %}&mdash;{% endif %}</td>
+                <td>{% if o.on_picklist %}on list{% elif o.on_picklist is sameas false %}<span class="muted">not on list{% if o.hidden_hold_count and o.holds %} &middot; awaiting stock{% endif %}</span>{% else %}&mdash;{% endif %}</td>
               </tr>
               {% endfor %}
             </tbody>

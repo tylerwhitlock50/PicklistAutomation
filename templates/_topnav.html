@@ -17,7 +17,7 @@
     <a class="topnav-tab {% if nav_group == 'work' %}is-active{% endif %}" href="{{ url_for('work_page') }}">Work</a>
     <a class="topnav-tab {% if nav_group == 'reports' %}is-active{% endif %}" href="{{ reports_home }}" data-loading-message="Loading reports&hellip;">Reports</a>
     <a class="topnav-tab {% if nav_group == 'lookup' %}is-active{% endif %}" href="{{ url_for('lookup_page') }}">Lookup</a>
-    {% if feature_flags.orders %}
+    {% if feature_flags.requests %}
     <a class="topnav-tab topnav-tab-badged {% if nav_group == 'requests' %}is-active{% endif %}" href="{{ url_for('requests_page') }}">
       Requests
       {% if request_badge.open %}

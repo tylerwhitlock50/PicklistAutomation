@@ -2405,10 +2405,12 @@ FEATURE_FLAGS = {
             "/stock",
             "/api/stock",
             "/api/shipping/digest",
-            "/requests",
-            "/api/requests",
-            "/api/holds",
         ),
+    },
+    "requests": {
+        "setting_key": "feature_requests_enabled",
+        "label": "Requests",
+        "path_prefixes": ("/requests", "/api/requests", "/api/holds"),
     },
 }
 
@@ -2431,7 +2433,7 @@ def inject_request_badge():
     """Open-request count for the Requests tab. Best effort: a missing or
     unconfigured request store must never break a page render."""
     badge = {"open": 0, "overdue": 0}
-    if feature_enabled("orders"):
+    if feature_enabled("requests"):
         try:
             badge = request_store.open_counts()
         except Exception as exc:  # noqa: BLE001
@@ -5831,7 +5833,7 @@ def work_page():
         pick_sessions = _recent_sessions_for_display(pick_store)
         verify_sessions = _recent_sessions_for_display(verify_store)
     shipping_requests: list[dict[str, Any]] = []
-    if flags["orders"]:
+    if flags["requests"]:
         try:
             shipping_requests = request_store.list_requests(owner_team="shipping", open_only=True)
         except Exception as exc:  # noqa: BLE001
@@ -5988,6 +5990,15 @@ def _readiness_filters() -> dict[str, Any]:
         "q": (request.args.get("q") or "").strip(),
         "firearms": request.args.get("firearms") == "1",
         "blocking": request.args.get("blocking") == "1",
+        # Stock holds are noise for Sales/Finance/Shipping; show them only on request,
+        # when Production is the selected owner, or when a stock reason is filtered.
+        "stock": (
+            request.args.get("stock") == "1"
+            or owner == readiness.OWNER_PRODUCTION
+            or (request.args.get("reason") or "").strip().lower() in readiness.STOCK_REASONS
+        ),
+        # RMA / warranty orders never go through the picklist; hidden unless asked for.
+        "rma": request.args.get("rma") == "1" or (request.args.get("reason") or "").strip().lower() == "rma_excluded",
         "window": window,
         "due_before": due_before,
         "due_after": due_after,
@@ -6007,6 +6018,7 @@ def _readiness_sorted(orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def orders_page():
     payload = _audit_json_safe(readiness_service.current_payload())
     filters = _readiness_filters()
+    payload = readiness_service.orders_view(payload, hide_stock=not filters["stock"], hide_rma=not filters["rma"])
     orders = _readiness_sorted(
         readiness_service.filter_orders(
             payload.get("orders") or [],

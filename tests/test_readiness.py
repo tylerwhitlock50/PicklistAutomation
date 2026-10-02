@@ -179,6 +179,50 @@ class ReadinessRulesTests(unittest.TestCase):
         self.assertEqual(hold["detail"]["source"], "master")
         self.assertIn("Ship-to has no FFL", hold["detail"]["fix"])
 
+    def test_without_stock_reasons_recomputes_state_and_owners(self):
+        payload = evaluate([
+            row(order="SO-1", AVAILABLE_QTY=0),
+            row(order="SO-2", AVAILABLE_QTY=0, SHIPTO_FFL_NUMBER="", MASTER_FFL_NUMBER=""),
+            row(order="SO-3"),
+        ])
+        by_id = {o["order_id"]: o for o in payload["orders"]}
+        self.assertEqual(by_id["SO-1"]["state"], "BLOCKED")
+        view = readiness.without_reasons(payload["orders"], readiness.STOCK_REASONS)
+        v = {o["order_id"]: o for o in view}
+        self.assertEqual(v["SO-1"]["state"], "READY")
+        self.assertEqual(v["SO-1"]["holds"], [])
+        self.assertEqual(v["SO-1"]["hidden_hold_count"], 1)
+        self.assertEqual(v["SO-1"]["owner_teams"], [])
+        self.assertEqual(v["SO-2"]["state"], "BLOCKED")
+        self.assertEqual([h["reason_code"] for h in v["SO-2"]["holds"]], ["ffl_missing"])
+        self.assertEqual(v["SO-2"]["owner_teams"], ["sales"])
+        self.assertEqual(v["SO-3"]["hidden_hold_count"], 0)
+        # the original payload is untouched
+        self.assertEqual(by_id["SO-1"]["state"], "BLOCKED")
+        summary = readiness.summarize_orders(view)
+        self.assertEqual((summary["blocked"], summary["ready"]), (1, 2))
+        self.assertNotIn("production", summary["by_owner"])
+        self.assertNotIn("no_supply", summary["by_reason"])
+
+    def test_orders_view_hides_rma_and_stock(self):
+        import readiness_service
+        payload = evaluate([
+            row(order="SO-1", IS_RMA=1),
+            row(order="SO-2", AVAILABLE_QTY=0),
+            row(order="SO-3", ORDER_STATUS="F"),
+        ])
+        view = readiness_service.orders_view(payload)
+        ids = [o["order_id"] for o in view["orders"]]
+        self.assertEqual(ids, ["SO-2", "SO-3"])
+        self.assertEqual(view["rma_hidden"], 1)
+        self.assertTrue(view["stock_holds_hidden"])
+        self.assertEqual(view["summary"]["orders"], 2)
+        self.assertEqual((view["summary"]["blocked"], view["summary"]["ready"]), (1, 1))
+        everything = readiness_service.orders_view(payload, hide_stock=False, hide_rma=False)
+        self.assertEqual(len(everything["orders"]), 3)
+        self.assertEqual(everything["rma_hidden"], 0)
+        self.assertEqual(len(payload["orders"]), 3)  # source untouched
+
     def test_retired_reasons_hidden_from_filter(self):
         import readiness_service
         codes_offered = {o["code"] for o in readiness_service.reason_options()}
@@ -232,7 +276,10 @@ class ReadinessRulesTests(unittest.TestCase):
     def test_ship_to_and_ship_via(self):
         no_shipto = evaluate([row(SHIPTO_NAME="", SHIPTO_ADDR_1="", SHIP_TO_ID="", SHIPTO_FFL_NUMBER="")])
         self.assertIn("ship_to_missing", codes(no_shipto))
-        self.assertIn("ship_via_missing", codes(evaluate([row(SHIP_VIA=None)])))
+        # Blank ship via is routine for Sales; it is no longer a hold.
+        blank_via = evaluate([row(SHIP_VIA=None)])
+        self.assertNotIn("ship_via_missing", codes(blank_via))
+        self.assertIsNone(order(blank_via)["ship_via_source"])
 
     def test_supply_per_line(self):
         rows = [row(line=1, AVAILABLE_QTY=0), row(line=2, OPEN_QTY=3, OPEN_VALUE=4500.0, AVAILABLE_QTY=1)]
