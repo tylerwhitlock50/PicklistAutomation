@@ -300,7 +300,7 @@
       </section>
       {% endif %}
 
-      {% if order_holds or order_requests %}
+      {% if feature_flags.requests and (order_holds or order_requests) %}
       <section class="card">
         <h2>Holds and requests</h2>
         {% if order_holds %}

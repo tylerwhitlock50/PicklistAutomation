@@ -105,13 +105,31 @@ class NavRouteTests(unittest.TestCase):
     def test_feature_flags_trim_nav(self):
         app_module.set_setting("feature_orders_enabled", "false")
         app_module.set_setting("feature_audit_enabled", "false")
-        html = self.client.get("/work").get_data(as_text=True)
-        self.assertNotIn(">Requests", html)
-        self.assertNotIn(">Audit<", html)
-        self.assertNotIn("Open audit", html)
-        lookup = self.client.get("/lookup").get_data(as_text=True)
-        self.assertNotIn(">Orders<", lookup)
-        self.assertIn(">Serial history<", lookup)
+        app_module.set_setting("feature_requests_enabled", "false")
+        try:
+            html = self.client.get("/work").get_data(as_text=True)
+            self.assertNotIn(">Requests", html)
+            self.assertNotIn(">Audit<", html)
+            self.assertNotIn("Open audit", html)
+            lookup = self.client.get("/lookup").get_data(as_text=True)
+            self.assertNotIn(">Orders<", lookup)
+            self.assertIn(">Serial history<", lookup)
+            # Requests is its own switch: blocked page and API, nav tab gone.
+            self.assertEqual(self.client.get("/requests").status_code, 302)
+            self.assertEqual(self.client.get("/api/requests").status_code, 404)
+        finally:
+            app_module.set_setting("feature_requests_enabled", "true")
+
+    def test_requests_flag_independent_of_orders(self):
+        app_module.set_setting("feature_orders_enabled", "true")
+        app_module.set_setting("feature_requests_enabled", "false")
+        try:
+            html = self.client.get("/work").get_data(as_text=True)
+            self.assertNotIn(">Requests", html)
+            lookup = self.client.get("/lookup").get_data(as_text=True)
+            self.assertIn(">Orders<", lookup)
+        finally:
+            app_module.set_setting("feature_requests_enabled", "true")
 
 
 if __name__ == "__main__":
