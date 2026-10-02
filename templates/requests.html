@@ -59,7 +59,7 @@
         {% if not operator %}
         <p class="flash error">Pick or type your name in the top bar first, otherwise the request has no owner.</p>
         {% endif %}
-        <form method="post" action="{{ url_for('requests_create') }}" id="request-form">
+        <form method="post" action="{{ url_for('requests.requests_create') }}" id="request-form">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
           <input type="hidden" name="request_type" id="request_type" value="{{ prefill.type or 'ship_request' }}" />
           <div class="request-type-tabs" role="tablist">
@@ -115,7 +115,7 @@
       </section>
 
       <section class="card">
-        <form method="get" action="{{ url_for('requests_page') }}" class="filters-row" data-no-loading>
+        <form method="get" action="{{ url_for('requests.requests_page') }}" class="filters-row" data-no-loading>
           <label>Show
             <select name="scope">
               <option value="mine" {% if filters.scope == 'mine' %}selected{% endif %}>Mine (created or assigned)</option>
@@ -150,8 +150,8 @@
               {% for r in rows %}
               <tr>
                 <td class="mono">{{ r.id }}</td>
-                <td><a href="{{ url_for('request_detail_page', request_id=r.id) }}"><strong>{{ r.title }}</strong></a><br /><span class="helper-text">{{ r.type_label }}{% if r.priority == 'urgent' %} &middot; <strong>urgent</strong>{% endif %} &middot; {{ (r.created_at)|local_dt }}</span></td>
-                <td class="mono">{% if r.cust_order_id %}<a href="{{ url_for('order_detail_page', order_id=r.cust_order_id) }}">{{ r.cust_order_id }}</a>{% elif r.work_order_id %}WO {{ r.work_order_id }}{% endif %}</td>
+                <td><a href="{{ url_for('requests.request_detail_page', request_id=r.id) }}"><strong>{{ r.title }}</strong></a><br /><span class="helper-text">{{ r.type_label }}{% if r.priority == 'urgent' %} &middot; <strong>urgent</strong>{% endif %} &middot; {{ (r.created_at)|local_dt }}</span></td>
+                <td class="mono">{% if r.cust_order_id %}<a href="{{ url_for('orders.order_detail_page', order_id=r.cust_order_id) }}">{{ r.cust_order_id }}</a>{% elif r.work_order_id %}WO {{ r.work_order_id }}{% endif %}</td>
                 <td>{{ r.created_by }}</td>
                 <td>{{ options.team_labels.get(r.owner_team, r.owner_team) }}</td>
                 <td><span class="hold-pill status-pill-{{ r.status }} {{ 'blocking' if r.overdue }}">{{ r.status|replace('_', ' ') }}{% if r.overdue %} · past due{% endif %}</span></td>
@@ -177,7 +177,7 @@
             <tbody>
               {% for h in manual_holds %}
               <tr>
-                <td class="mono"><a href="{{ url_for('order_detail_page', order_id=h.cust_order_id) }}">{{ h.cust_order_id }}</a></td>
+                <td class="mono"><a href="{{ url_for('orders.order_detail_page', order_id=h.cust_order_id) }}">{{ h.cust_order_id }}</a></td>
                 <td>{{ h.kind_label }}</td>
                 <td>{{ h.reason }}</td>
                 <td>{{ h.created_by }}</td>

@@ -48,17 +48,17 @@
 
         {% if not payload.never_run %}
         <div class="audit-tiles analytics-tiles">
-          <a class="audit-tile {{ 'tile-missing' if rs.blocked else 'tile-verified' }}" href="{{ url_for('orders_page', state='BLOCKED', owner='') }}">
+          <a class="audit-tile {{ 'tile-missing' if rs.blocked else 'tile-verified' }}" href="{{ url_for('orders.orders_page', state='BLOCKED', owner='') }}">
             <span class="audit-tile-num">{{ rs.blocked }}</span>
             <span class="audit-tile-label">Blocked</span>
             <span class="audit-tile-sub">someone must act</span>
           </a>
-          <a class="audit-tile {{ 'tile-misplaced' if rs.attention else 'tile-verified' }}" href="{{ url_for('orders_page', state='ATTENTION', owner='') }}">
+          <a class="audit-tile {{ 'tile-misplaced' if rs.attention else 'tile-verified' }}" href="{{ url_for('orders.orders_page', state='ATTENTION', owner='') }}">
             <span class="audit-tile-num">{{ rs.attention }}</span>
             <span class="audit-tile-label">Attention</span>
             <span class="audit-tile-sub">can ship, worth a look</span>
           </a>
-          <a class="audit-tile tile-verified" href="{{ url_for('orders_page', state='READY', owner='') }}">
+          <a class="audit-tile tile-verified" href="{{ url_for('orders.orders_page', state='READY', owner='') }}">
             <span class="audit-tile-num">{{ rs.ready }}</span>
             <span class="audit-tile-label">Ready</span>
             <span class="audit-tile-sub">no holds</span>
@@ -70,16 +70,16 @@
           </div>
         </div>
         <div class="owner-chips" aria-label="Filter by owning team">
-          <a class="{{ 'active' if not filters.owner }}" href="{{ url_for('orders_page', owner='', state=filters.state, reason=filters.reason, q=filters.q, window=filters.window) }}">Everyone</a>
+          <a class="{{ 'active' if not filters.owner }}" href="{{ url_for('orders.orders_page', owner='', state=filters.state, reason=filters.reason, q=filters.q, window=filters.window) }}">Everyone</a>
           {% for team, count in (rs.by_owner or {}).items() %}
-          <a class="{{ 'active' if filters.owner == team }}" href="{{ url_for('orders_page', owner=team, state=filters.state, reason=filters.reason, q=filters.q, window=filters.window) }}">{{ owner_labels.get(team, team) }} &middot; {{ count }}</a>
+          <a class="{{ 'active' if filters.owner == team }}" href="{{ url_for('orders.orders_page', owner=team, state=filters.state, reason=filters.reason, q=filters.q, window=filters.window) }}">{{ owner_labels.get(team, team) }} &middot; {{ count }}</a>
           {% endfor %}
         </div>
         {% endif %}
       </section>
 
       <section class="card">
-        <form method="get" action="{{ url_for('orders_page') }}" class="filters-row" data-no-loading>
+        <form method="get" action="{{ url_for('orders.orders_page') }}" class="filters-row" data-no-loading>
           <label>Owner
             <select name="owner">
               <option value="" {% if not filters.owner %}selected{% endif %}>Everyone</option>
@@ -127,7 +127,7 @@
             <input type="checkbox" name="rma" value="1" {% if filters.rma %}checked{% endif %} /> Show RMA orders
           </label>
           <button type="submit" class="button tertiary">Apply</button>
-          <a class="button tertiary" href="{{ url_for('orders_page', owner='') }}">Clear</a>
+          <a class="button tertiary" href="{{ url_for('orders.orders_page', owner='') }}">Clear</a>
         </form>
 
         <div class="table-controls">
@@ -153,7 +153,7 @@
               {% for o in orders %}
               <tr>
                 <td class="mono">
-                  <a href="{{ url_for('order_detail_page', order_id=o.order_id) }}"><strong>{{ o.order_id }}</strong></a>
+                  <a href="{{ url_for('orders.order_detail_page', order_id=o.order_id) }}"><strong>{{ o.order_id }}</strong></a>
                   <br /><span class="helper-text">{{ o.order_status }}{% if o.po_ref %} &middot; PO {{ o.po_ref }}{% endif %}</span>
                 </td>
                 <td>{{ o.customer_name or o.customer_id }}<br /><span class="helper-text">{{ o.ship_to.name if o.ship_to else '' }}</span></td>
@@ -191,7 +191,7 @@
           button.disabled = true;
           button.textContent = "Checking VISUAL...";
           try {
-            var response = await fetch("{{ url_for('api_readiness_refresh') }}", {
+            var response = await fetch("{{ url_for('orders.api_readiness_refresh') }}", {
               method: "POST",
               headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf },
               body: "{}",

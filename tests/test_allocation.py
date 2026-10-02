@@ -6,8 +6,8 @@ import copy
 import unittest
 from datetime import date, timedelta
 
-import allocation
-from allocation import build_allocation, preview_change, suggest_promise_del
+from picklist.domain import allocation
+from picklist.domain.allocation import build_allocation, preview_change, suggest_promise_del
 
 TODAY = date(2026, 7, 29)
 LOOKAHEAD = 10

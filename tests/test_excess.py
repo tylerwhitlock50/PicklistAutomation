@@ -2,7 +2,7 @@
 import unittest
 from datetime import date, datetime, timedelta
 
-from excess import build_excess
+from picklist.domain.excess import build_excess
 
 TODAY = date(2026, 8, 19)  # a Wednesday mid-month
 COST = 51.0

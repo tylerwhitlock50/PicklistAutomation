@@ -9,7 +9,7 @@ VECA database (SQL Server 2016, site `TDJ`) and this repository on 2026-07-29, u
 ## 1. Summary of the current database and application logic
 
 ### The application
-- Flask app ([app.py](../app.py), ~4,450 lines), server-rendered templates + JSON APIs.
+- Flask app ([app.py](../picklist/app.py), since split into blueprints under `picklist/routes/`), server-rendered templates + JSON APIs.
 - **Read-only against VECA today.** All writes go to local SQLite (`data/picklist_history.db`
   — run history, pick sessions) and Postgres (`audit_store.py` — serialized-inventory audit).
   The tool proposed here would be the **first feature that writes to the ERP**.

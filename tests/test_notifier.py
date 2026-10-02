@@ -6,7 +6,7 @@ from pathlib import Path
 
 import requests
 
-import notifier
+from picklist.domain import notifier
 
 
 class NotifierTests(unittest.TestCase):

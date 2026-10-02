@@ -47,9 +47,9 @@
             <h1>{{ view_titles[view] }}</h1>
           </div>
           {% if view == 'recon' and not recon.error %}
-          <a class="button tertiary" href="{{ url_for('shipping_recon_export', date=recon.plan_date) }}" data-no-loading>Export recon</a>
+          <a class="button tertiary" href="{{ url_for('shipping.shipping_recon_export', date=recon.plan_date) }}" data-no-loading>Export recon</a>
           {% elif view == 'shortages' and not shortages.error %}
-          <a class="button tertiary" href="{{ url_for('shipping_shortages_export') }}" data-no-loading>Export shortages</a>
+          <a class="button tertiary" href="{{ url_for('shipping.shipping_shortages_export') }}" data-no-loading>Export shortages</a>
           {% endif %}
         </div>
         <p class="hero-copy">{{ view_copy[view] }}</p>
@@ -71,7 +71,7 @@
           <nav class="analytics-toolbar" aria-label="Scorecard date window">
             {% for days, label in [(1, 'Today'), (7, '7 days'), (30, '30 days'), (90, '90 days')] %}
             <a class="analytics-window {{ 'active' if scorecard_days == days }}"
-               href="{{ url_for('shipping_page', view='scorecard', days=days) }}">{{ label }}</a>
+               href="{{ url_for('shipping.shipping_page', view='scorecard', days=days) }}">{{ label }}</a>
             {% endfor %}
           </nav>
         </div>
@@ -125,7 +125,7 @@
             <p class="eyebrow">Friction</p><h2>Holds and requests</h2>
             <p class="helper-text">How long orders sit on readiness holds and how fast requests get answered &middot; last {{ scorecard_days }} days</p>
           </div>
-          <a class="button tertiary" href="{{ url_for('shipping_page', view='holds') }}">Open holds</a>
+          <a class="button tertiary" href="{{ url_for('shipping.shipping_page', view='holds') }}">Open holds</a>
         </div>
         <div class="audit-tiles analytics-tiles">
           {% if hold_stats %}
@@ -209,7 +209,7 @@
               {% if release_gate.source_as_of %}&middot; {{ release_gate.source_as_of[:16]|replace('T', ' ') }} UTC{% endif %}
             </p>
           </div>
-          <a class="button tertiary" href="{{ url_for('settings') }}">Gate settings</a>
+          <a class="button tertiary" href="{{ url_for('settings.settings') }}">Gate settings</a>
         </div>
         {% if release_gate.error %}
         <p class="empty-state">Release decisions unavailable: {{ release_gate.error }}</p>
@@ -254,7 +254,7 @@
         {% else %}<p class="empty-state">No open physical orders are inside the release horizon.</p>{% endif %}
 
         <details class="gate-exception-panel"><summary>Approve a temporary exception</summary>
-          <form method="post" action="{{ url_for('shipping_release_exception_add') }}" class="gate-exception-form">
+          <form method="post" action="{{ url_for('shipping.shipping_release_exception_add') }}" class="gate-exception-form">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
             <label>Order<input name="cust_order_id" required placeholder="SO-129142" /></label>
             <label>Reason<input name="reason" required placeholder="Customer expedite / commitment risk" /></label>
@@ -268,7 +268,7 @@
           <thead><tr><th>Order</th><th>Reason</th><th>Approved by</th><th>Expires</th><th></th></tr></thead>
           <tbody>{% for ex in release_gate.active_exceptions %}<tr>
             <td class="mono">{{ ex.cust_order_id }}</td><td>{{ ex.reason }}</td><td>{{ ex.created_by }}</td><td>{{ ex.expires_at|local_dt }}</td>
-            <td><form method="post" action="{{ url_for('shipping_release_exception_revoke', exception_id=ex.id) }}" class="inline-form"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}" /><input type="hidden" name="operator" value="" data-revoke-operator /><button class="button tertiary table-button" type="submit">Revoke</button></form></td>
+            <td><form method="post" action="{{ url_for('shipping.shipping_release_exception_revoke', exception_id=ex.id) }}" class="inline-form"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}" /><input type="hidden" name="operator" value="" data-revoke-operator /><button class="button tertiary table-button" type="submit">Revoke</button></form></td>
           </tr>{% endfor %}</tbody>
         </table></div>
         {% endif %}
@@ -361,7 +361,7 @@
           {% if recon.available_dates %}
           {% for d in recon.available_dates[:10] %}
           <a class="analytics-window {{ 'active' if recon.plan_date == d }}"
-             href="{{ url_for('shipping_page', view='recon', date=d) }}">{{ d }}</a>
+             href="{{ url_for('shipping.shipping_page', view='recon', date=d) }}">{{ d }}</a>
           {% endfor %}
           {% else %}
           <span class="helper-text">No captured plans yet.</span>
@@ -805,7 +805,7 @@
             <tbody>
               {% for row in stage.aged_serials %}
               <tr{% if loop.index > row_cap %} class="row-capped"{% endif %}>
-                <td><a href="{{ url_for('serial_history_page', serial=row.serial) }}"><strong>{{ row.serial }}</strong></a></td>
+                <td><a href="{{ url_for('serial.serial_history_page', serial=row.serial) }}"><strong>{{ row.serial }}</strong></a></td>
                 <td>{{ row.part_id or '' }}{% if row.part_description %} &middot; {{ row.part_description }}{% endif %}</td>
                 <td>{{ row.location }}</td>
                 <td>{{ row.arrived_display or '' }}</td>
@@ -836,7 +836,7 @@
             </p>
           </div>
         </div>
-        <form method="post" action="{{ url_for('pick_session_start') }}" class="pick-start-form" data-max-orders="{{ max_pick_orders }}" data-loading-message="Claiming selected orders&hellip;">
+        <form method="post" action="{{ url_for('pick.pick_session_start') }}" class="pick-start-form" data-max-orders="{{ max_pick_orders }}" data-loading-message="Claiming selected orders&hellip;">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
           <label class="audit-operator">
             <span>Operator</span>
@@ -881,7 +881,7 @@
             <tbody>
               {% for s in pick_sessions %}
               <tr>
-                <td><a href="{{ url_for('pick_session_page', session_id=s.id) }}">#{{ s.id }}</a></td>
+                <td><a href="{{ url_for('pick.pick_session_page', session_id=s.id) }}">#{{ s.id }}</a></td>
                 <td><span class="pill run-type {{ s.query_type }}">{{ s.query_type }}</span></td>
                 <td><span class="pill {{ 'success' if s.status == 'completed' else ('abandoned' if s.status == 'abandoned' else 'running') }}">{{ 'closed short' if s.status == 'abandoned' else s.status }}</span>{% if s.status == 'abandoned' and s.closed_by %}<br /><span class="helper-text">by {{ s.closed_by }}</span>{% endif %}</td>
                 <td>{{ s.operator or '' }}</td>
@@ -889,10 +889,10 @@
                 <td>{{ s.picked_units }}/{{ s.planned_units }}</td>
                 <td>{{ s.problem_scans }}</td>
                 <td class="table-actions">
-                  <a class="button {{ 'secondary' if s.status == 'active' else 'tertiary' }} table-button" href="{{ url_for('pick_session_page', session_id=s.id) }}">{{ 'Resume' if s.status == 'active' else 'View' }}</a>
-                  <a class="button tertiary table-button" href="{{ url_for('pick_session_export', session_id=s.id) }}" data-no-loading>Export</a>
+                  <a class="button {{ 'secondary' if s.status == 'active' else 'tertiary' }} table-button" href="{{ url_for('pick.pick_session_page', session_id=s.id) }}">{{ 'Resume' if s.status == 'active' else 'View' }}</a>
+                  <a class="button tertiary table-button" href="{{ url_for('pick.pick_session_export', session_id=s.id) }}" data-no-loading>Export</a>
                   {% if s.status in ('active', 'closed') %}
-                  <form method="post" action="{{ url_for('pick_session_abandon', session_id=s.id) }}" class="inline-form close-session" onsubmit="return confirm('Close pick session #{{ s.id }} short? Its orders go back to the queue and anything pulled must go back on the shelf.');">
+                  <form method="post" action="{{ url_for('pick.pick_session_abandon', session_id=s.id) }}" class="inline-form close-session" onsubmit="return confirm('Close pick session #{{ s.id }} short? Its orders go back to the queue and anything pulled must go back on the shelf.');">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
                     <input type="text" name="reason" placeholder="Reason" required maxlength="200" />
                     <button class="button danger table-button" type="submit">Close short</button>
@@ -916,7 +916,7 @@
             <thead><tr><th>Order</th><th>Customer</th><th>Tote</th><th>Picker</th><th>Ready</th><th>Pick session</th></tr></thead>
             <tbody>
               {% for order in ready_for_pack %}
-              <tr><td class="mono"><strong>{{ order.cust_order_id }}</strong></td><td>{{ order.customer_id or '' }}</td><td>{{ order.tote_code }}</td><td>{{ order.operator or '' }}</td><td>{{ order.completed_display or '' }}</td><td><a href="{{ url_for('pick_session_page', session_id=order.pick_session_id) }}">#{{ order.pick_session_id }}</a></td></tr>
+              <tr><td class="mono"><strong>{{ order.cust_order_id }}</strong></td><td>{{ order.customer_id or '' }}</td><td>{{ order.tote_code }}</td><td>{{ order.operator or '' }}</td><td>{{ order.completed_display or '' }}</td><td><a href="{{ url_for('pick.pick_session_page', session_id=order.pick_session_id) }}">#{{ order.pick_session_id }}</a></td></tr>
               {% endfor %}
             </tbody>
           </table>
@@ -940,7 +940,7 @@
           <span>Operator (optional)</span>
           <input type="text" id="operator-name" placeholder="Your name or initials" autocomplete="off" />
         </label>
-        <form method="post" action="{{ url_for('verify_session_start') }}" class="verify-start-form actions" data-loading-message="Loading the packlist from the ERP&hellip;">
+        <form method="post" action="{{ url_for('verify.verify_session_start') }}" class="verify-start-form actions" data-loading-message="Loading the packlist from the ERP&hellip;">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
           <input type="hidden" name="operator" value="" data-operator-field />
           <label class="audit-field">
@@ -954,7 +954,7 @@
       <section class="card">
         <div class="table-controls">
           <h2>Packlists created {{ 'today' if verify_daily.date == verify_daily.today else verify_daily.date }}</h2>
-          <form method="get" action="{{ url_for('shipping_page') }}" class="actions">
+          <form method="get" action="{{ url_for('shipping.shipping_page') }}" class="actions">
             <input type="hidden" name="view" value="verify" />
             <input type="date" name="date" value="{{ verify_daily.date }}" max="{{ verify_daily.today }}" aria-label="Dashboard date" />
             <button type="submit" class="button tertiary">Go</button>
@@ -1045,9 +1045,9 @@
                 </td>
                 <td>
                   {% if p.session %}
-                  <a class="button tertiary table-button" href="{{ url_for('verify_session_page', session_id=p.session.id) }}">Session #{{ p.session.id }}</a>
+                  <a class="button tertiary table-button" href="{{ url_for('verify.verify_session_page', session_id=p.session.id) }}">Session #{{ p.session.id }}</a>
                   {% elif p.status == 'not_verified' %}
-                  <form method="post" action="{{ url_for('verify_session_start') }}" class="verify-start-form inline-form" data-loading-message="Loading {{ p.packlist_id }} from the ERP&hellip;">
+                  <form method="post" action="{{ url_for('verify.verify_session_start') }}" class="verify-start-form inline-form" data-loading-message="Loading {{ p.packlist_id }} from the ERP&hellip;">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
                     <input type="hidden" name="packlist_id" value="{{ p.packlist_id }}" />
                     <input type="hidden" name="operator" value="" data-operator-field />
@@ -1081,7 +1081,7 @@
             <tbody>
               {% for s in verify_daily.other_sessions %}
               <tr>
-                <td><a href="{{ url_for('verify_session_page', session_id=s.id) }}">#{{ s.id }}</a></td>
+                <td><a href="{{ url_for('verify.verify_session_page', session_id=s.id) }}">#{{ s.id }}</a></td>
                 <td class="mono">{{ s.packlist_id }}</td>
                 <td>{{ s.packlist_date or '' }}</td>
                 <td><span class="pill {{ 'success' if s.status == 'completed' else 'running' }}">{{ s.status }}</span></td>

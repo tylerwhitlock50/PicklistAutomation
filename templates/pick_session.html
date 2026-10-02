@@ -18,7 +18,7 @@
             <p class="eyebrow">Pick Confirm &middot; Session #{{ session.id }}</p>
             <h1>{% if orders %}Order pick wave{% else %}{{ session.query_type|capitalize }} picklist &mdash; run #{{ session.run_id }}{% endif %}</h1>
           </div>
-          <a class="button tertiary" href="{{ url_for('shipping_page', view='pick') }}">&larr; Pick orders</a>
+          <a class="button tertiary" href="{{ url_for('shipping.shipping_page', view='pick') }}">&larr; Pick orders</a>
         </div>
         <p class="hero-copy">
           {% if session.status != 'active' %}
@@ -99,7 +99,7 @@
         <div class="actions">
           <button type="button" class="button tertiary" id="change-order">Change order</button>
           {% if not orders %}<button type="button" class="button secondary" id="complete-pick">Complete pick session</button>{% endif %}
-          <a class="button tertiary" href="{{ url_for('pick_session_export', session_id=session.id) }}" data-no-loading>Export</a>
+          <a class="button tertiary" href="{{ url_for('pick.pick_session_export', session_id=session.id) }}" data-no-loading>Export</a>
           <button type="button" class="button danger" id="abandon-pick" title="Close this session short: unpicked orders go back to the queue, picked units go back on the shelf">Close session short</button>
         </div>
         <div class="audit-log" id="scan-log" aria-live="polite">
@@ -115,9 +115,9 @@
         <h2>{{ 'Pick complete' if session.status == 'completed' else ('Pick session closed short' if session.status == 'abandoned' else 'Pick session closed') }}</h2>
         <p class="helper-text">{% if session.status == 'completed' %}Move the picked orders to packing. When a packlist is ready, verify the serialized contents before shipment.{% elif session.status == 'abandoned' %}Closed by {{ session.closed_by or 'unknown' }}{% if session.closed_reason %}: {{ session.closed_reason }}{% endif %}. Its orders are back in the pick queue and anything already pulled must go back on the shelf; the scan history below is kept for the record.{% else %}This wave has no actively picked orders. Released orders can be claimed again; exception orders remain held for review.{% endif %}</p>
         <div class="actions">
-          <a class="button secondary" href="{{ url_for('shipping_page', view='verify') }}#verify-start">Verify a box</a>
-          <a class="button tertiary" href="{{ url_for('shipping_page', view='pick') }}">Back to pick work</a>
-          <a class="button tertiary" href="{{ url_for('pick_session_export', session_id=session.id) }}" data-no-loading>Export results</a>
+          <a class="button secondary" href="{{ url_for('shipping.shipping_page', view='verify') }}#verify-start">Verify a box</a>
+          <a class="button tertiary" href="{{ url_for('shipping.shipping_page', view='pick') }}">Back to pick work</a>
+          <a class="button tertiary" href="{{ url_for('pick.pick_session_export', session_id=session.id) }}" data-no-loading>Export results</a>
         </div>
       </section>
       {% endif %}
@@ -211,10 +211,10 @@
       const PICK = {
         sessionId: {{ session.id }},
         csrfToken: {{ csrf_token()|tojson }},
-        scanUrl: {{ url_for('api_pick_scan', session_id=session.id)|tojson }},
-        completeUrl: {{ url_for('api_pick_complete', session_id=session.id)|tojson }},
-        abandonUrl: {{ url_for('api_pick_abandon', session_id=session.id)|tojson }},
-        orderActionUrl: {{ url_for('api_pick_order_action', session_id=session.id, order_id='__ORDER__')|tojson }},
+        scanUrl: {{ url_for('pick.api_pick_scan', session_id=session.id)|tojson }},
+        completeUrl: {{ url_for('pick.api_pick_complete', session_id=session.id)|tojson }},
+        abandonUrl: {{ url_for('pick.api_pick_abandon', session_id=session.id)|tojson }},
+        orderActionUrl: {{ url_for('pick.api_pick_order_action', session_id=session.id, order_id='__ORDER__')|tojson }},
         completed: {{ (session.status != 'active')|tojson }},
         operator: null,
       };

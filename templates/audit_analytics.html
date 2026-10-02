@@ -17,7 +17,7 @@
             <p class="eyebrow">Serialized Audit</p>
             <h1>Audit Analytics</h1>
           </div>
-          <a class="button tertiary" href="{{ url_for('audit_dashboard') }}">&larr; Audit dashboard</a>
+          <a class="button tertiary" href="{{ url_for('audit.audit_dashboard') }}">&larr; Audit dashboard</a>
         </div>
         <p class="hero-copy">
           How the serialized counts are performing: accuracy against the
@@ -28,7 +28,7 @@
           <span class="analytics-toolbar-label">Window:</span>
           {% for opt in window_options %}
           <a class="analytics-window {{ 'active' if data.window_days == opt }}"
-             href="{{ url_for('audit_analytics_page', days=opt) }}">{{ opt }}d</a>
+             href="{{ url_for('audit.audit_analytics_page', days=opt) }}">{{ opt }}d</a>
           {% endfor %}
         </div>
       </section>
@@ -131,7 +131,7 @@
             <tbody>
               {% for row in d.aged_serials %}
               <tr>
-                <td><a href="{{ url_for('serial_history_page', serial=row.serial) }}"><strong>{{ row.serial }}</strong></a></td>
+                <td><a href="{{ url_for('serial.serial_history_page', serial=row.serial) }}"><strong>{{ row.serial }}</strong></a></td>
                 <td>{{ row.part_id or '' }}{% if row.part_description %} &middot; {{ row.part_description }}{% endif %}</td>
                 <td>{{ row.location }}</td>
                 <td>{{ row.arrived_display or '' }}</td>
@@ -200,7 +200,7 @@
                 <td>{{ row.expected_warehouse or '' }}{% if row.expected_location %} / {{ row.expected_location }}{% endif %}</td>
                 <td>{{ row.scanned_location or '&mdash;'|safe }}</td>
                 <td>{{ 'Yes' if row.tied_wo else '' }}{% if row.tied_wo and row.cust_order_id %} ({{ row.cust_order_id }}){% endif %}</td>
-                <td><a href="{{ url_for('audit_session_page', session_id=row.session_id) }}">#{{ row.session_id }}</a> &middot; {{ row.completed_display or '' }}</td>
+                <td><a href="{{ url_for('audit.audit_session_page', session_id=row.session_id) }}">#{{ row.session_id }}</a> &middot; {{ row.completed_display or '' }}</td>
               </tr>
               {% endfor %}
             </tbody>
@@ -227,7 +227,7 @@
                 <td>{{ row.last_scanned_display or '' }}</td>
                 <td>{{ row.last_scanned_location or '' }}</td>
                 <td>{{ row.scan_count }}</td>
-                <td><a href="{{ url_for('audit_session_page', session_id=row.last_session_id) }}">#{{ row.last_session_id }}</a></td>
+                <td><a href="{{ url_for('audit.audit_session_page', session_id=row.last_session_id) }}">#{{ row.last_session_id }}</a></td>
               </tr>
               {% endfor %}
             </tbody>
@@ -305,7 +305,7 @@
                 <td><span class="pill audit-status status-{{ row.last_status }}">{{ row.last_status }}</span></td>
                 <td>{{ row.expected_warehouse or '' }}{% if row.expected_location %} / {{ row.expected_location }}{% endif %}</td>
                 <td>{{ row.last_scanned_location or '&mdash;'|safe }}</td>
-                <td><a href="{{ url_for('audit_session_page', session_id=row.last_session_id) }}">#{{ row.last_session_id }}</a> &middot; {{ row.last_audited_display or '' }}</td>
+                <td><a href="{{ url_for('audit.audit_session_page', session_id=row.last_session_id) }}">#{{ row.last_session_id }}</a> &middot; {{ row.last_audited_display or '' }}</td>
               </tr>
               {% endfor %}
             </tbody>
@@ -338,7 +338,7 @@
             <tbody>
               {% for row in data.sessions|reverse %}
               <tr>
-                <td><a href="{{ url_for('audit_session_page', session_id=row.id) }}">#{{ row.id }}</a></td>
+                <td><a href="{{ url_for('audit.audit_session_page', session_id=row.id) }}">#{{ row.id }}</a></td>
                 <td>{{ row.label or row.scope or 'Full audit' }}</td>
                 <td>{{ row.operator or '' }}</td>
                 <td>{{ row.completed_display or '' }}</td>
@@ -354,7 +354,7 @@
           </table>
         </div>
         {% else %}
-        <p class="empty-state">No completed audits in this window. <a href="{{ url_for('audit_dashboard') }}">Start one from the audit dashboard.</a></p>
+        <p class="empty-state">No completed audits in this window. <a href="{{ url_for('audit.audit_dashboard') }}">Start one from the audit dashboard.</a></p>
         {% endif %}
       </section>
     </main>

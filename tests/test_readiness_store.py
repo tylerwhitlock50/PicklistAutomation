@@ -4,8 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import readiness_service
-import readiness_store
+from picklist.services import readiness_service
+from picklist.stores import readiness_store
 
 
 def hold(order="SO-1", code="ffl_expired", line=None, owner="sales", blocking=True, **detail):

@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
-import request_store
+from picklist.stores import request_store
 
 _logger = logging.getLogger("picklist-app.requests")
 _deps: dict[str, Any] = {

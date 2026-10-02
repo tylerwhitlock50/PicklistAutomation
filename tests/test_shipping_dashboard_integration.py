@@ -1,7 +1,5 @@
 import os
-import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -11,15 +9,15 @@ _TEST_DB = Path(tempfile.gettempdir()) / f"picklist-shipping-dashboard-{os.getpi
 os.environ["ENABLE_SCHEDULER"] = "false"
 os.environ["ACCESS_MODE"] = "off"
 os.environ["RUN_HISTORY_DB_PATH"] = str(_TEST_DB)
-if os.name == "nt":
-    # app.py's production scheduler uses the Linux-only fcntl module. The
-    # scheduler is disabled above; this shim only lets route tests import it.
-    sys.modules.setdefault(
-        "fcntl",
-        types.SimpleNamespace(LOCK_EX=1, LOCK_NB=2, LOCK_UN=8, flock=lambda *_: None),
-    )
 
-import app as app_module  # noqa: E402  (environment must be set before import)
+from picklist import app as app_module  # noqa: E402  (environment must be set before import)
+from picklist import config  # noqa: E402
+from picklist.services import query_options  # noqa: E402
+from picklist.services import settings_service  # noqa: E402
+from picklist.domain import shipping_metrics  # noqa: E402
+from picklist.routes import settings as settings_routes  # noqa: E402
+from picklist.routes import shipping as shipping_routes  # noqa: E402
+from picklist.services import shipping_service  # noqa: E402
 
 
 def tearDownModule():
@@ -31,7 +29,7 @@ def tearDownModule():
 
 
 def _scorecard_payload():
-    payload = app_module._empty_scorecard_payload(30, "")
+    payload = shipping_service._empty_scorecard_payload(30, "")
     payload.update({"error": None, "as_of": "2026-08-27T18:00:00+00:00"})
     values = {
         "ship_on_time": (96.2, 25, 26),
@@ -110,7 +108,7 @@ def _gate_payload():
 class ReleaseFilterIntegrationTests(unittest.TestCase):
     def test_advisory_removes_token_without_filtering(self):
         query = "WHERE co.STATUS = 'R'\n__RELEASE_GATE_FILTER__\nAND col.LINE_STATUS = 'A'"
-        rendered = app_module.apply_release_gate_filter(
+        rendered = query_options.apply_release_gate_filter(
             query, {"mode": "advisory", "released_orders": ["SO-1"]}
         )
         self.assertNotIn("__RELEASE_GATE_FILTER__", rendered)
@@ -118,7 +116,7 @@ class ReleaseFilterIntegrationTests(unittest.TestCase):
 
     def test_enforced_filter_quotes_orders_before_allocation(self):
         query = "WHERE co.STATUS = 'R'\n__RELEASE_GATE_FILTER__\nAND col.LINE_STATUS = 'A'"
-        rendered = app_module.apply_release_gate_filter(
+        rendered = query_options.apply_release_gate_filter(
             query,
             {
                 "mode": "enforced",
@@ -130,7 +128,7 @@ class ReleaseFilterIntegrationTests(unittest.TestCase):
         self.assertIn("policy v4", rendered)
 
     def test_enforced_empty_release_set_fails_closed(self):
-        rendered = app_module.apply_release_gate_filter(
+        rendered = query_options.apply_release_gate_filter(
             "WHERE 1=1\n__RELEASE_GATE_FILTER__",
             {"mode": "enforced", "released_orders": []},
         )
@@ -145,8 +143,8 @@ class ShippingScorecardRouteTests(unittest.TestCase):
 
     def test_scorecard_renders_all_six_metrics_and_release_queue(self):
         with (
-            patch.object(app_module, "build_shipping_scorecard_payload", return_value=_scorecard_payload()),
-            patch.object(app_module, "build_release_gate_payload", return_value=_gate_payload()),
+            patch.object(shipping_routes, "build_shipping_scorecard_payload", return_value=_scorecard_payload()),
+            patch.object(shipping_routes, "build_release_gate_payload", return_value=_gate_payload()),
         ):
             response = self.client.get("/shipping?view=scorecard&days=30")
 
@@ -169,19 +167,19 @@ class ShippingScorecardRouteTests(unittest.TestCase):
 
     def test_metrics_api_exposes_scorecard_contract(self):
         with patch.object(
-            app_module, "build_shipping_scorecard_payload", return_value=_scorecard_payload()
+            shipping_routes, "build_shipping_scorecard_payload", return_value=_scorecard_payload()
         ):
             response = self.client.get("/api/shipping/metrics?days=30")
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
-        self.assertEqual(set(payload["cards"]), set(app_module.shipping_metrics.METRIC_DEFINITIONS))
+        self.assertEqual(set(payload["cards"]), set(shipping_metrics.METRIC_DEFINITIONS))
         self.assertEqual(payload["cards"]["total_guns_shipped"]["value"], 60)
 
 
 class ReleasePolicyParsingTests(unittest.TestCase):
     def test_accumulation_policy_is_normalized(self):
-        result = app_module.parse_release_gate_customer_policies(
+        result = settings_service.parse_release_gate_customer_policies(
             '{"lipseys":{"accumulate":true,"min_guns":100,"sweep_weekday":3}}'
         )
         self.assertEqual(result, {
@@ -190,12 +188,12 @@ class ReleasePolicyParsingTests(unittest.TestCase):
 
     def test_accumulate_requires_a_json_boolean(self):
         with self.assertRaisesRegex(ValueError, "accumulate must be true or false"):
-            app_module.parse_release_gate_customer_policies(
+            settings_service.parse_release_gate_customer_policies(
                 '{"LIPSEYS":{"accumulate":"yes"}}'
             )
 
     def test_structured_major_and_standard_policy_fields_are_normalized(self):
-        result = app_module.parse_release_gate_customer_policies({
+        result = settings_service.parse_release_gate_customer_policies({
             "default": {
                 "account_type": "standard",
                 "accumulate": True,
@@ -226,7 +224,7 @@ class ReleasePolicyParsingTests(unittest.TestCase):
 
     def test_structured_policy_rejects_invalid_daily_time(self):
         with self.assertRaisesRegex(ValueError, "24-hour HH:MM"):
-            app_module.parse_release_gate_customer_policies({
+            settings_service.parse_release_gate_customer_policies({
                 "DEFAULT": {
                     "account_type": "standard",
                     "accumulate": True,
@@ -244,9 +242,9 @@ class ReleasePolicySettingsTests(unittest.TestCase):
 
     def test_settings_renders_structured_account_policy_editor(self):
         with self.client.session_transaction() as session:
-            session[app_module.SETTINGS_SESSION_KEY] = True
+            session[config.SETTINGS_SESSION_KEY] = True
         with patch.object(
-            app_module,
+            settings_routes,
             "get_release_gate_customer_policies",
             return_value={
                 "LIPSEYS": {

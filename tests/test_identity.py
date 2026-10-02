@@ -2,7 +2,7 @@ import json
 import unittest
 from types import SimpleNamespace
 
-import identity
+from picklist.domain import identity
 
 
 def fake_request(headers=None, form=None, body=None):

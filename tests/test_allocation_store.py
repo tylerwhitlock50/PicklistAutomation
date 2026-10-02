@@ -2,7 +2,7 @@
 import sqlite3
 import unittest
 
-import allocation_store
+from picklist.stores import allocation_store
 
 
 def _memory_conn_factory():

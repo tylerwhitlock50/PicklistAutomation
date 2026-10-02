@@ -1,8 +1,6 @@
 import json
 import os
-import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
 
@@ -12,14 +10,13 @@ os.environ["ACCESS_MODE"] = "off"
 os.environ["RUN_HISTORY_DB_PATH"] = str(_TEST_DB)
 os.environ.pop("OPERATOR_ROSTER_JSON", None)
 os.environ.pop("TEAMS_WEBHOOK_URL", None)
-if os.name == "nt":
-    sys.modules.setdefault(
-        "fcntl",
-        types.SimpleNamespace(LOCK_EX=1, LOCK_NB=2, LOCK_UN=8, flock=lambda *_: None),
-    )
 
-import app as app_module  # noqa: E402
-import notifier  # noqa: E402
+from picklist import app as app_module  # noqa: E402
+from picklist import config  # noqa: E402
+from picklist import db  # noqa: E402
+from picklist import features  # noqa: E402
+from picklist.services import settings_service  # noqa: E402
+from picklist.domain import notifier  # noqa: E402
 
 
 def tearDownModule():
@@ -39,22 +36,22 @@ class IdentityRouteTests(unittest.TestCase):
     def setUp(self):
         app_module.app.config["TESTING"] = True
         self.client = app_module.app.test_client()
-        app_module.set_setting("operator_roster_json", json.dumps(ROSTER))
+        db.set_setting("operator_roster_json", json.dumps(ROSTER))
 
     def tearDown(self):
-        app_module.delete_setting("operator_roster_json")
-        app_module.delete_setting("teams_webhook_url")
-        for feature_def in app_module.FEATURE_FLAGS.values():
-            app_module.delete_setting(feature_def["setting_key"])
-        notifier.configure(get_config_value=app_module.get_config_value, transport=None)
+        db.delete_setting("operator_roster_json")
+        db.delete_setting("teams_webhook_url")
+        for feature_def in features.FEATURE_FLAGS.values():
+            db.delete_setting(feature_def["setting_key"])
+        notifier.configure(get_config_value=db.get_config_value, transport=None)
 
     @staticmethod
     def _all_features_on():
-        return {f"feature_{name}": "on" for name in app_module.FEATURE_FLAGS}
+        return {f"feature_{name}": "on" for name in features.FEATURE_FLAGS}
 
     def _unlock_settings(self):
         with self.client.session_transaction() as sess:
-            sess[app_module.SETTINGS_SESSION_KEY] = True
+            sess[config.SETTINGS_SESSION_KEY] = True
             sess["_csrf_token"] = "test-token"
 
     def test_dashboard_renders_operator_picker(self):
@@ -66,7 +63,7 @@ class IdentityRouteTests(unittest.TestCase):
         self.assertIn("X-Operator", html)
 
     def test_dashboard_without_roster_offers_free_text_name(self):
-        app_module.delete_setting("operator_roster_json")
+        db.delete_setting("operator_roster_json")
         html = self.client.get("/").get_data(as_text=True)
         # No roster: a typed-name box and team picker replace the roster select.
         self.assertNotIn('<select class="topnav-operator-select" data-operator-picker', html)
@@ -115,11 +112,11 @@ class IdentityRouteTests(unittest.TestCase):
         }
         response = self.client.post("/settings", data=payload)
         self.assertEqual(response.status_code, 302)
-        roster = app_module.get_operator_roster()
+        roster = settings_service.get_operator_roster()
         self.assertEqual([m["name"] for m in roster], ["Lunden", "Noah"])
-        self.assertEqual(app_module.get_setting("teams_enabled_events"), "hold_created,shipped_digest")
-        self.assertEqual(app_module.get_teams_digest_time(), "16:45")
-        self.assertEqual(app_module.get_setting("app_public_url"), "http://ops.local:8081")
+        self.assertEqual(db.get_setting("teams_enabled_events"), "hold_created,shipped_digest")
+        self.assertEqual(settings_service.get_teams_digest_time(), "16:45")
+        self.assertEqual(db.get_setting("app_public_url"), "http://ops.local:8081")
         self.assertTrue(notifier.webhook_url().startswith("https://prod-00"))
 
     def test_settings_save_rejects_bad_roster(self):
@@ -135,13 +132,13 @@ class IdentityRouteTests(unittest.TestCase):
         }
         response = self.client.post("/settings", data=payload, follow_redirects=True)
         self.assertIn("Operator roster", response.get_data(as_text=True))
-        self.assertEqual([m["name"] for m in app_module.get_operator_roster()], ["Holly", "Richard"])
+        self.assertEqual([m["name"] for m in settings_service.get_operator_roster()], ["Holly", "Richard"])
 
     def test_test_teams_endpoint(self):
         self._unlock_settings()
         sent = []
         notifier.configure(
-            get_config_value=app_module.get_config_value,
+            get_config_value=db.get_config_value,
             transport=lambda url, payload: sent.append(url),
         )
         headers = {"X-CSRF-Token": "test-token"}

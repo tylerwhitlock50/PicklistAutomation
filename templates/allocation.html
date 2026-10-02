@@ -124,12 +124,12 @@
     <script>
       (function () {
         const CONFIG = {
-          detailUrl: {{ url_for('api_allocation_detail', part_id='__PART__')|tojson }},
-          partsUrl: {{ url_for('api_allocation_parts')|tojson }},
-          previewUrl: {{ url_for('api_allocation_preview')|tojson }},
-          suggestUrl: {{ url_for('api_allocation_suggest')|tojson }},
-          historyUrl: {{ url_for('api_allocation_history')|tojson }},
-          saveUrl: {{ url_for('api_allocation_save')|tojson }},
+          detailUrl: {{ url_for('allocation.api_allocation_detail', part_id='__PART__')|tojson }},
+          partsUrl: {{ url_for('allocation.api_allocation_parts')|tojson }},
+          previewUrl: {{ url_for('allocation.api_allocation_preview')|tojson }},
+          suggestUrl: {{ url_for('allocation.api_allocation_suggest')|tojson }},
+          historyUrl: {{ url_for('allocation.api_allocation_history')|tojson }},
+          saveUrl: {{ url_for('allocation.api_allocation_save')|tojson }},
           csrfToken: {{ csrf_token()|tojson }},
           prefillPart: {{ prefill_part|tojson }},
         };

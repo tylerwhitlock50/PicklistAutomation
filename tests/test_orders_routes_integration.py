@@ -1,7 +1,5 @@
 import os
-import sys
 import tempfile
-import types
 import unittest
 from datetime import date
 from pathlib import Path
@@ -12,14 +10,10 @@ os.environ["ACCESS_MODE"] = "off"
 os.environ["RUN_HISTORY_DB_PATH"] = str(_TEST_DB)
 os.environ.pop("OPERATOR_ROSTER_JSON", None)
 os.environ.pop("TEAMS_WEBHOOK_URL", None)
-if os.name == "nt":
-    sys.modules.setdefault(
-        "fcntl",
-        types.SimpleNamespace(LOCK_EX=1, LOCK_NB=2, LOCK_UN=8, flock=lambda *_: None),
-    )
 
-import app as app_module  # noqa: E402
-import readiness_service  # noqa: E402
+from picklist import app as app_module  # noqa: E402
+from picklist import db  # noqa: E402
+from picklist.services import readiness_service  # noqa: E402
 from tests.test_readiness import row  # noqa: E402
 
 
@@ -34,8 +28,8 @@ class OrderRouteTests(unittest.TestCase):
     def setUp(self):
         app_module.app.config["TESTING"] = True
         self.client = app_module.app.test_client()
-        app_module.delete_setting("operator_roster_json")
-        app_module.set_setting("feature_orders_enabled", "true")
+        db.delete_setting("operator_roster_json")
+        db.set_setting("feature_orders_enabled", "true")
         self.rows = [
             row(order="SO-1", ORDER_STATUS="F", CUSTOMER_ID="DEALER1", CUSTOMER_NAME="Dealer One"),
             row(order="SO-2", CREDIT_STATUS="H", CUSTOMER_ID="DEALER2", CUSTOMER_NAME="Dealer Two"),
@@ -60,7 +54,7 @@ class OrderRouteTests(unittest.TestCase):
         self.headers = {"X-CSRF-Token": "test-token"}
 
     def tearDown(self):
-        app_module.set_setting("feature_orders_enabled", "true")
+        db.set_setting("feature_orders_enabled", "true")
 
     def _refresh(self):
         response = self.client.post("/api/readiness/refresh", json={}, headers=self.headers)
@@ -145,7 +139,7 @@ class OrderRouteTests(unittest.TestCase):
         self.assertIn("SO-2", html)
 
     def test_feature_flag_off(self):
-        app_module.set_setting("feature_orders_enabled", "false")
+        db.set_setting("feature_orders_enabled", "false")
         self.assertEqual(self.client.get("/orders").status_code, 302)
         self.assertEqual(self.client.get("/api/orders").status_code, 404)
         self.assertEqual(self.client.post("/api/readiness/refresh", json={}, headers=self.headers).status_code, 404)

@@ -23,9 +23,9 @@
         </p>
         {% endif %}
         <section class="actions">
-          <a class="button secondary" href="{{ url_for('index') }}">Back to Dashboard</a>
+          <a class="button secondary" href="{{ url_for('runs.index') }}">Back to Dashboard</a>
           {% if settings_unlocked %}
-          <form method="post" action="{{ url_for('settings') }}">
+          <form method="post" action="{{ url_for('settings.settings') }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
             <input type="hidden" name="action" value="logout" />
             <button type="submit" class="button tertiary">Lock Settings</button>
@@ -826,7 +826,7 @@
             };
 
             try {
-              const result = await postJson("{{ url_for('api_test_telegram_settings') }}", payload);
+              const result = await postJson("{{ url_for('settings.api_test_telegram_settings') }}", payload);
               setInlineStatus("telegram-test-status", result.message, result.ok);
             } catch (_error) {
               setInlineStatus("telegram-test-status", "Telegram test request failed.", false);
@@ -905,7 +905,7 @@
             teamsButton.textContent = "Testing...";
             setInlineStatus("teams-test-status", "", false);
             try {
-              const result = await postJson("{{ url_for('api_test_teams_settings') }}", {
+              const result = await postJson("{{ url_for('settings.api_test_teams_settings') }}", {
                 webhook_url: (form.querySelector("#teams_webhook_url").value || "").trim(),
               });
               setInlineStatus("teams-test-status", result.message, result.ok);
@@ -937,7 +937,7 @@
             };
 
             try {
-              const result = await postJson("{{ url_for('api_test_smtp_settings') }}", payload);
+              const result = await postJson("{{ url_for('settings.api_test_smtp_settings') }}", payload);
               setInlineStatus("smtp-test-status", result.message, result.ok);
             } catch (_error) {
               setInlineStatus("smtp-test-status", "SMTP test request failed.", false);

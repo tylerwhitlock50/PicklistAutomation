@@ -1,6 +1,6 @@
 import unittest
 
-import stock
+from picklist.domain import stock
 
 
 def loc(warehouse, location, qty, serials="", serial_count=None, part="801-06486-00"):

@@ -1,7 +1,7 @@
 import unittest
 from datetime import date, datetime
 
-import shipping_metrics
+from picklist.domain import shipping_metrics
 
 
 START = date(2026, 8, 1)

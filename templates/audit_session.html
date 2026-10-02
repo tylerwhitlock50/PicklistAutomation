@@ -17,7 +17,7 @@
             <p class="eyebrow">Serialized Audit &middot; Session #{{ session.id }}</p>
             <h1>{{ session_scope_label }}</h1>
           </div>
-          <a class="button tertiary" href="{{ url_for('audit_dashboard') }}">&larr; All locations</a>
+          <a class="button tertiary" href="{{ url_for('audit.audit_dashboard') }}">&larr; All locations</a>
         </div>
         <p class="hero-copy">
           {% if session.status == 'completed' %}
@@ -70,14 +70,14 @@
           <button type="button" class="button" id="verify-batch" disabled>Verify scans</button>
           <button type="button" class="button tertiary" id="change-location">Change {{ loc_term }}</button>
           <button type="button" class="button secondary" id="complete-audit">Complete audit</button>
-          <a class="button tertiary" href="{{ url_for('audit_session_export', session_id=session.id) }}" data-no-loading>Export</a>
+          <a class="button tertiary" href="{{ url_for('audit.audit_session_export', session_id=session.id) }}" data-no-loading>Export</a>
         </div>
         <div class="audit-log" id="scan-log" aria-live="polite"></div>
       </section>
       {% else %}
       <section class="card">
         <div class="actions">
-          <a class="button secondary" href="{{ url_for('audit_session_export', session_id=session.id) }}" data-no-loading>Export results</a>
+          <a class="button secondary" href="{{ url_for('audit.audit_session_export', session_id=session.id) }}" data-no-loading>Export results</a>
         </div>
       </section>
       {% endif %}
@@ -201,10 +201,10 @@
       const AUDIT = {
         sessionId: {{ session.id }},
         csrfToken: {{ csrf_token()|tojson }},
-        scanUrl: {{ url_for('api_audit_scan', session_id=session.id)|tojson }},
-        completeUrl: {{ url_for('api_audit_complete', session_id=session.id)|tojson }},
-        resolveUrl: {{ url_for('api_audit_resolve', session_id=session.id)|tojson }},
-        recheckUrl: {{ url_for('api_audit_recheck', session_id=session.id)|tojson }},
+        scanUrl: {{ url_for('audit.api_audit_scan', session_id=session.id)|tojson }},
+        completeUrl: {{ url_for('audit.api_audit_complete', session_id=session.id)|tojson }},
+        resolveUrl: {{ url_for('audit.api_audit_resolve', session_id=session.id)|tojson }},
+        recheckUrl: {{ url_for('audit.api_audit_recheck', session_id=session.id)|tojson }},
         resolutionLabels: {{ resolution_codes|tojson }},
         openResolutions: {{ open_resolution_codes|list|tojson }},
         completed: {{ (session.status == 'completed')|tojson }},

@@ -21,8 +21,8 @@ import pandas as pd
 
 # Bins where a built (finished-good) serial is expected to live — the audited
 # universe, defined once in audit_universe.py.
-from audit_universe import AUDITED_BINS as EXPECTED_GUN_BINS
-from audit_universe import AUDITED_WAREHOUSES as EXPECTED_GUN_WAREHOUSES
+from picklist.domain.audit_universe import AUDITED_BINS as EXPECTED_GUN_BINS
+from picklist.domain.audit_universe import AUDITED_WAREHOUSES as EXPECTED_GUN_WAREHOUSES
 
 VOIDED_SHIPPER_STATUSES = {"X", "V"}
 

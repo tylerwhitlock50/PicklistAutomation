@@ -47,27 +47,27 @@
 
       <section class="lookup-grid" aria-label="Lookup pages">
         {% if feature_flags.orders %}
-        <a class="card lookup-card" href="{{ url_for('orders_page') }}" data-loading-message="Loading orders&hellip;">
+        <a class="card lookup-card" href="{{ url_for('orders.orders_page') }}" data-loading-message="Loading orders&hellip;">
           <h2>Orders</h2>
           <p>What is holding an order up, and who owns the fix.</p>
         </a>
-        <a class="card lookup-card" href="{{ url_for('shipments_page') }}">
+        <a class="card lookup-card" href="{{ url_for('lookup.shipments_page') }}">
           <h2>Shipments</h2>
           <p>Did it ship, when, and what is the tracking number.</p>
         </a>
-        <a class="card lookup-card" href="{{ url_for('stock_page') }}">
+        <a class="card lookup-card" href="{{ url_for('lookup.stock_page') }}">
           <h2>Stock</h2>
           <p>Do we really have one, and where is it.</p>
         </a>
         {% endif %}
         {% if feature_flags.serial %}
-        <a class="card lookup-card" href="{{ url_for('serial_history_page') }}">
+        <a class="card lookup-card" href="{{ url_for('serial.serial_history_page') }}">
           <h2>Serial history</h2>
           <p>Everything VISUAL knows about one serial number.</p>
         </a>
         {% endif %}
         {% if feature_flags.allocation %}
-        <a class="card lookup-card" href="{{ url_for('allocation_page') }}" data-loading-message="Loading allocation&hellip;">
+        <a class="card lookup-card" href="{{ url_for('allocation.allocation_page') }}" data-loading-message="Loading allocation&hellip;">
           <h2>Allocation</h2>
           <p>Supply for a SKU and which orders are in line for it.</p>
         </a>
@@ -79,11 +79,11 @@
       (function () {
         var FLAGS = {{ feature_flags|tojson }};
         var URLS = {
-          order: {{ url_for('order_detail_page', order_id='__ID__')|tojson }},
-          shipments: {{ url_for('shipments_page')|tojson }},
-          stock: {{ url_for('stock_page')|tojson }},
-          serial: {{ url_for('serial_history_page')|tojson }},
-          allocation: {{ url_for('allocation_page')|tojson }}
+          order: {{ url_for('orders.order_detail_page', order_id='__ID__')|tojson }},
+          shipments: {{ url_for('lookup.shipments_page')|tojson }},
+          stock: {{ url_for('lookup.stock_page')|tojson }},
+          serial: {{ url_for('serial.serial_history_page')|tojson }},
+          allocation: {{ url_for('allocation.allocation_page')|tojson }}
         };
         var form = document.getElementById("lookup-form");
         var input = document.getElementById("lookup-input");

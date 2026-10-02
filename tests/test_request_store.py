@@ -5,8 +5,8 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import request_service
-import request_store
+from picklist.services import request_service
+from picklist.stores import request_store
 
 
 class RequestStoreTests(unittest.TestCase):

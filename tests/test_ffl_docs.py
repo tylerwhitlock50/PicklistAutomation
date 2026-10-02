@@ -1,9 +1,8 @@
-import os
 import tempfile
 import unittest
 from pathlib import Path
 
-import ffl_docs
+from picklist.domain import ffl_docs
 
 EZ_CHECK_TEXT = """ATF FFL eZ Check
 License Number:1-74-XXX-XX-XX-12345

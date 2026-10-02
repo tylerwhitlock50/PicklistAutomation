@@ -33,9 +33,39 @@ Simple Python app that:
 4. Update SQL files in `sql/` with your real queries.
 5. Start app:
    ```bash
-   python3 app.py
+   python -m picklist.app            # Linux / macOS
+   python scripts/run_dev_windows.py # Windows
    ```
+   Production runs under gunicorn: `gunicorn -b 0.0.0.0:5000 picklist.app:app`.
 6. Open: `http://localhost:5000`
+
+## Project layout
+
+```
+picklist/              application package (gunicorn target: picklist.app:app)
+  app.py               Flask app, request hooks, context processors, service wiring
+  config.py            env-derived settings, paths, logging
+  db.py                SQLite connection, schema bootstrap, encrypted settings table
+  security.py          trusted-client gate and CSRF
+  features.py          feature rollout flags
+  erp.py               SQL Server engines and query-file execution
+  scheduler.py         APScheduler jobs and the single-instance lock
+  routes/              one Flask blueprint per area (runs, settings, audit, serial,
+                       allocation, shipping, orders, lookup, request_queue, pick, verify)
+  services/            app-level logic the routes call (run execution, release gate,
+                       shipping reports, readiness data access, notifications, ...)
+  domain/              pure business logic (readiness rules, release gate, allocation, ...)
+  stores/              SQLite / Postgres persistence modules
+sql/                   ERP queries loaded by name from config
+templates/, static/    server-rendered UI
+tests/                 unittest suites; run with `python -m pytest`
+scripts/               dev runner, setup, live validation
+docs/                  design notes and plans
+data/, exports/, logs/ runtime state (gitignored, mounted as volumes in Docker)
+```
+
+Endpoints are namespaced by blueprint, so templates use `url_for('orders.orders_page')`
+rather than `url_for('orders_page')`. URL paths did not change.
 
 ## Navigation
 
@@ -179,6 +209,9 @@ Or with Compose:
 docker compose up --build -d
 ```
 
+To also mount the VISUAL document share for FFL document checks, run
+`./scripts/compose_up.sh` (it layers `docker-compose.documents.yml` on top).
+
 ## API / curl
 
 If you run via this repository's Compose file (`8081:5000`), use `http://127.0.0.1:8081`.
@@ -221,11 +254,11 @@ The **Orders** tab (and **Shipping > Holds**) replaces the "can this ship?" / "F
 
 - `sql/readiness_candidates.sql` pulls every open physical line for orders in R/F/H status inside
   `READINESS_LOOKAHEAD_DAYS`, with the compliance, credit, status and supply facts as columns.
-- `readiness.py` turns those facts into holds. Every hold has a reason code from `HOLD_REASONS`, an
+- `picklist/domain/readiness.py` turns those facts into holds. Every hold has a reason code from `HOLD_REASONS`, an
   owning team (Inside Sales, Finance, Shipping, Production, Compliance) and a blocking flag. Orders
   are **BLOCKED** (someone must act), **ATTENTION** (can ship, worth a look) or **READY**.
-- `readiness_store.py` keeps the punch list in SQLite so hold age is measurable and so a new hold is
-  announced exactly once; `readiness_service.py` runs the refresh every `READINESS_REFRESH_MINUTES`
+- `picklist/stores/readiness_store.py` keeps the punch list in SQLite so hold age is measurable and so a new hold is
+  announced exactly once; `picklist/services/readiness_service.py` runs the refresh every `READINESS_REFRESH_MINUTES`
   and after every picklist run.
 - `/orders/<SO>` answers the questions the chat used to ask: holds, ship-to and both FFL records,
   credit exposure, where each part physically is, pick status, release-gate decision, hold history.

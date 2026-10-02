@@ -27,7 +27,7 @@
       </section>
 
       <section class="card">
-        <form method="get" action="{{ url_for('stock_page') }}" class="filters-row" data-no-loading>
+        <form method="get" action="{{ url_for('lookup.stock_page') }}" class="filters-row" data-no-loading>
           <label>SKU / part
             <input type="text" name="part" id="stock-part" value="{{ part }}" list="stock-part-options" placeholder="801-06486-00" autocomplete="off" />
             <datalist id="stock-part-options"></datalist>
@@ -102,7 +102,7 @@
                     {% for a in payload.allocated_to %}
                     <tr>
                       <td>{{ a.position or '' }}</td>
-                      <td class="mono"><a href="{{ url_for('order_detail_page', order_id=a.order_id) }}">{{ a.order_id }}</a> <span class="helper-text">line {{ a.line_no }}</span></td>
+                      <td class="mono"><a href="{{ url_for('orders.order_detail_page', order_id=a.order_id) }}">{{ a.order_id }}</a> <span class="helper-text">line {{ a.line_no }}</span></td>
                       <td>{{ a.customer_name or a.customer_id }}</td>
                       <td>{{ a.qty|int }}</td>
                       <td class="mono">{{ a.promise }}</td>
@@ -115,14 +115,14 @@
               {% else %}
               <p class="work-clear">No open order is allocated pickable stock for this SKU.</p>
               {% endif %}
-              {% if feature_flags.allocation %}<p class="helper-text"><a href="{{ url_for('allocation_page') }}?part={{ payload.part_id }}">Open the allocation screen &rarr;</a></p>{% endif %}
+              {% if feature_flags.allocation %}<p class="helper-text"><a href="{{ url_for('allocation.allocation_page') }}?part={{ payload.part_id }}">Open the allocation screen &rarr;</a></p>{% endif %}
             </section>
             <section class="card">
               <h3>Protected serials</h3>
               {% if payload.reserved_serials %}
               <ul>
                 {% for r in payload.reserved_serials %}
-                <li><span class="mono">{{ r.serial_no }}</span> &rarr; <a href="{{ url_for('order_detail_page', order_id=r.order_id) }}">{{ r.order_id }}</a>{% if r.customer_id %} ({{ r.customer_id }}){% endif %}{% if r.since %} <span class="helper-text">since {{ r.since[:10] }}</span>{% endif %}</li>
+                <li><span class="mono">{{ r.serial_no }}</span> &rarr; <a href="{{ url_for('orders.order_detail_page', order_id=r.order_id) }}">{{ r.order_id }}</a>{% if r.customer_id %} ({{ r.customer_id }}){% endif %}{% if r.since %} <span class="helper-text">since {{ r.since[:10] }}</span>{% endif %}</li>
                 {% endfor %}
               </ul>
               {% else %}
@@ -140,7 +140,7 @@
               <tbody>
                 {% for l in serial_payload.locations %}
                 <tr>
-                  <td class="mono"><a href="{{ url_for('stock_page', part=l.part_id) }}">{{ l.part_id }}</a></td>
+                  <td class="mono"><a href="{{ url_for('lookup.stock_page', part=l.part_id) }}">{{ l.part_id }}</a></td>
                   <td class="mono">{{ l.warehouse }}/{{ l.location }}</td>
                   <td>{{ l.class_label }}</td>
                   <td>{{ l.qty|int }}</td>
@@ -150,7 +150,7 @@
             </table>
           </div>
           {% else %}
-          <p class="work-clear">That serial is not on hand anywhere. {% if feature_flags.serial %}<a href="{{ url_for('serial_history_page') }}?serial={{ serial_payload.serial }}">See its history &rarr;</a>{% endif %}</p>
+          <p class="work-clear">That serial is not on hand anywhere. {% if feature_flags.serial %}<a href="{{ url_for('serial.serial_history_page') }}?serial={{ serial_payload.serial }}">See its history &rarr;</a>{% endif %}</p>
           {% endif %}
         {% else %}
         <p class="helper-text">Enter a SKU or a serial number and press <strong>Look up</strong>.</p>
@@ -170,7 +170,7 @@
           if (term.length < 2) return;
           timer = setTimeout(async function () {
             try {
-              var response = await fetch("{{ url_for('api_stock_parts') }}?q=" + encodeURIComponent(term));
+              var response = await fetch("{{ url_for('lookup.api_stock_parts') }}?q=" + encodeURIComponent(term));
               var data = await response.json();
               list.innerHTML = "";
               (data.parts || []).forEach(function (p) {

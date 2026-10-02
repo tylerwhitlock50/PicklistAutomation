@@ -22,8 +22,8 @@ from sqlalchemy import create_engine, text
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-import release_gate  # noqa: E402
-import shipping_metrics  # noqa: E402
+from picklist.domain import release_gate  # noqa: E402
+from picklist.domain import shipping_metrics  # noqa: E402
 
 
 DEFAULT_COMPONENT_CODES = (

@@ -39,7 +39,7 @@
 
     <script>
       (function () {
-        const API_URL = {{ url_for('api_serial_history')|tojson }};
+        const API_URL = {{ url_for('serial.api_serial_history')|tojson }};
         const PREFILL = {{ prefill_serial|tojson }};
 
         const form = document.getElementById("serial-form");

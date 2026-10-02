@@ -3,9 +3,7 @@ Lookup router page, run history, and the redirects for retired Shipping
 sub-views."""
 
 import os
-import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
 
@@ -15,13 +13,10 @@ os.environ["ACCESS_MODE"] = "off"
 os.environ["RUN_HISTORY_DB_PATH"] = str(_TEST_DB)
 os.environ.pop("OPERATOR_ROSTER_JSON", None)
 os.environ.pop("TEAMS_WEBHOOK_URL", None)
-if os.name == "nt":
-    sys.modules.setdefault(
-        "fcntl",
-        types.SimpleNamespace(LOCK_EX=1, LOCK_NB=2, LOCK_UN=8, flock=lambda *_: None),
-    )
 
-import app as app_module  # noqa: E402
+from picklist import app as app_module  # noqa: E402
+from picklist import db  # noqa: E402
+from picklist import features  # noqa: E402
 
 
 def tearDownModule():
@@ -37,8 +32,8 @@ class NavRouteTests(unittest.TestCase):
         self.client = app_module.app.test_client()
 
     def tearDown(self):
-        for feature_def in app_module.FEATURE_FLAGS.values():
-            app_module.delete_setting(feature_def["setting_key"])
+        for feature_def in features.FEATURE_FLAGS.values():
+            db.delete_setting(feature_def["setting_key"])
 
     def test_four_tabs_and_work_subnav_on_run_page(self):
         html = self.client.get("/").get_data(as_text=True)
@@ -103,9 +98,9 @@ class NavRouteTests(unittest.TestCase):
         self.assertIn("Management scorecard", html)
 
     def test_feature_flags_trim_nav(self):
-        app_module.set_setting("feature_orders_enabled", "false")
-        app_module.set_setting("feature_audit_enabled", "false")
-        app_module.set_setting("feature_requests_enabled", "false")
+        db.set_setting("feature_orders_enabled", "false")
+        db.set_setting("feature_audit_enabled", "false")
+        db.set_setting("feature_requests_enabled", "false")
         try:
             html = self.client.get("/work").get_data(as_text=True)
             self.assertNotIn(">Requests", html)
@@ -118,18 +113,18 @@ class NavRouteTests(unittest.TestCase):
             self.assertEqual(self.client.get("/requests").status_code, 302)
             self.assertEqual(self.client.get("/api/requests").status_code, 404)
         finally:
-            app_module.set_setting("feature_requests_enabled", "true")
+            db.set_setting("feature_requests_enabled", "true")
 
     def test_requests_flag_independent_of_orders(self):
-        app_module.set_setting("feature_orders_enabled", "true")
-        app_module.set_setting("feature_requests_enabled", "false")
+        db.set_setting("feature_orders_enabled", "true")
+        db.set_setting("feature_requests_enabled", "false")
         try:
             html = self.client.get("/work").get_data(as_text=True)
             self.assertNotIn(">Requests", html)
             lookup = self.client.get("/lookup").get_data(as_text=True)
             self.assertIn(">Orders<", lookup)
         finally:
-            app_module.set_setting("feature_requests_enabled", "true")
+            db.set_setting("feature_requests_enabled", "true")
 
 
 if __name__ == "__main__":

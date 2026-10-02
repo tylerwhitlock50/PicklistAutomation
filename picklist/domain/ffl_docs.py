@@ -21,7 +21,7 @@ import re
 from pathlib import Path, PureWindowsPath
 from typing import Any, Callable, Iterable, Optional
 
-from readiness import ffl_numbers_match, parse_expiration
+from picklist.domain.readiness import ffl_numbers_match, parse_expiration
 
 REASON_NAME = "ship_to_vs_ffl_name_mismatch"
 REASON_PREMISE = "ship_to_vs_ffl_premise_mismatch"

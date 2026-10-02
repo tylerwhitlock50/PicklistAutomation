@@ -18,8 +18,8 @@
             <h1>Serialized Inventory Audit</h1>
           </div>
           <div class="actions">
-            <a class="button secondary" href="{{ url_for('audit_analytics_page') }}">Analytics</a>
-            <a class="button tertiary" href="{{ url_for('work_page') }}">&larr; Today</a>
+            <a class="button secondary" href="{{ url_for('audit.audit_analytics_page') }}">Analytics</a>
+            <a class="button tertiary" href="{{ url_for('shipping.work_page') }}">&larr; Today</a>
           </div>
         </div>
         <p class="hero-copy">
@@ -78,7 +78,7 @@
             <h2>{{ wh.warehouse_id }} warehouse</h2>
             <p class="helper-text">{{ wh.locations|length }} locations &middot; {{ wh.serial_total }} serials</p>
           </div>
-          <form method="post" action="{{ url_for('audit_session_start') }}" class="audit-start-form" data-loading-message="Starting audit &mdash; snapshotting expected inventory&hellip;">
+          <form method="post" action="{{ url_for('audit.audit_session_start') }}" class="audit-start-form" data-loading-message="Starting audit &mdash; snapshotting expected inventory&hellip;">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
             <input type="hidden" name="target_kind" value="warehouse" />
             <input type="hidden" name="warehouse" value="{{ wh.warehouse_id }}" />
@@ -119,7 +119,7 @@
                 </td>
                 <td>{{ '%.0f%%'|format(loc.last_accuracy) if loc.last_accuracy is not none else '&mdash;'|safe }}</td>
                 <td>
-                  <form method="post" action="{{ url_for('audit_session_start') }}" class="audit-start-form" data-loading-message="Starting audit &mdash; snapshotting expected inventory&hellip;">
+                  <form method="post" action="{{ url_for('audit.audit_session_start') }}" class="audit-start-form" data-loading-message="Starting audit &mdash; snapshotting expected inventory&hellip;">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
                     <input type="hidden" name="target_kind" value="location" />
                     <input type="hidden" name="warehouse" value="{{ loc.warehouse_id }}" />
@@ -148,7 +148,7 @@
               {% endif %}
             </p>
           </div>
-          <form method="post" action="{{ url_for('audit_session_start') }}" class="audit-start-form" data-loading-message="Starting audit &mdash; snapshotting expected inventory&hellip;">
+          <form method="post" action="{{ url_for('audit.audit_session_start') }}" class="audit-start-form" data-loading-message="Starting audit &mdash; snapshotting expected inventory&hellip;">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
             <input type="hidden" name="target_kind" value="tied" />
             <input type="hidden" name="operator" value="" data-operator-field />
@@ -164,10 +164,10 @@
             <p class="helper-text">
               Every location and tied work orders in one session.
               {% if last_synced_display %}Locations synced from ERP: {{ last_synced_display }}.{% endif %}
-              <a href="{{ url_for('audit_dashboard', sync=1) }}" data-loading-message="Refreshing locations from ERP&hellip;">Refresh now</a>
+              <a href="{{ url_for('audit.audit_dashboard', sync=1) }}" data-loading-message="Refreshing locations from ERP&hellip;">Refresh now</a>
             </p>
           </div>
-          <form method="post" action="{{ url_for('audit_session_start') }}" class="audit-start-form" data-loading-message="Starting audit &mdash; snapshotting expected inventory&hellip;">
+          <form method="post" action="{{ url_for('audit.audit_session_start') }}" class="audit-start-form" data-loading-message="Starting audit &mdash; snapshotting expected inventory&hellip;">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
             <input type="hidden" name="target_kind" value="all" />
             <input type="hidden" name="operator" value="" data-operator-field />
@@ -179,7 +179,7 @@
       <section class="card">
         <div class="hero-top">
           <h2>Recent audits</h2>
-          <form method="get" action="{{ url_for('audit_day_export') }}" class="audit-start-form" data-no-loading>
+          <form method="get" action="{{ url_for('audit.audit_day_export') }}" class="audit-start-form" data-no-loading>
             <input type="date" name="date" value="{{ today_iso }}" aria-label="Export date" />
             <button type="submit" class="button tertiary">Export day (CSV)</button>
           </form>
@@ -227,7 +227,7 @@
                 <td>{{ row.missing_count }}</td>
                 <td>{{ row.unexpected_count }}</td>
                 <td>{{ '%.0f%%'|format(row.accuracy_pct) if row.accuracy_pct is not none else '&mdash;'|safe }}</td>
-                <td><a class="button tertiary table-button" href="{{ url_for('audit_session_page', session_id=row.id) }}">Open</a></td>
+                <td><a class="button tertiary table-button" href="{{ url_for('audit.audit_session_page', session_id=row.id) }}">Open</a></td>
               </tr>
               {% endfor %}
             </tbody>

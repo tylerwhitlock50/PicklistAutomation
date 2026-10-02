@@ -4,7 +4,7 @@ import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-import shipping_store
+from picklist.stores import shipping_store
 
 
 class ShippingStoreTests(unittest.TestCase):

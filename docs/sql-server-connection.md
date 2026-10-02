@@ -1,6 +1,6 @@
 # SQL Server Connection Template
 
-A reusable pattern for connecting to Microsoft SQL Server from Python. Based on how `fetch_picklist_from_mssql()` works in `app.py:746`, generalized so it can be lifted into any script or service.
+A reusable pattern for connecting to Microsoft SQL Server from Python. Based on how `fetch_picklist_from_mssql()` works in `picklist/services/run_service.py` (engine setup lives in `picklist/erp.py`), generalized so it can be lifted into any script or service.
 
 ## Dependencies
 
@@ -154,6 +154,6 @@ with open("sql/query_guns.sql", encoding="utf-8") as f:
 ## Optional add-ons
 
 - **Settings-table fallback.** If you have a UI that lets users edit the connection string, write a `_resolve_connection_string` that checks the settings table first, then env. Keep the rest of the file unchanged.
-- **Encrypted secrets.** Wrap the resolved string in Fernet decrypt if you store it encrypted at rest (see `decrypt_setting_value` in `app.py:376`).
+- **Encrypted secrets.** Wrap the resolved string in Fernet decrypt if you store it encrypted at rest (see `decrypt_setting_value` in `picklist/db.py`).
 - **Read-only role.** Append `&ApplicationIntent=ReadOnly` to route reads to a replica if you have AlwaysOn configured.
 - **Connection retries.** SQLAlchemy doesn't retry failed queries; wrap `query_df` with `tenacity` if you need that.

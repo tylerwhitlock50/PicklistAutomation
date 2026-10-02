@@ -1,7 +1,7 @@
 import unittest
 from datetime import date, datetime, timezone
 
-import readiness
+from picklist.domain import readiness
 
 TODAY = date(2026, 10, 1)
 
@@ -205,7 +205,7 @@ class ReadinessRulesTests(unittest.TestCase):
         self.assertNotIn("no_supply", summary["by_reason"])
 
     def test_orders_view_hides_rma_and_stock(self):
-        import readiness_service
+        from picklist.services import readiness_service
         payload = evaluate([
             row(order="SO-1", IS_RMA=1),
             row(order="SO-2", AVAILABLE_QTY=0),
@@ -224,7 +224,7 @@ class ReadinessRulesTests(unittest.TestCase):
         self.assertEqual(len(payload["orders"]), 3)  # source untouched
 
     def test_orders_view_drops_retired_holds_written_by_old_evaluators(self):
-        import readiness_service
+        from picklist.services import readiness_service
         payload = evaluate([row(order="SO-1", ORDER_STATUS="F")])
         stale = readiness._hold("SO-1", "ship_via_missing")
         stale2 = readiness._hold("SO-1", "ffl_master_shipto_mismatch")
@@ -236,7 +236,7 @@ class ReadinessRulesTests(unittest.TestCase):
         self.assertNotIn("ship_via_missing", view["summary"]["by_reason"])
 
     def test_retired_reasons_hidden_from_filter(self):
-        import readiness_service
+        from picklist.services import readiness_service
         codes_offered = {o["code"] for o in readiness_service.reason_options()}
         self.assertNotIn("ffl_master_shipto_mismatch", codes_offered)
         self.assertIn("ffl_missing", codes_offered)

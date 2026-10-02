@@ -19,7 +19,7 @@
       <section class="hero card">
         <div class="hero-top">
           <div>
-            <p class="eyebrow"><a href="{{ url_for('orders_page') }}">Orders</a> &rsaquo; detail</p>
+            <p class="eyebrow"><a href="{{ url_for('orders.orders_page') }}">Orders</a> &rsaquo; detail</p>
             <h1 class="mono">{{ order.order_id }}</h1>
           </div>
           <div>
@@ -187,9 +187,9 @@
           {% if feature_flags.requests %}
           <h3>Ask for something</h3>
           <p class="owner-chips">
-            <a href="{{ url_for('requests_page', new='ship_request', so=order.order_id) }}">Ship this now</a>
-            <a href="{{ url_for('requests_page', new='hold_exception', so=order.order_id) }}">Hold / set aside</a>
-            <a href="{{ url_for('requests_page', new='order_problem', so=order.order_id) }}">Report a problem</a>
+            <a href="{{ url_for('requests.requests_page', new='ship_request', so=order.order_id) }}">Ship this now</a>
+            <a href="{{ url_for('requests.requests_page', new='hold_exception', so=order.order_id) }}">Hold / set aside</a>
+            <a href="{{ url_for('requests.requests_page', new='order_problem', so=order.order_id) }}">Report a problem</a>
           </p>
           {% endif %}
         </section>
@@ -256,7 +256,7 @@
                     {% for cls, qty in (loc.by_class or {}).items() %}<strong>{{ bin_labels.get(cls, cls) }}</strong> {{ qty|int }}{{ '' if loop.last else ' · ' }}{% endfor %}
                     <br />{% for b in loc.bins[:12] %}<span class="mono">{{ b.warehouse }}/{{ b.location }}</span> ({{ b.qty|int }}){{ '' if loop.last else ', ' }}{% endfor %}{% if loc.bins|length > 12 %} &hellip;{% endif %}
                   {% else %}<span class="muted">nothing on hand</span>{% endif %}
-                  {% if feature_flags.allocation and ln.item_type == 'guns' %}<br /><a href="{{ url_for('allocation_page') }}?part={{ ln.part_id }}">allocation &rarr;</a>{% endif %}
+                  {% if feature_flags.allocation and ln.item_type == 'guns' %}<br /><a href="{{ url_for('allocation.allocation_page') }}?part={{ ln.part_id }}">allocation &rarr;</a>{% endif %}
                 </td>
                 <td class="mono">{{ ln.promise_ship or '' }}</td>
               </tr>
@@ -320,7 +320,7 @@
         <h3>Requests on this order</h3>
         <ul>
           {% for r in order_requests %}
-          <li><a href="{{ url_for('request_detail_page', request_id=r.id) }}">#{{ r.id }} {{ r.title }}</a> &middot; <span class="hold-pill {{ 'blocking' if r.overdue }}">{{ r.status|replace('_', ' ') }}</span> &middot; {{ r.created_by }}</li>
+          <li><a href="{{ url_for('requests.request_detail_page', request_id=r.id) }}">#{{ r.id }} {{ r.title }}</a> &middot; <span class="hold-pill {{ 'blocking' if r.overdue }}">{{ r.status|replace('_', ' ') }}</span> &middot; {{ r.created_by }}</li>
           {% endfor %}
         </ul>
         {% endif %}
@@ -367,7 +367,7 @@
             var button = form.querySelector("button");
             if (button) button.disabled = true;
             try {
-              var response = await fetch("{{ url_for('api_order_hold_ack', order_id=order.order_id, hold_id=0) }}".replace("/0/ack", "/" + holdId + "/ack"), {
+              var response = await fetch("{{ url_for('orders.api_order_hold_ack', order_id=order.order_id, hold_id=0) }}".replace("/0/ack", "/" + holdId + "/ack"), {
                 method: "POST",
                 headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf },
                 body: JSON.stringify({ note: note }),

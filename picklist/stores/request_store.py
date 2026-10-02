@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Optional
 
 REQUEST_TYPES: dict[str, dict[str, Any]] = {
     "ship_request": {

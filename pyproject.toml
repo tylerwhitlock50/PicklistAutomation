@@ -1,0 +1,16 @@
+[project]
+name = "picklist-automation"
+version = "0.1.0"
+description = "Picklist automation and shipping readiness app for Christensen Arms"
+requires-python = ">=3.12"
+dynamic = ["dependencies"]
+
+[tool.setuptools]
+packages = { find = { include = ["picklist*"] } }
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

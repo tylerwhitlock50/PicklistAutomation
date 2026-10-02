@@ -1,5 +1,5 @@
 <header class="topnav">
-  <a class="topnav-brand" href="{{ url_for('work_page') }}">
+  <a class="topnav-brand" href="{{ url_for('shipping.work_page') }}">
     <span class="topnav-logo" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
     <span class="topnav-brand-text">
       <span class="topnav-brand-title">Warehouse Ops</span>
@@ -11,14 +11,14 @@
      active_sub to the item inside that group. Anything else lands on Work. #}
   {% set nav_group = active_nav if active_nav in ('work', 'reports', 'lookup', 'requests') else 'work' %}
   {% set nav_item = active_sub|default('') %}
-  {% set reports_home = url_for('shipping_page', view='scorecard') if feature_flags.shipping else url_for('run_history_page') %}
+  {% set reports_home = url_for('shipping.shipping_page', view='scorecard') if feature_flags.shipping else url_for('runs.run_history_page') %}
 
   <nav class="topnav-tabs" aria-label="Primary">
-    <a class="topnav-tab {% if nav_group == 'work' %}is-active{% endif %}" href="{{ url_for('work_page') }}">Work</a>
+    <a class="topnav-tab {% if nav_group == 'work' %}is-active{% endif %}" href="{{ url_for('shipping.work_page') }}">Work</a>
     <a class="topnav-tab {% if nav_group == 'reports' %}is-active{% endif %}" href="{{ reports_home }}" data-loading-message="Loading reports&hellip;">Reports</a>
-    <a class="topnav-tab {% if nav_group == 'lookup' %}is-active{% endif %}" href="{{ url_for('lookup_page') }}">Lookup</a>
+    <a class="topnav-tab {% if nav_group == 'lookup' %}is-active{% endif %}" href="{{ url_for('lookup.lookup_page') }}">Lookup</a>
     {% if feature_flags.requests %}
-    <a class="topnav-tab topnav-tab-badged {% if nav_group == 'requests' %}is-active{% endif %}" href="{{ url_for('requests_page') }}">
+    <a class="topnav-tab topnav-tab-badged {% if nav_group == 'requests' %}is-active{% endif %}" href="{{ url_for('requests.requests_page') }}">
       Requests
       {% if request_badge.open %}
       <span class="topnav-badge {% if request_badge.overdue %}is-overdue{% endif %}" data-request-badge
@@ -53,50 +53,50 @@
       <span class="topnav-user-role" data-operator-team>Shipping</span>
     </div>
     <div class="topnav-avatar" data-operator-initial>O</div>
-    <a class="topnav-settings" href="{{ url_for('settings') }}" title="Connection, notification and feature settings">Settings</a>
+    <a class="topnav-settings" href="{{ url_for('settings.settings') }}" title="Connection, notification and feature settings">Settings</a>
   </div>
 
   {% if nav_group != 'requests' %}
   <nav class="topnav-subnav" aria-label="{{ nav_group|capitalize }} pages">
     {% if nav_group == 'work' %}
-    <a class="topnav-sub {% if nav_item == 'today' %}is-active{% endif %}" href="{{ url_for('work_page') }}">Today</a>
-    <a class="topnav-sub {% if nav_item == 'picklist' %}is-active{% endif %}" href="{{ url_for('index') }}">Run picklist</a>
+    <a class="topnav-sub {% if nav_item == 'today' %}is-active{% endif %}" href="{{ url_for('shipping.work_page') }}">Today</a>
+    <a class="topnav-sub {% if nav_item == 'picklist' %}is-active{% endif %}" href="{{ url_for('runs.index') }}">Run picklist</a>
     {% if feature_flags.shipping %}
-    <a class="topnav-sub {% if nav_item == 'pick' %}is-active{% endif %}" href="{{ url_for('shipping_page', view='pick') }}" data-loading-message="Loading pick orders&hellip;">Pick orders</a>
-    <a class="topnav-sub {% if nav_item == 'verify' %}is-active{% endif %}" href="{{ url_for('shipping_page', view='verify') }}" data-loading-message="Loading verification&hellip;">Verify boxes</a>
+    <a class="topnav-sub {% if nav_item == 'pick' %}is-active{% endif %}" href="{{ url_for('shipping.shipping_page', view='pick') }}" data-loading-message="Loading pick orders&hellip;">Pick orders</a>
+    <a class="topnav-sub {% if nav_item == 'verify' %}is-active{% endif %}" href="{{ url_for('shipping.shipping_page', view='verify') }}" data-loading-message="Loading verification&hellip;">Verify boxes</a>
     {% endif %}
     {% if feature_flags.audit %}
-    <a class="topnav-sub {% if nav_item == 'audit' %}is-active{% endif %}" href="{{ url_for('audit_dashboard') }}" data-loading-message="Loading audit&hellip;">Audit</a>
+    <a class="topnav-sub {% if nav_item == 'audit' %}is-active{% endif %}" href="{{ url_for('audit.audit_dashboard') }}" data-loading-message="Loading audit&hellip;">Audit</a>
     {% endif %}
     {% elif nav_group == 'reports' %}
     {% if feature_flags.shipping %}
-    <a class="topnav-sub {% if nav_item == 'scorecard' %}is-active{% endif %}" href="{{ url_for('shipping_page', view='scorecard') }}" data-loading-message="Loading scorecard&hellip;">Scorecard</a>
+    <a class="topnav-sub {% if nav_item == 'scorecard' %}is-active{% endif %}" href="{{ url_for('shipping.shipping_page', view='scorecard') }}" data-loading-message="Loading scorecard&hellip;">Scorecard</a>
     {% endif %}
     {% if feature_flags.orders %}
-    <a class="topnav-sub {% if nav_item == 'holds' %}is-active{% endif %}" href="{{ url_for('orders_page') }}" data-loading-message="Loading holds&hellip;">Holds</a>
+    <a class="topnav-sub {% if nav_item == 'holds' %}is-active{% endif %}" href="{{ url_for('orders.orders_page') }}" data-loading-message="Loading holds&hellip;">Holds</a>
     {% endif %}
     {% if feature_flags.shipping %}
-    <a class="topnav-sub {% if nav_item == 'shortages' %}is-active{% endif %}" href="{{ url_for('shipping_page', view='shortages') }}" data-loading-message="Loading shortages&hellip;">Shortages</a>
-    <a class="topnav-sub {% if nav_item == 'recon' %}is-active{% endif %}" href="{{ url_for('shipping_page', view='recon') }}" data-loading-message="Loading reconciliation&hellip;">Reconciliation</a>
-    <a class="topnav-sub {% if nav_item == 'excess' %}is-active{% endif %}" href="{{ url_for('shipping_page', view='excess') }}" data-loading-message="Loading excess packlists&hellip;">Excess packlists</a>
-    <a class="topnav-sub {% if nav_item == 'stage' %}is-active{% endif %}" href="{{ url_for('shipping_page', view='stage') }}" data-loading-message="Loading staged shipments&hellip;">Staged shipments</a>
+    <a class="topnav-sub {% if nav_item == 'shortages' %}is-active{% endif %}" href="{{ url_for('shipping.shipping_page', view='shortages') }}" data-loading-message="Loading shortages&hellip;">Shortages</a>
+    <a class="topnav-sub {% if nav_item == 'recon' %}is-active{% endif %}" href="{{ url_for('shipping.shipping_page', view='recon') }}" data-loading-message="Loading reconciliation&hellip;">Reconciliation</a>
+    <a class="topnav-sub {% if nav_item == 'excess' %}is-active{% endif %}" href="{{ url_for('shipping.shipping_page', view='excess') }}" data-loading-message="Loading excess packlists&hellip;">Excess packlists</a>
+    <a class="topnav-sub {% if nav_item == 'stage' %}is-active{% endif %}" href="{{ url_for('shipping.shipping_page', view='stage') }}" data-loading-message="Loading staged shipments&hellip;">Staged shipments</a>
     {% endif %}
     {% if feature_flags.audit %}
-    <a class="topnav-sub {% if nav_item == 'audit_analytics' %}is-active{% endif %}" href="{{ url_for('audit_analytics_page') }}" data-loading-message="Loading audit analytics&hellip;">Audit analytics</a>
+    <a class="topnav-sub {% if nav_item == 'audit_analytics' %}is-active{% endif %}" href="{{ url_for('audit.audit_analytics_page') }}" data-loading-message="Loading audit analytics&hellip;">Audit analytics</a>
     {% endif %}
-    <a class="topnav-sub {% if nav_item == 'runs' %}is-active{% endif %}" href="{{ url_for('run_history_page') }}">Run history</a>
+    <a class="topnav-sub {% if nav_item == 'runs' %}is-active{% endif %}" href="{{ url_for('runs.run_history_page') }}">Run history</a>
     {% elif nav_group == 'lookup' %}
-    <a class="topnav-sub {% if nav_item == 'search' %}is-active{% endif %}" href="{{ url_for('lookup_page') }}">Search</a>
+    <a class="topnav-sub {% if nav_item == 'search' %}is-active{% endif %}" href="{{ url_for('lookup.lookup_page') }}">Search</a>
     {% if feature_flags.orders %}
-    <a class="topnav-sub {% if nav_item == 'orders' %}is-active{% endif %}" href="{{ url_for('orders_page') }}" data-loading-message="Loading orders&hellip;">Orders</a>
-    <a class="topnav-sub {% if nav_item == 'shipments' %}is-active{% endif %}" href="{{ url_for('shipments_page') }}">Shipments</a>
-    <a class="topnav-sub {% if nav_item == 'stock' %}is-active{% endif %}" href="{{ url_for('stock_page') }}">Stock</a>
+    <a class="topnav-sub {% if nav_item == 'orders' %}is-active{% endif %}" href="{{ url_for('orders.orders_page') }}" data-loading-message="Loading orders&hellip;">Orders</a>
+    <a class="topnav-sub {% if nav_item == 'shipments' %}is-active{% endif %}" href="{{ url_for('lookup.shipments_page') }}">Shipments</a>
+    <a class="topnav-sub {% if nav_item == 'stock' %}is-active{% endif %}" href="{{ url_for('lookup.stock_page') }}">Stock</a>
     {% endif %}
     {% if feature_flags.serial %}
-    <a class="topnav-sub {% if nav_item == 'serial' %}is-active{% endif %}" href="{{ url_for('serial_history_page') }}">Serial history</a>
+    <a class="topnav-sub {% if nav_item == 'serial' %}is-active{% endif %}" href="{{ url_for('serial.serial_history_page') }}">Serial history</a>
     {% endif %}
     {% if feature_flags.allocation %}
-    <a class="topnav-sub {% if nav_item == 'allocation' %}is-active{% endif %}" href="{{ url_for('allocation_page') }}" data-loading-message="Loading allocation&hellip;">Allocation</a>
+    <a class="topnav-sub {% if nav_item == 'allocation' %}is-active{% endif %}" href="{{ url_for('allocation.allocation_page') }}" data-loading-message="Loading allocation&hellip;">Allocation</a>
     {% endif %}
     {% endif %}
   </nav>

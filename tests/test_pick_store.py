@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import pick_store
+from picklist.stores import pick_store
 
 
 class PickStoreOrderFlowTests(unittest.TestCase):

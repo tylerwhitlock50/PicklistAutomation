@@ -21,7 +21,7 @@
         </div>
         <p class="hero-copy">
           Every picklist run, newest first, with its row count and export. Start a new run from
-          <a href="{{ url_for('index') }}">Run picklist</a>.
+          <a href="{{ url_for('runs.index') }}">Run picklist</a>.
         </p>
         <div class="audit-tiles analytics-tiles">
           {% for option in query_options %}
@@ -73,7 +73,7 @@
                 <td>{{ run['formatted_run_timestamp'] }}</td>
                 <td>
                   {% if run['status'] == 'success' %}
-                  <a class="button secondary table-button" data-no-loading href="{{ url_for('export_run', run_id=run['id'], query_type=option) }}">Download</a>
+                  <a class="button secondary table-button" data-no-loading href="{{ url_for('runs.export_run', run_id=run['id'], query_type=option) }}">Download</a>
                   {% else %}
                   -
                   {% endif %}

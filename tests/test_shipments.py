@@ -1,7 +1,7 @@
 import unittest
 from datetime import date, datetime
 
-import shipments
+from picklist.domain import shipments
 
 
 def row(packlist="PL-288871", order="SO-132000", line=1, **overrides):

@@ -1,7 +1,7 @@
 import unittest
 from datetime import date, datetime, timedelta, timezone
 
-import release_gate
+from picklist.domain import release_gate
 
 
 TODAY = date(2026, 8, 27)  # Thursday

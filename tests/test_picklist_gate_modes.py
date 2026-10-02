@@ -1,7 +1,6 @@
+import importlib
 import os
-import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -18,15 +17,11 @@ os.environ.setdefault(
     "RUN_HISTORY_DB_PATH",
     str(Path(tempfile.gettempdir()) / f"picklist-gate-modes-{os.getpid()}.db"),
 )
-if os.name == "nt":
-    # app.py's production scheduler uses the Linux-only fcntl module. The
-    # scheduler is disabled above; this shim only lets these tests import it.
-    sys.modules.setdefault(
-        "fcntl",
-        types.SimpleNamespace(LOCK_EX=1, LOCK_NB=2, LOCK_UN=8, flock=lambda *_: None),
-    )
 
-import app as app_module  # noqa: E402  (environment must be set before import)
+importlib.import_module("picklist.app")  # environment must be set before this; it wires the stores
+from picklist.services import run_service  # noqa: E402
+from picklist.services import shipping_service  # noqa: E402
+from picklist.stores import shipping_store  # noqa: E402
 
 
 def _picklist_frame():
@@ -55,13 +50,13 @@ class PicklistGateModeTests(unittest.TestCase):
     def _fetch(self, mode, gate_payload=None):
         gate_mock = MagicMock(return_value=gate_payload)
         with (
-            patch.object(app_module, "load_query", return_value="SELECT 1"),
-            patch.object(app_module, "get_release_gate_mode", return_value=mode),
-            patch.object(app_module, "build_release_gate_payload", gate_mock),
-            patch.object(app_module, "get_erp_engine", return_value=MagicMock()),
-            patch.object(app_module.pd, "read_sql_query", return_value=_picklist_frame()),
+            patch.object(run_service, "load_query", return_value="SELECT 1"),
+            patch.object(run_service, "get_release_gate_mode", return_value=mode),
+            patch.object(run_service, "build_release_gate_payload", gate_mock),
+            patch.object(run_service, "get_erp_engine", return_value=MagicMock()),
+            patch.object(run_service.pd, "read_sql_query", return_value=_picklist_frame()),
         ):
-            df = app_module.fetch_picklist_from_mssql("guns")
+            df = run_service.fetch_picklist_from_mssql("guns")
         return df, gate_mock
 
     def test_mode_off_returns_dataframe_without_gate_evaluation(self):
@@ -92,14 +87,14 @@ class GatePayloadPersistenceTests(unittest.TestCase):
         record_mock = MagicMock(return_value=42)
         sync_mock = MagicMock(return_value={"kept": 0})
         with (
-            patch.object(app_module, "ensure_release_gate_policy_version", return_value=policy),
-            patch.object(app_module, "_fetch_release_candidate_rows", return_value=[]),
-            patch.object(app_module, "_fetch_release_serial_rows", return_value=[]),
-            patch.object(app_module, "_fetch_release_shipto_history_rows", return_value=[]),
-            patch.object(app_module.shipping_store, "record_evaluation", record_mock),
-            patch.object(app_module.shipping_store, "sync_serial_reservations", sync_mock),
+            patch.object(shipping_service, "ensure_release_gate_policy_version", return_value=policy),
+            patch.object(shipping_service, "_fetch_release_candidate_rows", return_value=[]),
+            patch.object(shipping_service, "_fetch_release_serial_rows", return_value=[]),
+            patch.object(shipping_service, "_fetch_release_shipto_history_rows", return_value=[]),
+            patch.object(shipping_store, "record_evaluation", record_mock),
+            patch.object(shipping_store, "sync_serial_reservations", sync_mock),
         ):
-            payload = app_module.build_release_gate_payload(force=True, persist=persist)
+            payload = shipping_service.build_release_gate_payload(force=True, persist=persist)
         return payload, record_mock, sync_mock
 
     def test_dashboard_read_does_not_persist(self):

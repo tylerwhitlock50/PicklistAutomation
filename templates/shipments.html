@@ -27,7 +27,7 @@
       </section>
 
       <section class="card">
-        <form method="get" action="{{ url_for('shipments_page') }}" class="filters-row" data-no-loading>
+        <form method="get" action="{{ url_for('lookup.shipments_page') }}" class="filters-row" data-no-loading>
           <label>Sales order
             <input type="text" name="so" value="{{ params.so }}" placeholder="SO-132000" />
           </label>
@@ -68,7 +68,7 @@
               {% for p in result.packlists %}
               <tr class="{{ 'muted' if p.voided }}">
                 <td class="mono">{{ p.packlist_id }}{% if p.voided %} <span class="hold-pill blocking">voided</span>{% endif %}</td>
-                <td class="mono"><a href="{{ url_for('order_detail_page', order_id=p.order_id) }}">{{ p.order_id }}</a></td>
+                <td class="mono"><a href="{{ url_for('orders.order_detail_page', order_id=p.order_id) }}">{{ p.order_id }}</a></td>
                 <td>{{ p.customer_name or p.customer_id }}</td>
                 <td class="mono">{{ p.shipped_date or '' }}{% if not p.shipped and not p.voided %}<br /><span class="helper-text">not shipped yet</span>{% endif %}</td>
                 <td>{{ p.ship_via }}</td>

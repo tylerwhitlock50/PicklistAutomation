@@ -1,7 +1,5 @@
 import os
-import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
 
@@ -9,14 +7,10 @@ _TEST_DB = Path(tempfile.gettempdir()) / f"picklist-pick-abandon-{os.getpid()}.d
 os.environ["ENABLE_SCHEDULER"] = "false"
 os.environ["ACCESS_MODE"] = "off"
 os.environ["RUN_HISTORY_DB_PATH"] = str(_TEST_DB)
-if os.name == "nt":
-    sys.modules.setdefault(
-        "fcntl",
-        types.SimpleNamespace(LOCK_EX=1, LOCK_NB=2, LOCK_UN=8, flock=lambda *_: None),
-    )
 
-import app as app_module  # noqa: E402
-import pick_store  # noqa: E402
+from picklist import app as app_module  # noqa: E402
+from picklist import db  # noqa: E402
+from picklist.stores import pick_store  # noqa: E402
 
 
 def tearDownModule():
@@ -37,8 +31,8 @@ class PickAbandonRouteTests(unittest.TestCase):
     def setUp(self):
         app_module.app.config["TESTING"] = True
         self.client = app_module.app.test_client()
-        app_module.set_setting("feature_shipping_enabled", "true")
-        pick_store.initialize(app_module.get_sqlite_conn)
+        db.set_setting("feature_shipping_enabled", "true")
+        pick_store.initialize(db.get_sqlite_conn)
         with self.client.session_transaction() as sess:
             sess["_csrf_token"] = "test-token"
         self.session_id = pick_store.start_order_session(

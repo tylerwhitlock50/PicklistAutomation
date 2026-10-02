@@ -87,7 +87,7 @@
             <form
               class="run-form pl-run-form"
               method="post"
-              action="{{ url_for('run_picklist') }}"
+              action="{{ url_for('runs.run_picklist') }}"
               data-query-type="{{ option }}"
             >
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
@@ -131,7 +131,7 @@
               data-busy-label="Preparing..."
               data-export-link
               data-no-loading
-              href="{{ url_for('export_latest', query_type=option) }}"
+              href="{{ url_for('runs.export_latest', query_type=option) }}"
               {% if not can_export_latest %}hidden aria-hidden="true"{% endif %}
             >
               2. Export {{ option|capitalize }}
@@ -348,7 +348,7 @@
                 <td>{{ run['formatted_run_timestamp'] }}</td>
                 <td>
                   {% if run['status'] == 'success' %}
-                  <a class="button secondary table-button" data-busy-label="Preparing..." data-no-loading href="{{ url_for('export_run', run_id=run['id'], query_type=option) }}">Download</a>
+                  <a class="button secondary table-button" data-busy-label="Preparing..." data-no-loading href="{{ url_for('runs.export_run', run_id=run['id'], query_type=option) }}">Download</a>
                   {% else %}
                   -
                   {% endif %}
@@ -393,7 +393,7 @@
             {% for option in query_options %}
             <a
               class="button {% if option == active_query_type %}secondary{% else %}tertiary{% endif %}"
-              href="{{ url_for('index', query_type=option) }}"
+              href="{{ url_for('runs.index', query_type=option) }}"
               data-mode-link
               data-query-option="{{ option }}"
             >
@@ -1046,7 +1046,7 @@
 
         async function refreshStatus() {
           try {
-            const response = await fetch("{{ url_for('api_status') }}", {
+            const response = await fetch("{{ url_for('runs.api_status') }}", {
               headers: { Accept: "application/json" },
             });
             if (!response.ok) {

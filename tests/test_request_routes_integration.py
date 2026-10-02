@@ -1,7 +1,5 @@
 import os
-import sys
 import tempfile
-import types
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -14,18 +12,17 @@ os.environ["ACCESS_MODE"] = "off"
 os.environ["RUN_HISTORY_DB_PATH"] = str(_TEST_DB)
 os.environ.pop("OPERATOR_ROSTER_JSON", None)
 os.environ.pop("TEAMS_WEBHOOK_URL", None)
-if os.name == "nt":
-    sys.modules.setdefault(
-        "fcntl",
-        types.SimpleNamespace(LOCK_EX=1, LOCK_NB=2, LOCK_UN=8, flock=lambda *_: None),
-    )
 
-import app as app_module  # noqa: E402
-import readiness_store  # noqa: E402
-import release_gate  # noqa: E402
-import request_service  # noqa: E402
-import request_store  # noqa: E402
-import shipping_store  # noqa: E402
+from picklist import app as app_module  # noqa: E402
+from picklist import db  # noqa: E402
+from picklist.domain import notifier  # noqa: E402
+from picklist.services import orders_service  # noqa: E402
+from picklist.services import shipping_service  # noqa: E402
+from picklist.stores import readiness_store  # noqa: E402
+from picklist.domain import release_gate  # noqa: E402
+from picklist.services import request_service  # noqa: E402
+from picklist.stores import request_store  # noqa: E402
+from picklist.stores import shipping_store  # noqa: E402
 
 
 def tearDownModule():
@@ -43,13 +40,13 @@ class RequestRouteTests(unittest.TestCase):
     def setUp(self):
         app_module.app.config["TESTING"] = True
         self.client = app_module.app.test_client()
-        app_module.set_setting("feature_orders_enabled", "true")
-        app_module.delete_setting("operator_roster_json")
+        db.set_setting("feature_orders_enabled", "true")
+        db.delete_setting("operator_roster_json")
         # Store unit tests rebind these modules to their own temp DBs; point
         # them back at the app database so routes and stores agree.
-        readiness_store.initialize(app_module.get_sqlite_conn)
-        request_store.initialize(app_module.get_sqlite_conn)
-        shipping_store.initialize(app_module.get_sqlite_conn)
+        readiness_store.initialize(db.get_sqlite_conn)
+        request_store.initialize(db.get_sqlite_conn)
+        shipping_store.initialize(db.get_sqlite_conn)
         self.notifications = []
         request_service.configure(
             notify=lambda event, **card: self.notifications.append(event) or True,
@@ -59,7 +56,7 @@ class RequestRouteTests(unittest.TestCase):
             sess["_csrf_token"] = "test-token"
 
     def tearDown(self):
-        request_service.configure(notify=app_module.notifier.send_teams_notification)
+        request_service.configure(notify=notifier.send_teams_notification)
 
     def _post(self, path, data, who):
         payload = {"csrf_token": "test-token", **data}
@@ -126,16 +123,16 @@ class RequestRouteTests(unittest.TestCase):
         until = (date.today() + timedelta(days=5)).isoformat()
         response = self._post("/requests", {"request_type": "hold_exception", "cust_order_id": "SO-555", "exception_kind": "marketing", "expires_at": until, "body": "SHOT show build"}, SALES)
         request_id = int(response.headers["Location"].rstrip("/").split("/")[-1])
-        self.assertEqual(app_module._active_manual_holds(), [])
+        self.assertEqual(shipping_service._active_manual_holds(), [])
         self._post(f"/requests/{request_id}/transition", {"to_status": "acknowledged"}, SHIPPING)
-        holds = app_module._active_manual_holds()
+        holds = shipping_service._active_manual_holds()
         self.assertEqual([h["cust_order_id"] for h in holds], ["SO-555"])
 
         df = pd.DataFrame([
             {"Cust Order ID": "SO-555", "Part ID": "801-1", "SO Qty": 1},
             {"Cust Order ID": "so-556", "Part ID": "801-2", "SO Qty": 1},
         ])
-        trimmed = app_module._apply_manual_hold_exclusions(df)
+        trimmed = orders_service._apply_manual_hold_exclusions(df)
         self.assertEqual(list(trimmed["Cust Order ID"]), ["so-556"])
         self.assertEqual(trimmed.attrs["manual_hold_exclusions"][0]["order_id"], "SO-555")
         self.assertEqual(trimmed.attrs["manual_hold_exclusions"][0]["hold_kind"], "marketing")
@@ -158,7 +155,7 @@ class RequestRouteTests(unittest.TestCase):
         self.assertEqual(released.status_code, 403)
         released = self.client.post(f"/api/holds/{holds[0]['id']}/release", json={}, headers={"X-CSRF-Token": "test-token", **SHIPPING})
         self.assertEqual(released.status_code, 200, released.get_data(as_text=True))
-        self.assertEqual(app_module._active_manual_holds(), [])
+        self.assertEqual(shipping_service._active_manual_holds(), [])
 
     def test_shipping_requests_tab_and_order_buttons(self):
         self._post("/requests", {"request_type": "inventory_discrepancy", "serial_no": "14M23235", "expected_location": "R03S03", "actual_location": "INTERNATIONAL"}, SALES)

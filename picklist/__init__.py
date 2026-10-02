@@ -1,0 +1,1 @@
+"""Picklist automation application package."""
