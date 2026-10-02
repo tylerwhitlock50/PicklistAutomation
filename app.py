@@ -2778,13 +2778,16 @@ def _picklist_orders_today() -> Optional[set[str]]:
 
 
 def _readiness_gate_decisions() -> dict[str, dict]:
-    if get_release_gate_mode() == "off":
+    mode = get_release_gate_mode()
+    if mode == "off":
         return {}
     payload = build_release_gate_payload()
     if not payload or payload.get("error"):
         return {}
+    # Decisions always flow through so the order page can show them; only an
+    # enforced gate turns a HOLD / ACCUMULATING decision into a readiness hold.
     return {
-        str(row.get("order_id") or "").upper(): row
+        str(row.get("order_id") or "").upper(): {**row, "mode": mode, "enforced": mode == "enforced"}
         for row in payload.get("decisions") or []
         if row.get("order_id")
     }

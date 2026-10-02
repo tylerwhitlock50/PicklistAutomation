@@ -223,6 +223,18 @@ class ReadinessRulesTests(unittest.TestCase):
         self.assertEqual(everything["rma_hidden"], 0)
         self.assertEqual(len(payload["orders"]), 3)  # source untouched
 
+    def test_orders_view_drops_retired_holds_written_by_old_evaluators(self):
+        import readiness_service
+        payload = evaluate([row(order="SO-1", ORDER_STATUS="F")])
+        stale = readiness._hold("SO-1", "ship_via_missing")
+        stale2 = readiness._hold("SO-1", "ffl_master_shipto_mismatch")
+        payload["orders"][0]["holds"].extend([stale, stale2])
+        view = readiness_service.orders_view(payload)
+        codes_seen = [h["reason_code"] for h in view["orders"][0]["holds"]]
+        self.assertEqual(codes_seen, ["order_not_released"])
+        self.assertEqual(view["orders"][0]["hidden_hold_count"], 0)
+        self.assertNotIn("ship_via_missing", view["summary"]["by_reason"])
+
     def test_retired_reasons_hidden_from_filter(self):
         import readiness_service
         codes_offered = {o["code"] for o in readiness_service.reason_options()}
@@ -307,9 +319,17 @@ class ReadinessRulesTests(unittest.TestCase):
         self.assertNotIn("not_on_picklist", codes(blocked))
 
     def test_gate_passthrough(self):
-        gate = {"SO-1": {"decision": "ACCUMULATING", "reason_code": "accumulating_for_daily_batch", "label": "ACCUMULATING - 2/42", "next_release_date": "2026-10-02"}}
+        gate = {"SO-1": {"decision": "ACCUMULATING", "reason_code": "accumulating_for_daily_batch", "label": "ACCUMULATING - 2/42", "next_release_date": "2026-10-02", "enforced": True, "mode": "enforced"}}
         payload = evaluate([row()], gate_decisions=gate)
         self.assertEqual(codes(payload), ["gate_hold"])
+        self.assertTrue(order(payload)["gate"]["enforced"])
+        # Advisory decisions are shown on the order but never become a hold.
+        advisory = evaluate([row()], gate_decisions={"SO-1": {**gate["SO-1"], "enforced": False, "mode": "advisory"}})
+        self.assertEqual(codes(advisory), [])
+        self.assertEqual(advisory["orders"][0]["gate"]["decision"], "ACCUMULATING")
+        self.assertFalse(advisory["orders"][0]["gate"]["enforced"])
+        legacy = evaluate([row()], gate_decisions={"SO-1": {"decision": "HOLD", "reason_code": "x", "label": "HOLD"}})
+        self.assertEqual(codes(legacy), [])
         self.assertEqual(order(payload)["state"], "ATTENTION")
         self.assertEqual(order(payload)["gate"]["next_release_date"], "2026-10-02")
         released = evaluate([row()], gate_decisions={"SO-1": {"decision": "RELEASE", "reason_code": "complete", "label": "SHIP NOW"}})

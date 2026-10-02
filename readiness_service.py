@@ -329,7 +329,9 @@ def orders_view(payload: dict[str, Any], *, hide_stock: bool = True, hide_rma: b
     ``readiness.STOCK_REASONS``); ``hide_rma`` drops RMA / warranty orders, which
     are worked outside the picklist. Summary tiles and owner chips are recomputed
     from what is left. The stored payload is never mutated."""
-    orders = list(payload.get("orders") or [])
+    orders = readiness.without_reasons(payload.get("orders") or [], readiness.RETIRED_REASONS)
+    for o in orders:
+        o["hidden_hold_count"] = 0  # retired holds are not "awaiting stock"
     rma_hidden = 0
     if hide_rma:
         kept = [o for o in orders if not (o.get("flags") or {}).get("is_rma")]
@@ -337,6 +339,8 @@ def orders_view(payload: dict[str, Any], *, hide_stock: bool = True, hide_rma: b
         orders = kept
     if hide_stock:
         orders = readiness.without_reasons(orders, readiness.STOCK_REASONS)
+    else:
+        orders = [{**o, "hidden_hold_count": 0} for o in orders]
     summary = dict(payload.get("summary") or {})
     summary.update(readiness.summarize_orders(orders))
     return {

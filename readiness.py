@@ -79,6 +79,9 @@ FIREARM_DOC_KINDS = ("ffl_ez_check", "ffl_master")
 # appear on the picklist as soon as stock exists.
 STOCK_REASONS = ("no_supply", "partial_supply")
 
+# Reasons no longer raised. Views drop them even if an older evaluator wrote them.
+RETIRED_REASONS = frozenset(code for code, meta in HOLD_REASONS.items() if meta.get("retired"))
+
 DEFAULT_CONFIG: dict[str, Any] = {
     # SHIP_CREDIT_LIMIT_CTL codes that mean VISUAL checks the limit at ship time.
     # Observed live: C (check, 40.9k customers), N (none), O (unconfirmed, 77).
@@ -643,7 +646,9 @@ def evaluate_readiness(
 
             # --- release gate passthrough
             gate = gate_map.get(order_id)
-            if gate and _text(gate.get("decision")).upper() in {"HOLD", "ACCUMULATING"}:
+            # Advisory gate decisions are information, not holds: nothing is being
+            # filtered off the picklist, so there is nothing for Shipping to clear.
+            if gate and _flag(gate.get("enforced")) and _text(gate.get("decision")).upper() in {"HOLD", "ACCUMULATING"}:
                 holds.append(_hold(order_id, "gate_hold", detail={
                     "decision": _text(gate.get("decision")).upper(),
                     "reason_code": _text(gate.get("reason_code")),
@@ -715,6 +720,8 @@ def evaluate_readiness(
                 "reason_code": _text(gate.get("reason_code")),
                 "label": _text(gate.get("label")),
                 "next_release_date": _text(gate.get("next_release_date")) or None,
+                "mode": _text(gate.get("mode")) or ("enforced" if _flag(gate.get("enforced")) else "advisory"),
+                "enforced": _flag(gate.get("enforced")),
             } if gate else None,
             "on_picklist": (order_id in picklist_set) if picklist_set is not None else None,
             "lines": [

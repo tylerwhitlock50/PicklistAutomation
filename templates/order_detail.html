@@ -182,7 +182,7 @@
             <dd>{{ pk.packlist_id or '—' }}</dd>
             {% set g = order.gate %}
             <dt>Release gate</dt>
-            <dd>{% if g %}<strong>{{ g.decision }}</strong> &middot; {{ g.label }}{% if g.next_release_date %} &middot; next release {{ g.next_release_date }}{% endif %}{% else %}<span class="muted">no decision (gate off or order outside window)</span>{% endif %}</dd>
+            <dd>{% if g %}<strong>{{ g.decision }}</strong> &middot; {{ g.label }}{% if g.next_release_date %} &middot; next release {{ g.next_release_date }}{% endif %}{% if not g.enforced %} <span class="muted">(advisory, not holding the order)</span>{% endif %}{% else %}<span class="muted">no decision (gate off or order outside window)</span>{% endif %}</dd>
           </dl>
           {% if feature_flags.requests %}
           <h3>Ask for something</h3>
