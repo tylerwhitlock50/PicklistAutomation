@@ -121,6 +121,10 @@ def initialize(get_conn: Callable[[], sqlite3.Connection]) -> None:
             "CREATE INDEX IF NOT EXISTS idx_verify_scans_session"
             " ON verify_scans(session_id)"
         )
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(verify_sessions)")}
+        for column in ("closed_by", "closed_reason"):
+            if column not in columns:
+                conn.execute(f"ALTER TABLE verify_sessions ADD COLUMN {column} TEXT")
 
 
 def _conn() -> sqlite3.Connection:
@@ -175,6 +179,13 @@ def start_session(
         packlist_date = str(create_date)[:10] or None
 
     with _conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        active = conn.execute(
+            "SELECT id FROM verify_sessions WHERE packlist_id = ? AND status = 'active' ORDER BY id DESC LIMIT 1",
+            (_norm(packlist_id),),
+        ).fetchone()
+        if active:
+            return active["id"]
         cursor = conn.execute(
             """
             INSERT INTO verify_sessions
@@ -246,40 +257,49 @@ def get_scans(session_id: int, limit: int = 200) -> list[dict]:
 
 def compute_counts(session_id: int) -> dict:
     with _conn() as conn:
-        expected_row = conn.execute(
-            """
-            SELECT
-                COALESCE(SUM(CASE WHEN status != 'info' THEN 1 ELSE 0 END), 0) AS expected_serials,
-                COALESCE(SUM(CASE WHEN status = 'verified' THEN 1 ELSE 0 END), 0) AS verified,
-                COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0) AS pending,
-                COALESCE(SUM(CASE WHEN status = 'missing' THEN 1 ELSE 0 END), 0) AS missing,
-                COALESCE(SUM(CASE WHEN status = 'info' THEN 1 ELSE 0 END), 0) AS info_rows
-            FROM verify_expected
-            WHERE session_id = ?
-            """,
-            (session_id,),
-        ).fetchone()
-        scan_row = conn.execute(
-            """
-            SELECT
-                COALESCE(SUM(CASE WHEN result = 'duplicate' THEN 1 ELSE 0 END), 0) AS duplicates,
-                COALESCE(SUM(CASE WHEN result = 'wrong_packlist' THEN 1 ELSE 0 END), 0) AS wrong_packlist,
-                COALESCE(SUM(CASE WHEN result = 'unexpected' THEN 1 ELSE 0 END), 0) AS unexpected,
-                COUNT(*) AS total_scans
-            FROM verify_scans
-            WHERE session_id = ?
-            """,
-            (session_id,),
-        ).fetchone()
+        return _counts_for_conn(conn, session_id)
+
+
+def _counts_for_conn(conn: sqlite3.Connection, session_id: int) -> dict:
+    expected_row = conn.execute(
+        """
+        SELECT
+            COALESCE(SUM(CASE WHEN status != 'info' THEN 1 ELSE 0 END), 0) AS expected_serials,
+            COALESCE(SUM(CASE WHEN status = 'verified' THEN 1 ELSE 0 END), 0) AS verified,
+            COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0) AS pending,
+            COALESCE(SUM(CASE WHEN status = 'missing' THEN 1 ELSE 0 END), 0) AS missing,
+            COALESCE(SUM(CASE WHEN status = 'info' THEN 1 ELSE 0 END), 0) AS info_rows
+        FROM verify_expected
+        WHERE session_id = ?
+        """,
+        (session_id,),
+    ).fetchone()
+    scan_row = conn.execute(
+        """
+        SELECT
+            COALESCE(SUM(CASE WHEN result = 'duplicate' THEN 1 ELSE 0 END), 0) AS duplicates,
+            COALESCE(SUM(CASE WHEN result = 'wrong_packlist' THEN 1 ELSE 0 END), 0) AS wrong_packlist,
+            COALESCE(SUM(CASE WHEN result = 'unexpected' THEN 1 ELSE 0 END), 0) AS unexpected,
+            COUNT(*) AS total_scans
+        FROM verify_scans
+        WHERE session_id = ?
+        """,
+        (session_id,),
+    ).fetchone()
     counts = {**dict(expected_row), **dict(scan_row)}
     counts["remaining"] = counts["pending"]
     counts["problem_scans"] = counts["wrong_packlist"] + counts["unexpected"]
     return counts
 
-
 def complete_session(session_id: int) -> dict:
     """Mark unscanned serials missing, roll up counts, and set the outcome."""
     with _conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        session = conn.execute("SELECT * FROM verify_sessions WHERE id = ?", (session_id,)).fetchone()
+        if not session:
+            raise ValueError("Verification session not found.")
+        if session["status"] != "active":
+            raise ValueError(f"This verification is already {session['status']}.")
         conn.execute(
             """
             UPDATE verify_expected SET status = 'missing'
@@ -287,10 +307,9 @@ def complete_session(session_id: int) -> dict:
             """,
             (session_id,),
         )
-    counts = compute_counts(session_id)
-    issues = counts["missing"] + counts["unexpected"] + counts["wrong_packlist"]
-    outcome = OUTCOME_ISSUES if issues > 0 else OUTCOME_CLEAN
-    with _conn() as conn:
+        counts = _counts_for_conn(conn, session_id)
+        issues = counts["missing"] + counts["unexpected"] + counts["wrong_packlist"]
+        outcome = OUTCOME_ISSUES if issues > 0 else OUTCOME_CLEAN
         conn.execute(
             """
             UPDATE verify_sessions
@@ -312,6 +331,39 @@ def complete_session(session_id: int) -> dict:
     session = get_session(session_id) or {}
     session["counts"] = counts
     return session
+
+
+def cancel_session(session_id: int, *, operator: str, reason: str) -> dict:
+    """Close an inconclusive attempt; preserve scans and leave serials unflagged."""
+    actor, explanation = (operator or "").strip(), (reason or "").strip()
+    if not actor or not explanation:
+        raise ValueError("Your name and a cancellation reason are required.")
+    with _conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM verify_sessions WHERE id = ?", (session_id,)).fetchone()
+        if not row:
+            raise LookupError("Verification session not found.")
+        if row["status"] != "active":
+            raise ValueError(f"This verification is already {row['status']}.")
+        conn.execute(
+            """UPDATE verify_sessions SET status = 'cancelled', completed_at = ?,
+               closed_by = ?, closed_reason = ?, outcome = NULL WHERE id = ?""",
+            (_now_iso(), actor, explanation, session_id),
+        )
+    return get_session(session_id) or {}
+
+
+def unfinished_sessions() -> list[dict]:
+    """All active attempts, including old sessions outside recent-history limits."""
+    with _conn() as conn:
+        rows = conn.execute(
+            """SELECT s.*,
+               MAX(s.started_at, COALESCE((SELECT MAX(scanned_at) FROM verify_scans WHERE session_id = s.id), s.started_at)) AS last_activity,
+               (SELECT COUNT(*) FROM verify_expected WHERE session_id = s.id AND status = 'verified') AS done_units,
+               (SELECT COUNT(*) FROM verify_expected WHERE session_id = s.id AND status != 'info') AS planned_units
+               FROM verify_sessions s WHERE s.status = 'active'"""
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def recent_sessions(limit: int = 10) -> list[dict]:
@@ -389,6 +441,10 @@ def record_scan(
     operator = (operator or "").strip() or None
 
     with _conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        session = conn.execute("SELECT status FROM verify_sessions WHERE id = ?", (session_id,)).fetchone()
+        if not session or session["status"] != "active":
+            raise ValueError("This verification is no longer active. Reload the page.")
         result: str
         message: str
         expected_id: Optional[int] = None

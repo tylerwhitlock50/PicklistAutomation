@@ -83,6 +83,20 @@
     fields.forEach(function (field) { field.value = name(); });
   }, true);
   document.addEventListener('DOMContentLoaded', function () {
+    let pickType = 'guns';
+    try {
+      const selected = document.querySelector('.pick-type-toggle [aria-current="page"]');
+      if (selected) localStorage.setItem('ops_pick_type', new URL(selected.href).searchParams.get('pick_type'));
+      const session = document.querySelector('[data-pick-type]');
+      if (session && ['guns', 'components'].includes(session.dataset.pickType)) localStorage.setItem('ops_pick_type', session.dataset.pickType);
+      pickType = localStorage.getItem('ops_pick_type') || 'guns';
+    } catch (_) {}
+    document.querySelectorAll('a[href]').forEach(function (link) {
+      const url = new URL(link.href, location.href);
+      if (url.origin === location.origin && url.searchParams.get('view') === 'pick' && !url.searchParams.has('pick_type')) {
+        url.searchParams.set('pick_type', pickType); link.href = url.href;
+      }
+    });
     if (document.querySelector('.pick-start-form, .verify-start-form, #scan-input')) confirmIdentity();
   });
 })();

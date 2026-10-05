@@ -7,6 +7,7 @@ from flask import Blueprint, flash, jsonify, redirect, render_template, request,
 
 from picklist.config import logger, PICK_SERIAL_LOOKUP_FILE, PICK_UPC_LOOKUP_FILE, SERIAL_MAX_LENGTH
 from picklist.domain import identity
+from picklist.domain.pick_path import pick_line_sort_key
 from picklist.erp import run_erp_query_file
 from picklist.security import require_csrf, require_trusted_client
 from picklist.services.query_options import get_query_type
@@ -106,7 +107,7 @@ def pick_session_page(session_id: int):
         flash(f"Pick session #{session_id} was not found.", "error")
         return redirect(url_for("shipping.shipping_page", view="pick"))
 
-    lines = pick_store.get_lines(session_id)
+    lines = sorted(pick_store.get_lines(session_id), key=pick_line_sort_key)
     orders = pick_store.get_orders(session_id)
     order_context: dict[str, dict[str, Any]] = {}
     for order in orders:
@@ -241,19 +242,24 @@ def api_pick_scan(session_id: int):
             502,
         )
 
-    checked_upc = str(payload.get("upc") or "").strip().upper() or None
+    checked_upc = str(payload.get("item") or payload.get("upc") or "").strip().upper() or None
     upc_parts = []
     if session_row.get("workflow_mode") == "single_guns":
         if not checked_upc or len(checked_upc) > SERIAL_MAX_LENGTH:
-            return jsonify({"message": "Scan the item UPC before its serial."}), 400
-        upc_parts = [line["part_id"] for line in lines if str(line.get("upc") or "").upper() == checked_upc]
+            return jsonify({"message": "Scan the part number or UPC before its serial."}), 400
+        upc_parts = [line["part_id"] for line in lines
+                     if checked_upc in (str(line["part_id"]).upper(), str(line.get("upc") or "").upper())]
         if not upc_parts:
             try:
                 upc_df = run_erp_query_file(PICK_UPC_LOOKUP_FILE, {"upc": checked_upc}, "gun UPC lookup")
                 upc_parts = [str(row.get("PART_ID") or "") for row in upc_df.to_dict(orient="records")]
             except Exception:
                 logger.exception("Gun UPC lookup failed")
-                return jsonify({"message": "UPC lookup failed. Retry this item."}), 502
+                return jsonify({"message": "Item barcode lookup failed. Retry this item or scan its part number."}), 502
+    line_id = payload.get("line_id")
+    if line_id is not None:
+        if not isinstance(line_id, int) or isinstance(line_id, bool):
+            return jsonify({"message": "Invalid pick line."}), 400
     try:
         result = pick_store.record_scan(
             session_id,
@@ -268,7 +274,10 @@ def api_pick_scan(session_id: int):
             scanned_location=scanned_location,
             checked_upc=checked_upc,
             upc_parts=upc_parts,
+            target_line_id=line_id,
         )
+    except ValueError as exc:
+        return jsonify({"error": "closed", "message": str(exc)}), 409
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to record pick scan: %s", exc)
         return jsonify({"error": "scan_failed", "message": str(exc)}), 500
@@ -375,6 +384,10 @@ def pick_session_abandon(session_id: int):
     else:
         note = f" {result['picked_units']} picked unit(s) need to go back on the shelf." if result["picked_units"] else ""
         flash(f"Pick session #{session_id} closed; {len(result['orders'])} order(s) released.{note}", "success")
+    if request.form.get("return_to") == "work":
+        return redirect(url_for("shipping.work_page"))
+    if request.form.get("return_to") == "verify":
+        return redirect(url_for("shipping.shipping_page", view="verify"))
     return redirect(url_for("shipping.shipping_page", view="pick"))
 
 

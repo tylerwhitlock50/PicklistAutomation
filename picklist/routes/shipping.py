@@ -13,6 +13,7 @@ from picklist.security import require_csrf, require_trusted_client
 from picklist.services import readiness_service
 from picklist.services.digest_service import build_shipped_digest_payload, send_shipped_digest
 from picklist.services.run_service import get_run_state_snapshot
+from picklist.services.unfinished_work import build_unfinished_work
 from picklist.services.shipping_service import (
     _latest_success_by_type,
     _recent_sessions_for_display,
@@ -88,6 +89,7 @@ def work_page():
         run_state_by_type=get_run_state_snapshot(),
         query_options=list(QUERY_FILES.keys()),
         shipping_requests=_audit_json_safe(shipping_requests),
+        unfinished_work=build_unfinished_work() if flags["shipping"] else [],
     )
 
 
@@ -146,13 +148,16 @@ def shipping_page():
         pick_type = request.args.get("pick_type", "guns")
         if pick_type not in ("guns", "components"):
             pick_type = "guns"
+        pick_sessions = [session for session in pick_sessions if session.get("query_type") in (pick_type, "mixed")]
         pick_orders = build_pick_order_queue(pick_type)["orders"]
         ready_for_pack = pick_store.ready_for_pack_orders(limit=100)
+        ready_for_pack = [order for order in ready_for_pack if order.get("query_type") in (pick_type, "mixed")]
         for row in ready_for_pack:
             row["completed_display"] = _audit_dt_display(row.get("completed_at"))
 
     return render_template(
         "shipping.html",
+        unfinished_work=build_unfinished_work() if view in WORK_VIEWS else [],
         view=view,
         view_options=SHIPPING_VIEWS,
         recon=recon_payload,

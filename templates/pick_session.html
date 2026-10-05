@@ -8,7 +8,7 @@
   </head>
   <body>
     {% set single_guns = session.workflow_mode == 'single_guns' %}
-    <main class="page-shell scan-workspace {{ 'single-guns' if single_guns else '' }}">
+    <main class="page-shell scan-workspace {{ 'single-guns' if single_guns else '' }}" data-pick-type="{{ session.query_type }}">
       {% set active_nav = 'work' %}
       {% set active_sub = 'pick' %}
       {% include '_topnav.html' %}
@@ -25,7 +25,7 @@
           {% if session.status != 'active' %}
           This pick session is {{ session.status }}. Review the results below.
           {% else %}
-          {% if single_guns %}This order is locked to your cart. Scan shelf, item UPC, then serial for each gun.
+          {% if single_guns %}This order is locked to your cart. Scan shelf, part number or UPC, then serial for each gun.
           {% else %}Scan the <strong>sales order barcode</strong> first, then each item you pull for it.{% endif %}
           Every scan is checked against that exact order — the right gun in the wrong
           customer's box warns immediately.
@@ -75,6 +75,7 @@
           {% endfor %}
         </div>
         {% endif %}
+        {% include '_pick_lines.html' %}
         <p class="next-pick" id="next-pick" aria-live="polite"></p>
         <div class="audit-scan-grid">
           <label class="audit-field" {{ 'hidden' if single_guns else '' }}>
@@ -89,22 +90,24 @@
             <span>Pick location</span>
             <input type="text" id="location-input" placeholder="Scan the shelf or bin" autocomplete="off" autocapitalize="characters" spellcheck="false" />
           </label>
-          {% if single_guns %}<label class="audit-field"><span>Item UPC</span><input id="upc-input" autocomplete="off" placeholder="Scan UPC, then serial" /></label>{% endif %}
+          {% if single_guns %}<label class="audit-field"><span>Part number or UPC</span><input id="upc-input" autocomplete="off" placeholder="Scan part number or UPC, then serial" /></label>{% endif %}
           <label class="audit-field">
             <span>{{ 'Gun serial' if single_guns else 'Item serial or UPC' }}</span>
             <input type="text" id="scan-input" placeholder="Scan the item when prompted" autocomplete="off" autocapitalize="characters" spellcheck="false" />
           </label>
         </div>
         <p class="helper-text" id="scan-hint">
-          {% if single_guns %}Shelf &rarr; UPC &rarr; serial. Shelf stays active until you change it.
+          {% if single_guns %}Shelf &rarr; part number / UPC &rarr; serial. Shelf stays active until you change it.
           {% else %}Order &rarr; tote &rarr; shelf &rarr; item. Tote and shelf stay active until changed.{% endif %}
         </p>
         <div id="scan-result" class="audit-scan-result" hidden></div>
         <div class="actions">
           <button type="button" class="button tertiary" id="change-order" {{ 'hidden' if single_guns else '' }}>Change order</button>
           {% if not orders %}<button type="button" class="button secondary" id="complete-pick">Complete pick session</button>{% endif %}
-          <a class="button tertiary" href="{{ url_for('pick.pick_session_export', session_id=session.id) }}" data-no-loading>Export</a>
-          <button type="button" class="button danger" id="abandon-pick" title="Close this session short: unpicked orders go back to the queue, picked units go back on the shelf">Close session short</button>
+          <details class="session-options"><summary>Session options</summary>
+            <a class="button tertiary" href="{{ url_for('pick.pick_session_export', session_id=session.id) }}" data-no-loading>Export</a>
+            <button type="button" class="button danger" id="abandon-pick" title="Close this session short: unpicked orders go back to the queue, picked units go back on the shelf">Close session short</button>
+          </details>
         </div>
         <details class="scan-history"><summary>Recent scans</summary><div class="audit-log" id="scan-log" aria-live="polite">
           {% for scan in scans[:25] %}
@@ -126,48 +129,11 @@
       </section>
       {% endif %}
 
-      <section class="card"><details class="work-details" ><summary>Picklist lines</summary>
-        <div class="table-controls">
-          <h2>Picklist lines</h2>
-          <input type="search" data-table-filter placeholder="Filter orders, parts..." aria-label="Filter picklist lines" />
-        </div>
-        <div class="table-wrap">
-          <table data-filterable-table>
-            <thead>
-              <tr>
-                <th>Order</th>
-                <th>Customer</th>
-                <th>Type</th>
-                <th>Part</th>
-                <th>Pick from</th>
-                <th>Picked / planned</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for line in lines %}
-              <tr data-line-id="{{ line.id }}" data-order-id="{{ line.cust_order_id }}" data-planned="{{ line.planned_qty }}" data-picked="{{ line.picked_qty }}" data-part="{{ line.part_id }}" data-location="{{ line.location or '' }}">
-                <td class="mono">{{ line.cust_order_id or '' }}</td>
-                <td>{{ line.customer_id or '' }}</td>
-                <td><span class="pill run-type {{ line.item_type }}">{{ line.item_type }}</span></td>
-                <td class="mono">{{ line.part_id }}</td>
-                <td>{{ line.location or '' }}</td>
-                <td data-progress-cell>{{ line.picked_qty }} / {{ line.planned_qty }}</td>
-                <td data-status-cell>
-                  {% if line.picked_qty >= line.planned_qty %}
-                  <span class="pill audit-status status-verified">done</span>
-                  {% elif line.picked_qty > 0 %}
-                  <span class="pill audit-status status-misplaced">picking</span>
-                  {% else %}
-                  <span class="pill audit-status status-pending">open</span>
-                  {% endif %}
-                </td>
-              </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
-      </details></section>
+      {% if session.status != 'active' %}
+      <section class="card pick-results">
+        {% include '_pick_lines.html' %}
+      </section>
+      {% endif %}
 
       {% if session.status != 'active' and scans %}
       <section class="card">
@@ -276,17 +242,32 @@
         let currentTote = "";
         let currentLocation = "";
         let submitting = false;
+        let currentLine = null;
         function nextPick() {
           const rows = Array.from(document.querySelectorAll('tr[data-line-id]')).filter(function (row) {
             return row.dataset.orderId === currentOrder && Number(row.dataset.picked) < Number(row.dataset.planned);
           });
-          const row = rows.find(function (row) { return row.dataset.location === currentLocation; }) || rows[0];
+          const row = SINGLE_GUNS ? rows[0] : (rows.find(function (row) { return row.dataset.location === currentLocation; }) || rows[0]);
+          currentLine = row || null;
+          document.querySelectorAll('tr[data-line-id]').forEach(function (line) {
+            const done = Number(line.dataset.picked) >= Number(line.dataset.planned);
+            line.classList.toggle('pick-line-done', done);
+            line.classList.toggle('pick-line-current', line === row);
+            if (line === row) line.setAttribute('aria-current', 'step'); else line.removeAttribute('aria-current');
+            const status = line.querySelector('[data-status-cell]');
+            if (status) status.innerHTML = done ? '<span class="pill audit-status status-verified">done</span>' : (line === row ? '<span class="pill running">Pick next</span>' : '<span class="pill">Waiting</span>');
+          });
+          if (SINGLE_GUNS && row && row.dataset.location !== currentLocation) {
+            currentLocation = ''; locationInput.value = '';
+            if (upcInput) upcInput.value = '';
+          }
           document.getElementById("next-pick").textContent = row
             ? "Pick from " + (row.dataset.location || "assigned shelf") + " · " + row.dataset.part + " · " + (Number(row.dataset.planned) - Number(row.dataset.picked)) + " remaining"
             : (currentOrder ? "All units picked. Finish order." : "Select the order to see the next item.");
         }
 
         function setOrder(value) {
+          if (submitting) return;
           currentOrder = value.trim().toUpperCase();
           if (!currentOrder) return;
           currentTote = "";
@@ -310,6 +291,7 @@
         }
 
         function setTote(value) {
+          if (submitting) return;
           if (!currentOrder) { orderInput.focus(); return; }
           const scanned = value.trim().toUpperCase();
           const context = ORDER_CONTEXT[currentOrder] || {};
@@ -330,14 +312,16 @@
         }
 
         function setLocation(value) {
+          if (submitting) return;
           if (!currentOrder || !currentTote) { toteInput.focus(); return; }
           const scanned = value.trim().toUpperCase();
           const context = ORDER_CONTEXT[currentOrder] || {};
           const locations = (context.locations || []).map(function (v) { return String(v).toUpperCase(); });
-          if (locations.length && locations.indexOf(scanned) === -1) {
+          const expectedLocation = SINGLE_GUNS && currentLine ? currentLine.dataset.location : null;
+          if ((expectedLocation && scanned !== expectedLocation) || (locations.length && locations.indexOf(scanned) === -1)) {
             currentLocation = "";
             locationInput.value = "";
-            showResult("problem", "Wrong location for " + currentOrder + ". Expected " + locations.join(", ") + ".");
+            showResult("problem", "Wrong location for " + currentOrder + ". Expected " + (expectedLocation || locations.join(", ")) + ".");
             beep("problem");
             locationInput.focus();
             return;
@@ -346,7 +330,7 @@
           nextPick();
           locationInput.value = scanned;
           scanHint.textContent = "Order, tote, and location confirmed. Scan serial or UPC.";
-          if (SINGLE_GUNS) { upcInput.value = ""; upcInput.focus(); scanHint.textContent = "Shelf confirmed. Scan item UPC, then serial."; }
+          if (SINGLE_GUNS) { upcInput.value = ""; upcInput.focus(); scanHint.textContent = "Shelf confirmed. Scan part number or UPC, then serial."; }
           else scanInput.focus();
         }
 
@@ -421,7 +405,7 @@
             locationInput.focus();
             return;
           }
-          if (SINGLE_GUNS && !upcInput.value.trim()) { showResult("problem", "Scan the UPC before its serial."); upcInput.focus(); return; }
+          if (SINGLE_GUNS && !upcInput.value.trim()) { showResult("problem", "Scan the part number or UPC before its serial."); upcInput.focus(); return; }
           submitting = true;
           scanInput.readOnly = true;
           locationInput.readOnly = true;
@@ -434,6 +418,7 @@
             tote: currentTote,
             location: currentLocation,
             upc: upcInput ? upcInput.value.trim().toUpperCase() : null,
+            lineId: SINGLE_GUNS && currentLine ? Number(currentLine.dataset.lineId) : null,
           };
           let requestId = null;
           try {
@@ -451,7 +436,7 @@
               body: JSON.stringify({
                 scan: value, order: currentOrder, tote: currentTote,
                 location: currentLocation, operator: OpsIdentity.name(),
-                upc: scanContext.upc, request_id: requestId,
+                item: scanContext.upc, upc: scanContext.upc, line_id: scanContext.lineId, request_id: requestId,
               }),
             });
             const data = await resp.json();
@@ -474,7 +459,7 @@
             beep(data.result === "ok" ? "ok" : (data.result === "duplicate" ? "duplicate" : "problem"));
             updateLine(data.line);
             applyCounts(data.counts);
-            if (SINGLE_GUNS && data.result === "ok") { upcInput.value = ""; scanHint.textContent = data.counts.remaining_units ? "Scan the next UPC, then serial." : "All units picked. Finish order."; }
+            if (SINGLE_GUNS && data.result === "ok") { upcInput.value = ""; scanHint.textContent = data.counts.remaining_units ? "Scan the next part number or UPC, then serial." : "All units picked. Finish order."; }
           } catch (err) {
             showResult("problem", "Network error — rescan " + value + ". The same request will be retried safely.");
             beep("problem");
@@ -482,7 +467,13 @@
             submitting = false;
             scanInput.readOnly = false; locationInput.readOnly = false;
             if (upcInput) upcInput.readOnly = false;
-            if (SINGLE_GUNS && !upcInput.value) upcInput.focus(); else scanInput.focus();
+            if (SINGLE_GUNS && !currentLine) {
+              const finish = document.querySelector('[data-complete-order]');
+              if (finish && !finish.disabled) finish.focus();
+            } else if (SINGLE_GUNS && currentLine && !currentLocation) {
+              scanHint.textContent = "Next line: scan shelf " + currentLine.dataset.location + ".";
+              locationInput.focus();
+            } else if (SINGLE_GUNS && !upcInput.value) upcInput.focus(); else scanInput.focus();
           }
         }
 
@@ -556,6 +547,7 @@
 
         document.querySelectorAll("[data-order-action]").forEach(function (button) {
           button.addEventListener("click", async function () {
+            if (submitting) return;
             const action = button.getAttribute("data-order-action");
             const order = button.getAttribute("data-order-id");
             let reason = "";
@@ -592,6 +584,7 @@
 
         const abandonPick = document.getElementById("abandon-pick");
         if (abandonPick) abandonPick.addEventListener("click", async function () {
+          if (submitting) return;
           const reason = prompt("Close this pick session short? Unpicked orders return to the queue and anything already pulled must go back on the shelf.\n\nReason:");
           if (reason === null) return;
           if (!reason.trim()) { alert("Enter a reason."); return; }
@@ -620,7 +613,7 @@
           if (event.key === "Enter" || event.key === "Tab") {
             event.preventDefault(); if (submitting) return;
             if (!currentLocation) { locationInput.focus(); return; }
-            if (upcInput.value.trim()) { scanHint.textContent = "UPC captured. Scan the matching serial."; scanInput.focus(); }
+            if (upcInput.value.trim()) { scanHint.textContent = "Item captured. Scan the matching serial."; scanInput.focus(); }
           }
         });
         if (SINGLE_GUNS) setOrder(Array.from(KNOWN_ORDERS)[0]); else orderInput.focus();

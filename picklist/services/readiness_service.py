@@ -20,6 +20,21 @@ _logger = logging.getLogger("picklist-app.readiness")
 _lock = threading.Lock()
 _last_refresh: dict[str, Any] = {"at": None, "payload": None}
 
+# Background refresh job state. A manual refresh from the UI is started here
+# and runs on a daemon thread so the HTTP request returns immediately instead
+# of blocking a gunicorn worker for the whole ERP + document pass.
+_job_lock = threading.Lock()
+_job: dict[str, Any] = {
+    "running": False,
+    "trigger": None,
+    "started_at": None,
+    "finished_at": None,
+    "evaluated_at": None,
+    "error": None,
+    "summary": None,
+    "reconcile": None,
+}
+
 _deps: dict[str, Any] = {
     "fetch_candidates": None,          # () -> list[dict]
     "fetch_order_rows": None,          # (so) -> list[dict]
@@ -184,6 +199,72 @@ def refresh(trigger: str = "manual", *, force: bool = False) -> dict[str, Any]:
 
         _last_refresh.update({"at": evaluated_at, "payload": payload})
         return payload
+
+
+def start_refresh(trigger: str = "manual", *, wait: bool = False) -> dict[str, Any]:
+    """Kick off a forced refresh on a background thread.
+
+    Returns the job status. ``started`` is False when a background refresh is
+    already in flight, in which case the caller should just poll
+    :func:`refresh_status`. ``wait=True`` blocks until the job (or the one
+    already running) finishes; it is for tests and CLI use, not web requests.
+    """
+    started = False
+    with _job_lock:
+        thread = _job.get("_thread") if _job["running"] else None
+        if thread is None:
+            thread = threading.Thread(
+                target=_run_refresh_job, args=(trigger,),
+                name=f"readiness-refresh-{trigger}", daemon=True,
+            )
+            _job.update({
+                "running": True,
+                "trigger": trigger,
+                "started_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "finished_at": None,
+                "error": None,
+                "_thread": thread,
+            })
+            thread.start()
+            started = True
+    if wait:
+        thread.join()
+    status = refresh_status()
+    status["started"] = started
+    return status
+
+
+def _run_refresh_job(trigger: str) -> None:
+    error: Optional[str] = None
+    payload: Optional[dict[str, Any]] = None
+    try:
+        payload = refresh(trigger, force=True)
+        error = payload.get("error")
+    except Exception as exc:  # noqa: BLE001 - job must always record an outcome
+        _logger.exception("Background readiness refresh failed")
+        error = str(exc)
+    finally:
+        with _job_lock:
+            _job.update({
+                "running": False,
+                "finished_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "error": error,
+                "evaluated_at": (payload or {}).get("evaluated_at"),
+                "summary": (payload or {}).get("summary"),
+                "reconcile": (payload or {}).get("reconcile"),
+            })
+
+
+def _status_locked() -> dict[str, Any]:
+    return {k: v for k, v in _job.items() if not k.startswith("_")}
+
+
+def refresh_status() -> dict[str, Any]:
+    """Current background job state plus whether any refresh holds the lock."""
+    with _job_lock:
+        status = _status_locked()
+    status["busy"] = bool(status["running"] or _lock.locked())
+    return status
 
 
 def _safe(name: str, *args: Any, default: Any = None) -> Any:

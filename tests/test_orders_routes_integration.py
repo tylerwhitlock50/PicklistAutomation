@@ -57,7 +57,7 @@ class OrderRouteTests(unittest.TestCase):
         db.set_setting("feature_orders_enabled", "true")
 
     def _refresh(self):
-        response = self.client.post("/api/readiness/refresh", json={}, headers=self.headers)
+        response = self.client.post("/api/readiness/refresh", json={"wait": True}, headers=self.headers)
         self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
         return response.get_json()
 
@@ -146,12 +146,30 @@ class OrderRouteTests(unittest.TestCase):
         html = self.client.get("/").get_data(as_text=True)
         self.assertNotIn(">Orders<", html)
 
+    def test_refresh_without_wait_returns_immediately_and_exposes_status(self):
+        response = self.client.post("/api/readiness/refresh", json={}, headers=self.headers)
+        self.assertEqual(response.status_code, 202, response.get_data(as_text=True))
+        body = response.get_json()
+        self.assertTrue(body["ok"])
+        self.assertTrue(body["started"])
+        self.assertIsNotNone(body["status"]["started_at"])
+
+        # Let the background thread finish, then confirm the status endpoint reports it.
+        thread = readiness_service._job.get("_thread")
+        if thread is not None:
+            thread.join(timeout=30)
+        status = self.client.get("/api/readiness/refresh/status", headers=self.headers).get_json()
+        self.assertFalse(status["running"])
+        self.assertIsNone(status["error"])
+        self.assertEqual(status["summary"]["orders"], 3)
+        self.assertNotIn("_thread", status)
+
     def test_refresh_reports_erp_failure(self):
         def boom():
             raise RuntimeError("VISUAL unreachable")
 
         readiness_service.configure(fetch_candidates=boom)
-        response = self.client.post("/api/readiness/refresh", json={}, headers=self.headers)
+        response = self.client.post("/api/readiness/refresh", json={"wait": True}, headers=self.headers)
         self.assertEqual(response.status_code, 502)
         self.assertIn("VISUAL unreachable", response.get_json()["error"])
         page = self.client.get("/orders?owner=").get_data(as_text=True)

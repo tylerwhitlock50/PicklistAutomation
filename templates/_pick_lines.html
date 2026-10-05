@@ -1,0 +1,42 @@
+      <div class="pick-instructions" id="pick-instructions">
+        <div class="table-controls">
+          <h2>{{ 'Pick these lines in order' if session.status == 'active' else 'Pick session lines' }}</h2>
+
+        </div>
+        <div class="table-wrap">
+          <table data-filterable-table>
+            <thead>
+              <tr>
+                <th>{{ 'Step' if session.status == 'active' else 'Line' }}</th>{% if not single_guns %}<th>Order</th>
+                <th>Customer</th>
+                <th>Type</th>{% endif %}
+                <th>Part</th>
+                <th>{{ 'Pick from' if session.status == 'active' else 'Location' }}</th>
+                <th>Picked / planned</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for line in lines %}
+              <tr class="{{ 'pick-line-done' if line.picked_qty >= line.planned_qty else '' }}" data-line-id="{{ line.id }}" data-order-id="{{ line.cust_order_id }}" data-planned="{{ line.planned_qty }}" data-picked="{{ line.picked_qty }}" data-part="{{ line.part_id }}" data-location="{{ line.location or '' }}">
+                <td>{{ loop.index }}</td>{% if not single_guns %}<td class="mono">{{ line.cust_order_id or '' }}</td>
+                <td>{{ line.customer_id or '' }}</td>
+                <td><span class="pill run-type {{ line.item_type }}">{{ line.item_type }}</span></td>{% endif %}
+                <td class="mono">{{ line.part_id }}</td>
+                <td><strong>{{ line.location or 'Assigned shelf' }}</strong></td>
+                <td data-progress-cell>{{ line.picked_qty }} / {{ line.planned_qty }}</td>
+                <td data-status-cell>
+                  {% if line.picked_qty >= line.planned_qty %}
+                  <span class="pill audit-status status-verified">done</span>
+                  {% elif line.picked_qty > 0 %}
+                  <span class="pill audit-status status-misplaced">{{ 'picking' if session.status == 'active' else 'incomplete' }}</span>
+                  {% else %}
+                  <span class="pill audit-status status-pending">{{ 'open' if session.status == 'active' else ('released' if session.status == 'abandoned' else 'not picked') }}</span>
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>

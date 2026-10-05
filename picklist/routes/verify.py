@@ -12,6 +12,7 @@ from picklist.config import (
     SERIAL_MAX_LENGTH,
 )
 from picklist.erp import run_erp_query_file
+from picklist.domain import identity
 from picklist.security import require_csrf, require_trusted_client
 from picklist.services.shipping_service import build_verify_daily_payload, build_pick_order_queue
 from picklist.stores import pick_store, verify_store
@@ -144,9 +145,9 @@ def api_verify_scan(session_id: int):
     session_row = verify_store.get_session(session_id)
     if not session_row:
         return jsonify({"error": "not_found", "message": "Verification session not found."}), 404
-    if session_row.get("status") == "completed":
+    if session_row.get("status") != "active":
         return jsonify(
-            {"error": "completed", "message": "This verification session is already completed."}
+            {"error": "closed", "message": "This verification is no longer active. Reload the page."}
         ), 409
 
     payload = request.get_json(silent=True) or {}
@@ -177,6 +178,8 @@ def api_verify_scan(session_id: int):
             erp_checked=erp_checked,
             operator=operator,
         )
+    except ValueError as exc:
+        return jsonify({"error": "closed", "message": str(exc)}), 409
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to record verify scan: %s", exc)
         return jsonify({"error": "scan_failed", "message": str(exc)}), 500
@@ -193,7 +196,10 @@ def api_verify_complete(session_id: int):
     if not session_row:
         return jsonify({"error": "not_found", "message": "Verification session not found."}), 404
 
-    completed = verify_store.complete_session(session_id)
+    try:
+        completed = verify_store.complete_session(session_id)
+    except ValueError as exc:
+        return jsonify({"error": "closed", "message": str(exc)}), 409
     logger.info(
         "Completed verify session #%s for %s (%s).",
         session_id,
@@ -208,6 +214,44 @@ def api_verify_complete(session_id: int):
             "redirect": url_for("verify.verify_session_page", session_id=session_id),
         }
     ), 200
+
+
+def _cancel_verification(session_id: int, operator: str, reason: str) -> dict:
+    current = identity.current_operator()
+    actor = operator.strip() or (current.name if current else "")
+    result = verify_store.cancel_session(session_id, operator=actor, reason=reason)
+    logger.info("Cancelled verification #%s by %s: %s", session_id, actor, reason)
+    return result
+
+
+@bp.post("/api/verify/session/<int:session_id>/cancel")
+@require_trusted_client
+@require_csrf
+def api_verify_cancel(session_id: int):
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = _cancel_verification(session_id, str(payload.get("operator") or ""), str(payload.get("reason") or ""))
+    except LookupError as exc:
+        return jsonify({"message": str(exc)}), 404
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 409
+    return jsonify({"status": result["status"], "redirect": url_for("verify.verify_session_page", session_id=session_id)}), 200
+
+
+@bp.post("/verify/session/<int:session_id>/cancel")
+@require_trusted_client
+@require_csrf
+def verify_session_cancel(session_id: int):
+    try:
+        _cancel_verification(session_id, request.form.get("operator") or "", request.form.get("reason") or "")
+    except (LookupError, ValueError) as exc:
+        flash(str(exc), "error")
+    else:
+        flash(f"Verification #{session_id} cancelled. The box still needs verification; scan history was preserved.", "success")
+    destination = request.form.get("return_to")
+    if destination == "work":
+        return redirect(url_for("shipping.work_page"))
+    return redirect(url_for("shipping.shipping_page", view=destination if destination in ("pick", "verify") else "verify"))
 
 
 @bp.get("/api/verify/daily")

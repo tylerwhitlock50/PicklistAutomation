@@ -196,16 +196,35 @@ def api_order_hold_ack(order_id: str, hold_id: int):
 @require_trusted_client
 @require_csrf
 def api_readiness_refresh():
-    payload = readiness_service.refresh("manual", force=True)
-    return jsonify(
-        {
-            "ok": payload.get("error") is None,
-            "error": payload.get("error"),
-            "evaluated_at": payload.get("evaluated_at"),
-            "summary": payload.get("summary"),
-            "reconcile": payload.get("reconcile"),
-        }
-    ), (200 if payload.get("error") is None else 502)
+    """Start a readiness refresh in the background and return at once.
+
+    The full refresh (ERP query plus per-order document checks) can run for
+    minutes, longer than a gunicorn worker may block, so the page polls
+    ``/api/readiness/refresh/status`` until the job finishes. Passing
+    ``{"wait": true}`` keeps the old synchronous behaviour for tests and tools.
+    """
+    body = request.get_json(silent=True) or {}
+    wait = bool(body.get("wait"))
+    status = readiness_service.start_refresh("manual", wait=wait)
+    if wait:
+        ok = status.get("error") is None
+        return jsonify(
+            {
+                "ok": ok,
+                "started": status.get("started"),
+                "error": status.get("error"),
+                "evaluated_at": status.get("evaluated_at"),
+                "summary": status.get("summary"),
+                "reconcile": status.get("reconcile"),
+            }
+        ), (200 if ok else 502)
+    return jsonify({"ok": True, "started": status.get("started"), "status": status}), 202
+
+
+@bp.get("/api/readiness/refresh/status")
+@require_trusted_client
+def api_readiness_refresh_status():
+    return jsonify(readiness_service.refresh_status())
 
 
 @bp.get("/api/orders/<order_id>/shipments")

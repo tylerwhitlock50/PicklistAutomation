@@ -1,0 +1,59 @@
+{% if feature_flags.shipping %}
+{% set stale_work = unfinished_work|selectattr('stale')|list %}
+<section class="card unfinished-work" id="unfinished-work">
+  <details {{ 'open' if stale_work or active_sub == 'today' else '' }}>
+    <summary><strong>Unfinished work ({{ unfinished_work|length }})</strong>{% if stale_work %} <span class="pill audit-status status-missing">{{ stale_work|length }} need review</span>{% endif %}</summary>
+    <p class="helper-text">Flagged after 10 hours without a scan or order action. Closing work is manual. Picked items must go back on the shelf before their order is picked again.</p>
+    {% if unfinished_work %}
+    <label class="audit-field"><span>Find unfinished work</span><input type="search" data-unfinished-filter placeholder="Order, packlist, operator" /></label>
+    <div class="table-wrap unfinished-table">
+      <table>
+        <thead><tr><th>Work</th><th>Operator</th><th>Progress</th><th>Last activity</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody>
+          {% for task in unfinished_work %}
+          <tr class="{{ 'unfinished-stale' if task.stale else '' }}">
+            <td><strong>{{ task.label }}</strong><br /><span class="helper-text">{{ task.type_label|capitalize }} &middot; #{{ task.id }}</span></td>
+            <td>{{ task.operator_display }}</td>
+            <td>{{ task.done_units }} / {{ task.planned_units }}</td>
+            <td>{{ task.last_activity_display }}<br /><span class="helper-text">{{ task.idle_hours }} hours idle</span></td>
+            <td>{% if task.stale %}<span class="pill audit-status status-missing">Needs review</span>{% else %}<span class="pill">In progress</span>{% endif %}{% if task.exception_orders %}<br />Exception hold{% endif %}</td>
+            <td>
+              <a class="button secondary table-button" href="{{ url_for('pick.pick_session_page' if task.kind == 'pick' else 'verify.verify_session_page', session_id=task.id) }}">{{ 'Review / resume' if task.exception_orders else 'Resume' }}</a>
+              <details class="unfinished-close"><summary>{{ 'Close pick' if task.kind == 'pick' else 'Cancel verification' }}</summary>
+                <form method="post" action="{{ url_for('pick.pick_session_abandon' if task.kind == 'pick' else 'verify.verify_session_cancel', session_id=task.id) }}" data-unfinished-close="{{ task.kind }}">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                  <input type="hidden" name="operator" />
+                  <input type="hidden" name="return_to" value="{{ 'work' if active_sub == 'today' else view }}" />
+                  <label>Reason<input name="reason" required maxlength="500" placeholder="Why is this being closed?" /></label>
+                  <p class="helper-text">{% if task.kind == 'pick' %}Unfinished orders return to the queue. Return anything pulled to the shelf. Finished orders remain complete.{% else %}Keep scan history. This box remains unverified and can be restarted.{% endif %}</p>
+                  <button type="submit" class="button danger table-button">{{ 'Close pick' if task.kind == 'pick' else 'Cancel verification' }}</button>
+                </form>
+              </details>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}<p class="work-clear">No unfinished pick or verification sessions.</p>{% endif %}
+  </details>
+</section>
+<script>
+(function () {
+  const section = document.getElementById('unfinished-work');
+  const filter = section.querySelector('[data-unfinished-filter]');
+  if (filter) filter.addEventListener('input', function () {
+    const term = filter.value.trim().toLowerCase();
+    section.querySelectorAll('tbody tr').forEach(function (row) { row.hidden = !!term && !row.textContent.toLowerCase().includes(term); });
+  });
+  section.querySelectorAll('[data-unfinished-close]').forEach(function (form) {
+    form.addEventListener('submit', function (event) {
+      const message = form.dataset.unfinishedClose === 'pick'
+        ? 'Close this pick? Unfinished orders return to the queue. Anything already pulled must go back on the shelf.'
+        : 'Cancel this verification? Its scan history stays available, and the box will still need verification.';
+      if (!confirm(message)) event.preventDefault();
+    });
+  });
+})();
+</script>
+{% endif %}

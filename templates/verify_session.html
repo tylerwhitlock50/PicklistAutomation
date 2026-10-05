@@ -21,7 +21,10 @@
           <a class="button tertiary" href="{{ url_for('shipping.shipping_page', view='verify') }}">&larr; Verify dashboard</a>
         </div>
         <p class="hero-copy">
-          {% if session.status == 'completed' %}
+          {% if session.status == 'cancelled' %}
+          Verification cancelled by <strong>{{ session.closed_by }}</strong>: {{ session.closed_reason }}.
+          This box still needs verification. The scans below are kept for reference.
+          {% elif session.status == 'completed' %}
           This verification is complete
           {%- if session.outcome %} &mdash; <strong>{{ 'Verified — no issues' if session.outcome == 'clean' else 'Closed with issues — review required' }}</strong>{% endif %}.
           Review the results below.
@@ -32,7 +35,7 @@
           {% endif %}
           <span class="helper-text">
             {% if session.cust_order_id %}Order {{ session.cust_order_id }} &middot; {% endif %}
-            Started {{ started_display }}{% if completed_display %} &middot; Completed {{ completed_display }}{% endif %}{% if session.operator %} &middot; {{ session.operator }}{% endif %}.
+            Started {{ started_display }}{% if completed_display %} &middot; {{ 'Closed' if session.status == 'cancelled' else 'Completed' }} {{ completed_display }}{% endif %}{% if session.operator %} &middot; {{ session.operator }}{% endif %}.
           </span>
         </p>
       </section>
@@ -46,7 +49,7 @@
         <div class="audit-tile tile-misplaced"><span class="audit-tile-num" data-tile="duplicates">{{ counts.duplicates }}</span><span class="audit-tile-label">Duplicates</span></div>
       </section>
 
-      {% if session.status != 'completed' %}
+      {% if session.status == 'active' %}
       <section class="card scan-station">
         <h2>Scan guns</h2>
         <div class="audit-scan-grid">
@@ -63,6 +66,7 @@
         <div class="actions">
           <button type="button" class="button secondary" id="complete-verify">Complete verification</button>
           <a class="button tertiary" href="{{ url_for('verify.verify_session_export', session_id=session.id) }}" data-no-loading>Export</a>
+          <button type="button" class="button tertiary" id="cancel-verify">Cancel verification</button>
         </div>
         <details class="scan-history"><summary>Recent scans</summary><div class="audit-log" id="scan-log" aria-live="polite">
           {% for scan in scans[:25] %}
@@ -74,6 +78,16 @@
       </section>
       {% else %}
       <section class="card">
+        {% if session.status == 'cancelled' %}
+        <h2>Verification cancelled</h2>
+        <p>This box has no verification result from this attempt. Restart to scan all of its guns again.</p>
+        <form method="post" action="{{ url_for('verify.verify_session_start') }}" class="verify-start-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+          <input type="hidden" name="packlist_id" value="{{ session.packlist_id }}" />
+          <input type="hidden" name="operator" />
+          <button type="submit" class="button">Restart verification</button>
+        </form>
+        {% endif %}
         <div class="actions">
           <a class="button secondary" href="{{ url_for('shipping.shipping_page', view='verify') }}#verify-start">Scan next packlist</a>
           <a class="button secondary" href="{{ url_for('verify.verify_session_export', session_id=session.id) }}" data-no-loading>Export results</a>
@@ -141,7 +155,7 @@
       </details></section>
       {% endif %}
 
-      {% if session.status == 'completed' and scans %}
+      {% if session.status != 'active' and scans %}
       <section class="card">
         <h2>Scan log</h2>
         <div class="table-wrap">
@@ -172,7 +186,8 @@
         csrfToken: {{ csrf_token()|tojson }},
         scanUrl: {{ url_for('verify.api_verify_scan', session_id=session.id)|tojson }},
         completeUrl: {{ url_for('verify.api_verify_complete', session_id=session.id)|tojson }},
-        completed: {{ (session.status == 'completed')|tojson }},
+        cancelUrl: {{ url_for('verify.api_verify_cancel', session_id=session.id)|tojson }},
+        completed: {{ (session.status != 'active')|tojson }},
         operator: null,
       };
       try { VERIFY.operator = localStorage.getItem("audit_operator_name") || null; } catch (e) {}
@@ -212,6 +227,7 @@
         const scanResult = document.getElementById("scan-result");
         const scanLog = document.getElementById("scan-log");
         let submitting = false;
+        let closing = false;
         const pendingScans = [];
         let remaining = {{ counts.remaining }};
 
@@ -252,6 +268,7 @@
           if (submitting) return;
           submitting = true;
           document.getElementById("complete-verify").disabled = true;
+          document.getElementById("cancel-verify").disabled = true;
           while (pendingScans.length) {
           const value = pendingScans.shift();
           try {
@@ -285,11 +302,13 @@
           }
           submitting = false;
           document.getElementById("complete-verify").disabled = false;
+          document.getElementById("cancel-verify").disabled = false;
         }
 
         scanInput.addEventListener("keydown", function (e) {
           if (e.key === "Enter" || e.key === "Tab") {
             e.preventDefault();
+            if (closing) return;
             const value = scanInput.value.trim().toUpperCase();
             scanInput.value = "";
             if (!value) return;
@@ -298,14 +317,14 @@
         });
 
         document.getElementById("complete-verify").addEventListener("click", async function () {
-          if (submitting || pendingScans.length) return;
+          if (submitting || pendingScans.length || closing) return;
           await OpsIdentity.confirm();
           const message = remaining > 0
             ? "Close with issues? " + remaining + " gun(s) have not been scanned and will be flagged missing."
             : "Complete verification for this packlist?";
           if (!confirm(message)) return;
           const button = document.getElementById("complete-verify");
-          button.disabled = true; scanInput.readOnly = true;
+          closing = true; button.disabled = true; scanInput.readOnly = true;
           try {
             const resp = await fetch(VERIFY.completeUrl, {
               method: "POST",
@@ -316,7 +335,26 @@
             if (resp.ok && data.redirect) { window.location.href = data.redirect; }
             else { alert(data.message || "Could not complete the verification."); }
           } catch (err) { alert("Network error completing the verification."); }
-          finally { button.disabled = false; scanInput.readOnly = false; }
+          finally { closing = false; button.disabled = false; scanInput.readOnly = false; }
+        });
+
+        document.getElementById("cancel-verify").addEventListener("click", async function () {
+          if (submitting || pendingScans.length || closing) return;
+          const reason = prompt("Cancel this verification? Scan history will be kept. The box will still need verification.\n\nReason:");
+          if (reason === null) return;
+          if (!reason.trim()) { alert("Enter a reason for cancellation."); return; }
+          closing = true; scanInput.readOnly = true;
+          const button = document.getElementById("cancel-verify"); button.disabled = true;
+          try {
+            const resp = await fetch(VERIFY.cancelUrl, {
+              method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": VERIFY.csrfToken },
+              body: JSON.stringify({ reason: reason.trim(), operator: OpsIdentity.name() }),
+            });
+            const data = await resp.json();
+            if (resp.ok && data.redirect) window.location.href = data.redirect;
+            else alert(data.message || "Could not cancel verification.");
+          } catch (_) { alert("Network error cancelling verification. Reload to check its status before trying again."); }
+          finally { closing = false; button.disabled = false; scanInput.readOnly = false; }
         });
 
         scanInput.focus();

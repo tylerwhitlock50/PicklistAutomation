@@ -826,6 +826,7 @@
       {% endif %}
 
       {% if view == 'pick' %}
+      {% include '_unfinished_work.html' %}
       <section class="card">
         <div class="hero-top">
           <div>
@@ -919,7 +920,7 @@
             <thead><tr><th>Order</th><th>Customer</th><th>Tote</th><th>Picker</th><th>Ready</th><th>Pick session</th></tr></thead>
             <tbody>
               {% for order in ready_for_pack %}
-              <tr><td class="mono"><strong>{{ order.cust_order_id }}</strong></td><td>{{ order.customer_id or '' }}</td><td>{{ order.query_type|capitalize }} · {{ order.tote_code }}</td><td>{{ order.operator or '' }}</td><td>{{ order.completed_display or '' }}</td><td><a href="{{ url_for('pick.pick_session_page', session_id=order.pick_session_id) }}">#{{ order.pick_session_id }}</a></td></tr>
+              <tr><td class="mono"><strong>{{ order.cust_order_id }}</strong></td><td>{{ order.customer_id or '' }}</td><td>{{ order.query_type|capitalize }} Â· {{ order.tote_code }}</td><td>{{ order.operator or '' }}</td><td>{{ order.completed_display or '' }}</td><td><a href="{{ url_for('pick.pick_session_page', session_id=order.pick_session_id) }}">#{{ order.pick_session_id }}</a></td></tr>
               {% endfor %}
             </tbody>
           </table>
@@ -929,6 +930,7 @@
       {% endif %}
 
       {% if view == 'verify' %}
+      {% include '_unfinished_work.html' %}
       <section class="card" id="verify-start">
         <div class="hero-top">
           <div>
@@ -1043,15 +1045,16 @@
                   {% endif %}
                 </td>
                 <td>
-                  {% if p.session %}
+                  {% if p.session and p.session.status != 'cancelled' %}
                   <a class="button tertiary table-button" href="{{ url_for('verify.verify_session_page', session_id=p.session.id) }}">Session #{{ p.session.id }}</a>
                   {% elif p.status == 'not_verified' %}
                   <form method="post" action="{{ url_for('verify.verify_session_start') }}" class="verify-start-form inline-form" data-loading-message="Loading {{ p.packlist_id }} from the ERP&hellip;">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
                     <input type="hidden" name="packlist_id" value="{{ p.packlist_id }}" />
                     <input type="hidden" name="operator" value="" data-operator-field />
-                    <button type="submit" class="button tertiary table-button">Verify</button>
+                    <button type="submit" class="button tertiary table-button">{{ 'Restart verification' if p.session else 'Verify' }}</button>
                   </form>
+                  {% if p.session %}<a href="{{ url_for('verify.verify_session_page', session_id=p.session.id) }}">Cancelled attempt #{{ p.session.id }}</a>{% endif %}
                   {% endif %}
                 </td>
               </tr>
@@ -1070,8 +1073,8 @@
         {% endif %}
 
         {% if verify_daily.other_sessions %}
-        <h3>Also verified {{ 'today' if verify_daily.date == verify_daily.today else 'this day' }}</h3>
-        <p class="helper-text">Sessions started this day for packlists created on other days &mdash; usually a re-check of an older box.</p>
+        <h3>Other verification attempts {{ 'today' if verify_daily.date == verify_daily.today else 'this day' }}</h3>
+        <p class="helper-text">Attempts started this day for packlists created on other days &mdash; including cancelled attempts and re-checks of older boxes.</p>
         <div class="table-wrap">
           <table>
             <thead>

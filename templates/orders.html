@@ -187,9 +187,40 @@
         var status = document.getElementById("refresh-status");
         var csrf = (document.querySelector("meta[name='csrf-token']") || {}).content || "";
         if (!button) return;
+        var statusUrl = "{{ url_for('orders.api_readiness_refresh_status') }}";
+        var POLL_MS = 2000;
+        var MAX_WAIT_MS = 15 * 60 * 1000;
+
+        function showError(message) {
+          status.hidden = false;
+          status.textContent = message;
+          status.classList.add("error");
+        }
+
+        function sleep(ms) {
+          return new Promise(function (resolve) { setTimeout(resolve, ms); });
+        }
+
+        async function waitForRefresh(startedAt) {
+          var began = Date.now();
+          while (Date.now() - began < MAX_WAIT_MS) {
+            await sleep(POLL_MS);
+            var response = await fetch(statusUrl, { headers: { "Accept": "application/json" } });
+            var job = await response.json();
+            // Done once a run that began at or after our click has finished.
+            if (!job.running && job.finished_at && job.finished_at >= startedAt) {
+              return job;
+            }
+            button.textContent = "Checking VISUAL... " + Math.round((Date.now() - began) / 1000) + "s";
+          }
+          return null;
+        }
+
         button.addEventListener("click", async function () {
           button.disabled = true;
           button.textContent = "Checking VISUAL...";
+          status.hidden = true;
+          status.classList.remove("error");
           try {
             var response = await fetch("{{ url_for('orders.api_readiness_refresh') }}", {
               method: "POST",
@@ -197,17 +228,27 @@
               body: "{}",
             });
             var data = await response.json();
-            if (data.ok) {
-              window.location.reload();
+            if (!response.ok || !data.ok) {
+              showError("Refresh failed: " + (data.error || "unknown error"));
               return;
             }
-            status.hidden = false;
-            status.textContent = "Refresh failed: " + (data.error || "unknown error");
-            status.classList.add("error");
+            var startedAt = (data.status && data.status.started_at) || new Date().toISOString();
+            if (!data.started) {
+              status.hidden = false;
+              status.textContent = "A refresh is already running; waiting for it to finish.";
+            }
+            var job = await waitForRefresh(startedAt);
+            if (job === null) {
+              showError("Refresh is still running. Reload the page in a few minutes.");
+              return;
+            }
+            if (job.error) {
+              showError("Refresh failed: " + job.error);
+              return;
+            }
+            window.location.reload();
           } catch (e) {
-            status.hidden = false;
-            status.textContent = "Refresh request failed.";
-            status.classList.add("error");
+            showError("Refresh request failed.");
           } finally {
             button.disabled = false;
             button.textContent = "Re-check now";

@@ -497,6 +497,26 @@ def get_orders(session_id: int) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def unfinished_sessions() -> list[dict]:
+    """Include every active session and exception hold, regardless of its age."""
+    with _conn() as conn:
+        rows = conn.execute(
+            """SELECT s.*,
+               MAX(s.started_at,
+                   COALESCE((SELECT MAX(scanned_at) FROM pick_scans WHERE session_id = s.id), s.started_at),
+                   COALESCE((SELECT MAX(created_at) FROM pick_order_events WHERE session_id = s.id), s.started_at)) AS last_activity,
+               (SELECT GROUP_CONCAT(cust_order_id, ', ') FROM pick_orders WHERE session_id = s.id AND status IN ('picking', 'exception')) AS order_ids,
+               (SELECT GROUP_CONCAT(DISTINCT assigned_operator) FROM pick_orders WHERE session_id = s.id AND status IN ('picking', 'exception')) AS assigned_operators,
+               (SELECT COUNT(*) FROM pick_orders WHERE session_id = s.id AND status = 'exception') AS exception_orders,
+               (SELECT COALESCE(SUM(MIN(picked_qty, planned_qty)), 0) FROM pick_lines WHERE session_id = s.id) AS done_units,
+               (SELECT COALESCE(SUM(planned_qty), 0) FROM pick_lines WHERE session_id = s.id) AS planned_units
+               FROM pick_sessions s
+               WHERE s.status = 'active' OR (s.status = 'closed' AND EXISTS (
+                   SELECT 1 FROM pick_orders WHERE session_id = s.id AND status = 'exception'))"""
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def claimed_orders(pick_type: Optional[str] = None) -> set[str]:
     with _conn() as conn:
         rows = conn.execute(
@@ -841,6 +861,8 @@ def complete_order(session_id: int, cust_order_id: str) -> dict:
         ).fetchone()
         if not order_row:
             raise ValueError("Order is not in this pick session.")
+        if order_row["status"] != "picking":
+            raise ValueError("This order is no longer being picked. Reload the page.")
         remaining = conn.execute(
             """
             SELECT COALESCE(SUM(MAX(planned_qty - picked_qty, 0)), 0) AS remaining
@@ -1149,14 +1171,17 @@ def _legacy_record_scan(
 def _global_serial_pick(
     conn: sqlite3.Connection, serial: str
 ) -> Optional[sqlite3.Row]:
-    # A serial picked in a session that was later closed short is back on the
-    # shelf (or should be), so it must not block the next pick.
+    # Closing a wave returns only unfinished orders to the shelf. Serials on
+    # finished orders remain reserved even when the rest of the wave is closed.
     return conn.execute(
         """
         SELECT sc.session_id, sc.target_order
         FROM pick_scans sc
         JOIN pick_sessions ps ON ps.id = sc.session_id
-        WHERE sc.serial = ? AND sc.result = 'ok' AND ps.status != 'abandoned'
+        LEFT JOIN pick_orders po ON po.session_id = sc.session_id AND po.cust_order_id = sc.target_order
+        WHERE sc.serial = ? AND sc.result = 'ok'
+          AND ((po.id IS NOT NULL AND po.status NOT IN ('abandoned', 'released'))
+               OR (po.id IS NULL AND ps.status != 'abandoned'))
         LIMIT 1
         """,
         (serial,),
@@ -1204,6 +1229,7 @@ def record_scan(
     scanned_location: Optional[str] = None,
     checked_upc: Optional[str] = None,
     upc_parts: Optional[list[str]] = None,
+    target_line_id: Optional[int] = None,
 ) -> dict:
     """Verify a serial/UPC against one claimed order and record the event."""
     scan_value = _norm(scan_value)
@@ -1217,6 +1243,9 @@ def record_scan(
 
     with _conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        session_state = conn.execute("SELECT status FROM pick_sessions WHERE id = ?", (session_id,)).fetchone()
+        if not session_state or session_state["status"] != "active":
+            raise ValueError("This pick session is no longer active. Reload the page.")
         if request_token:
             replay = conn.execute(
                 "SELECT * FROM pick_scans WHERE session_id = ? AND request_id = ?",
@@ -1316,7 +1345,7 @@ def record_scan(
         elif single_guns and (not serial or not checked_upc or not upc_parts
                               or not candidate_parts.intersection({_norm(p) for p in upc_parts})):
             result = RESULT_WRONG_ITEM
-            message = "Scan the item UPC, then a matching firearm serial."
+            message = "Scan the part number or UPC, then a matching firearm serial."
         elif unknown or not candidates:
             pass
         elif duplicate:
@@ -1343,6 +1372,7 @@ def record_scan(
                 line
                 for line in part_lines
                 if _norm(line["cust_order_id"]) == target
+                and (target_line_id is None or line["id"] == target_line_id)
                 and (
                     not location_context
                     or not _norm(line["location"])

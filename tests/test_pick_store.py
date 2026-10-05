@@ -49,6 +49,43 @@ class PickStoreOrderFlowTests(unittest.TestCase):
             pick_store.start_order_session(plan_rows=rows, selected_orders=["SO-1"],
                 source_runs={"guns": 1}, operator="OTHER", pick_type="guns")
 
+    def test_exception_hold_remains_in_unfinished_work(self):
+        session = pick_store.start_order_session(plan_rows=[self.row("SO-1", "COMP", "components")],
+            selected_orders=["SO-1"], source_runs={"components": 1}, operator="PICKER")
+        pick_store.order_action(session, "SO-1", "exception", operator="PICKER", reason="Missing item")
+        self.assertEqual(pick_store.get_session(session)["status"], "active")
+        with self.connection:
+            self.connection.execute("UPDATE pick_sessions SET status = 'closed' WHERE id = ?", (session,))
+        unfinished = pick_store.unfinished_sessions()
+        self.assertEqual(unfinished[0]["exception_orders"], 1)
+        self.assertEqual(unfinished[0]["order_ids"], "SO-1")
+        pick_store.abandon_session(session, operator="LEAD", reason="Return to queue")
+        self.assertEqual(pick_store.unfinished_sessions(), [])
+
+    def test_close_wave_keeps_finished_order_serials_reserved(self):
+        session = pick_store.start_order_session(plan_rows=[self.row("SO-1", "GUN", "guns"),
+            self.row("SO-2", "GUN", "guns", qty=2)], selected_orders=["SO-1", "SO-2"],
+            source_runs={"guns": 1}, operator="PICKER")
+        def scan(sid, order, serial, tote):
+            return pick_store.record_scan(sid, serial, target_order=order, serial=serial,
+                part_candidates=[{"part_id": "GUN", "locations": ["A01"]}],
+                operator="PICKER", scanned_tote=f"PICK-{sid}-{tote}", scanned_location="A01")
+        self.assertEqual(scan(session, "SO-1", "FINISHED-SERIAL", "A")["result"], "ok")
+        pick_store.complete_order(session, "SO-1")
+        self.assertEqual(scan(session, "SO-2", "RETURNED-SERIAL", "B")["result"], "ok")
+        result = pick_store.abandon_session(session, operator="LEAD", reason="Put unfinished cart back")
+        self.assertEqual(result["picked_units"], 1)
+        self.assertEqual([order["cust_order_id"] for order in result["orders"]], ["SO-2"])
+        self.assertEqual(pick_store.get_orders(session)[0]["status"], "ready_for_pack")
+        with self.assertRaises(ValueError):
+            pick_store.complete_order(session, "SO-2")
+        replacement = pick_store.start_order_session(plan_rows=[self.row("SO-3", "GUN", "guns", qty=2)],
+            selected_orders=["SO-3"], source_runs={"guns": 1}, operator="PICKER")
+        self.assertEqual(scan(replacement, "SO-3", "FINISHED-SERIAL", "A")["result"], "duplicate")
+        self.assertEqual(scan(replacement, "SO-3", "RETURNED-SERIAL", "A")["result"], "ok")
+        with self.assertRaises(ValueError):
+            scan(session, "SO-2", "STALE-SERIAL", "B")
+
     def test_gun_picker_has_one_active_order(self):
         rows = [self.row("SO-1", "GUN", "guns"), self.row("SO-2", "GUN", "guns")]
         with self.assertRaisesRegex(ValueError, "exactly one"):

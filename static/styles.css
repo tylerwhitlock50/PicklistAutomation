@@ -2879,12 +2879,55 @@ details.detail-section > .table-wrap {
 .scan-workspace .audit-tile { padding: 8px; }
 .scan-workspace .audit-tile-num { font-size: 1.5rem; }
 .scan-workspace .scan-station { position: sticky; top: 8px; z-index: 5; box-shadow: 0 4px 18px rgba(0,0,0,.08); }
-.scan-workspace .scan-station input { font-size: 1.15rem; min-height: 48px; }
+.scan-workspace[data-pick-type] .scan-station { position: static; }
+.pick-instructions { margin: 18px 0; }
+.pick-results .pick-instructions { margin: 0; }
+.pick-instructions .pick-line-current td { background: #edf4fc; font-weight: 600; }
+.pick-instructions .pick-line-current td:first-child { box-shadow: inset 4px 0 #28649a; }
+.pick-instructions .pick-line-done td { background: #dff3e7; color: #205c3e; }
+.scan-workspace .scan-station input {
+  font-family: var(--font-sans);
+  font-size: 1.15rem;
+  font-weight: 600;
+  letter-spacing: normal;
+  min-height: 48px;
+}
+.scan-workspace .scan-station input::placeholder {
+  font-family: inherit;
+  font-weight: 400;
+  opacity: 1;
+}
+.scan-workspace .scan-station input:is(#location-input, #serial-input) {
+  font-family: var(--font-sans);
+  font-size: 1.15rem;
+  font-weight: 600;
+  letter-spacing: normal;
+}
+.scan-workspace[data-pick-type] .mono { font-family: var(--font-sans); }
+.pick-instructions td[data-progress-cell] { font-variant-numeric: tabular-nums; }
 .scan-workspace .scan-station input[readonly] { background: #edf1f5; cursor: wait; }
 .scan-workspace .scan-history { margin-top: 12px; }
 .scan-workspace .scan-history summary { cursor: pointer; }
 .single-guns .audit-scan-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .single-guns .pick-wave-order { padding: 10px; }
+.single-guns .pick-wave-order { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.single-guns .pick-wave-order > [data-complete-order] { margin-left: auto; }
+.scan-workspace .scan-station { padding: 18px 22px; }
+.scan-workspace .scan-station h2 { margin: 0 0 12px; }
+.scan-workspace .scan-station .actions { margin-top: 12px; }
+.scan-workspace .hero-copy { max-width: none; }
+.scan-workspace .topnav { position: static; }
+.scan-workspace .pick-wave-orders { margin: 8px 0 12px; }
+.next-pick { font-weight: 700; margin: 12px 0; }
+.work-details > summary { cursor: pointer; font-weight: 700; }
+.session-options > summary { cursor: pointer; padding: 8px 0; }
+.unfinished-work > details > summary { cursor: pointer; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.unfinished-table { max-height: 380px; overflow: auto; margin-top: 12px; }
+.unfinished-stale { background: #fff5e9; }
+.unfinished-close { margin-top: 8px; }
+.unfinished-close summary { cursor: pointer; }
+.unfinished-close form { min-width: 220px; max-width: 340px; padding-top: 10px; }
+.unfinished-close input { width: 100%; box-sizing: border-box; }
 .single-guns .pick-order-actions { margin-top: 4px; }
 .operator-confirm { border: 1px solid #ccd4df; border-radius: 12px; padding: 24px; max-width: 420px; width: calc(100% - 40px); }
 .operator-confirm::backdrop { background: rgba(15,23,42,.55); }
@@ -2894,4 +2937,17 @@ details.detail-section > .table-wrap {
   .single-guns .audit-scan-grid { grid-template-columns: 1fr; }
   .scan-workspace .scan-station { position: static; }
   .scan-workspace .audit-tiles { grid-template-columns: repeat(3, 1fr); }
+  .scan-workspace { width: 100%; box-sizing: border-box; min-width: 0; }
+  .scan-workspace .topnav { min-width: 0; flex-wrap: wrap; }
+  .scan-workspace .topnav-user { min-width: 0; flex-wrap: wrap; width: 100%; flex: 1 1 100%; margin-left: 0; }
+  .scan-workspace .topnav-user-meta { min-width: 0; }
+  .scan-workspace .topnav-operator-free { flex-wrap: wrap; }
+  .scan-workspace .topnav-tabs { min-width: 0; }
+  .scan-workspace .topnav-subnav { min-width: 0; flex-wrap: wrap; }
+  .scan-workspace .hero-top { flex-wrap: wrap; }
+  .scan-workspace .pick-wave-orders { grid-template-columns: minmax(0, 1fr); }
+  .scan-workspace .audit-field { min-width: 0; }
+  .scan-workspace .audit-field input { width: 100%; box-sizing: border-box; }
+  .scan-workspace .hero-copy { display: none; }
+  .scan-workspace .topnav-brand-sub { display: none; }
 }
