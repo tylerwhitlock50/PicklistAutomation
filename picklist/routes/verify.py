@@ -87,17 +87,22 @@ def verify_session_start():
     if not any(str(r.get("TRACE_ID") or "").strip() for r in rows):
         if pick_attached:
             flash(
-                f"{packlist_id} was attached to the picked order; it has no serialized items to scan-verify.",
+                f"{packlist_id} was attached to the picked order. No serialized items: manually check box contents and quantities; attachment is not a contents sign-off.",
                 "success",
             )
             return redirect(url_for("shipping.shipping_page", view="verify"))
         flash(
-            f"{packlist_id} has no serialized items — nothing to scan-verify.",
-            "error",
+            f"{packlist_id} has no serialized items and was not attached to ready pick work. Check both picking teams, then manually check box contents and quantities.",
+            "warning",
         )
         return redirect(url_for("shipping.shipping_page", view="verify"))
 
     session_id = verify_store.start_session(packlist_id, header, rows, operator=operator)
+    flash(
+        f"{packlist_id} attached to ready pick work." if pick_attached else
+        "Standalone verification: this packlist was not attached to ready pick work. Check both picking teams; verifying serials does not confirm picking is complete.",
+        "success" if pick_attached else "warning",
+    )
     if pick_attached:
         logger.info(
             "Attached %s to ready picked order %s.",

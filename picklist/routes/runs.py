@@ -13,7 +13,7 @@ from picklist.config import (
 )
 from picklist.scheduler import get_next_scheduled_run
 from picklist.security import get_csrf_token, require_csrf, require_trusted_client
-from picklist.services.dashboard_service import build_dashboard_data, build_status_payload
+from picklist.services.dashboard_service import build_dashboard_data, build_status_payload, chronological_runs
 from picklist.services.query_options import (
     get_default_guns_query_options,
     get_query_type,
@@ -103,6 +103,7 @@ def index():
         latest_runs_by_type=latest_runs_by_type,
         latest_success_age_by_type=latest_success_age_by_type,
         recent_runs_by_type=recent_runs_by_type,
+        recent_runs=chronological_runs(recent_runs_by_type),
         using_dummy_data=using_dummy_data,
         showing_last_successful_run=showing_last_successful_run,
         active_query_type=query_type,
@@ -318,6 +319,7 @@ def run_history_page():
         query_options=query_types,
         latest_runs_by_type=latest_runs_by_type,
         recent_runs_by_type=recent_runs_by_type,
+        recent_runs=chronological_runs(recent_runs_by_type),
         latest_success_age_by_type=latest_success_age_by_type,
         timezone_label=get_timezone_label(),
     )

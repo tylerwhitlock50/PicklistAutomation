@@ -9,8 +9,8 @@
   </head>
   <body>
     <main class="page-shell">
-      {% set active_nav = 'lookup' %}
-      {% set active_sub = 'orders' %}
+      {% set active_nav = 'reports' if '/shipping' in (return_to or '') or 'from_report=' in (return_to or '') else 'lookup' %}
+      {% set active_sub = 'holds' if active_nav == 'reports' else 'orders' %}
       {% include '_topnav.html' %}
 
       {% macro money(value) %}${{ '%.2f'|format(value or 0) }}{% endmacro %}
@@ -19,7 +19,7 @@
       <section class="hero card">
         <div class="hero-top">
           <div>
-            <p class="eyebrow"><a href="{{ url_for('orders.orders_page') }}">Orders</a> &rsaquo; detail</p>
+            <p class="eyebrow"><a href="{{ return_to }}">Back to results</a> &rsaquo; Order detail</p>
             <h1 class="mono">{{ order.order_id }}</h1>
           </div>
           <div>
@@ -46,7 +46,7 @@
           {% else %}
             No holds. This order can ship as soon as it is picked.
           {% endif %}
-          &middot; live check {{ (order.live_evaluated_at or '')[:16]|replace('T', ' ') }} UTC
+          &middot; live check {{ order.live_evaluated_at|local_dt }}
         </p>
         {% endif %}
       </section>
@@ -65,12 +65,12 @@
             <div class="helper-text">
               owner: <strong>{{ h.owner_label }}</strong>
               {% if h.age_hours is not none %}&middot; open {{ age(h.age_hours) }}{% endif %}
-              {% if h.acknowledged_by %}&middot; acknowledged by {{ h.acknowledged_by }} {{ (h.acknowledged_at or '')[:16]|replace('T', ' ') }}{% endif %}
+              {% if h.acknowledged_by %}&middot; acknowledged by {{ h.acknowledged_by }} {{ h.acknowledged_at|local_dt }}{% endif %}
             </div>
           </div>
           {% if h.detail %}
           <p class="hold-detail">
-            {% for key, value in h.detail.items() %}{% if value is not none and value != '' %}<code>{{ key }}</code> {{ value }}{{ '' if loop.last else ' · ' }}{% endif %}{% endfor %}
+            {% for key, value in h.detail.items() %}{% if value is not none and value != '' %}<strong>{{ key|replace('_', ' ')|capitalize }}:</strong> {{ value }}{{ '' if loop.last else ' · ' }}{% endif %}{% endfor %}
           </p>
           {% endif %}
           {% if h.id and not h.acknowledged_at %}
@@ -128,7 +128,7 @@
                 <li><span class="hold-pill {{ 'blocking' if d.kind in ('ffl_ez_check', 'ffl_master') }}">{{ {'ffl_ez_check': 'EZ check', 'ffl_master': 'FFL copy'}.get(d.kind, 'other') }}</span> <span class="mono">{{ d.document_id }}</span>{% if d.created %} <span class="helper-text">{{ d.created }}</span>{% endif %}</li>
                 {% endfor %}
               </ul>
-              <span class="helper-text">{% if ocr_enabled %}FFL documents are read and compared with the ship-to on each readiness refresh.{% else %}Document comparison (OCR) is off; enable READINESS_OCR_ENABLED to check the licensee name and premise automatically.{% endif %}</span>
+              <span class="helper-text">{% if ocr_enabled %}FFL documents are read and compared with the ship-to on each readiness refresh.{% else %}Automatic document comparison is off. Ask an administrator to configure it in <a href="{{ url_for('settings.settings') }}">Settings</a>.{% endif %}</span>
               {% endif %}
             </dd>
           </dl>
@@ -278,9 +278,9 @@
               <tr>
                 <td>{{ h.label }}{% if h.line_no %} (line {{ h.line_no }}){% endif %}</td>
                 <td>{{ owner_labels.get(h.owner_team, h.owner_team) }}</td>
-                <td class="mono">{{ (h.first_seen_at or '')[:16]|replace('T', ' ') }}</td>
-                <td class="mono">{% if h.cleared_at %}{{ h.cleared_at[:16]|replace('T', ' ') }} <span class="helper-text">{{ h.cleared_how }}</span>{% else %}<span class="muted">open</span>{% endif %}</td>
-                <td>{% if h.acknowledged_by %}{{ h.acknowledged_by }} {{ (h.acknowledged_at or '')[:16]|replace('T', ' ') }}{% else %}&mdash;{% endif %}</td>
+                <td class="mono">{{ h.first_seen_at|local_dt }}</td>
+                <td class="mono">{% if h.cleared_at %}{{ h.cleared_at|local_dt }} <span class="helper-text">{{ h.cleared_how }}</span>{% else %}<span class="muted">open</span>{% endif %}</td>
+                <td>{% if h.acknowledged_by %}{{ h.acknowledged_by }} {{ h.acknowledged_at|local_dt }}{% else %}&mdash;{% endif %}</td>
               </tr>
               {% endfor %}
             </tbody>
@@ -293,7 +293,7 @@
         <h3>Notes</h3>
         <ul>
           {% for e in order.hold_events %}
-          <li><span class="mono">{{ (e.created_at or '')[:16]|replace('T', ' ') }}</span> {{ e.actor }} {{ e.event_type }} <em>{{ e.label }}</em>{% if e.note %}: {{ e.note }}{% endif %}</li>
+          <li><span class="mono">{{ e.created_at|local_dt }}</span> {{ e.actor }} {{ e.event_type }} <em>{{ e.label }}</em>{% if e.note %}: {{ e.note }}{% endif %}</li>
           {% endfor %}
         </ul>
         {% endif %}
@@ -302,7 +302,7 @@
 
       {% if feature_flags.requests and (order_holds or order_requests) %}
       <section class="card">
-        <h2>Holds and requests</h2>
+        <h2>Holds{% if feature_flags.requests %} and requests{% endif %}</h2>
         {% if order_holds %}
         <h3>Manual holds</h3>
         <ul>

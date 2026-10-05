@@ -133,7 +133,7 @@ class OrderRouteTests(unittest.TestCase):
         self._refresh()
         response = self.client.get("/shipping?view=holds")
         self.assertEqual(response.status_code, 302)
-        self.assertTrue(response.headers["Location"].endswith("/orders"))
+        self.assertTrue(response.headers["Location"].endswith("/orders?from_report=1"))
         html = self.client.get("/orders").get_data(as_text=True)
         self.assertIn("What is holding orders up?", html)
         self.assertIn("SO-2", html)

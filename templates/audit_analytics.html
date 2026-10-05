@@ -47,13 +47,13 @@
         </div>
         <div class="audit-tile tile-misplaced">
           <span class="audit-tile-num">{{ s.misplaced }}</span>
-          <span class="audit-tile-label">Misplaced</span>
-          <span class="audit-tile-sub">{{ s.open_misplaced }} still open</span>
+          <span class="audit-tile-label">Misplaced in {{ data.window_days }} days</span>
+          <span class="audit-tile-sub">{{ s.open_misplaced }} unresolved across all dates</span>
         </div>
         <div class="audit-tile tile-missing">
           <span class="audit-tile-num">{{ s.missing }}</span>
-          <span class="audit-tile-label">Missing</span>
-          <span class="audit-tile-sub">{{ s.open_missing }} still open</span>
+          <span class="audit-tile-label">Missing in {{ data.window_days }} days</span>
+          <span class="audit-tile-sub">{{ s.open_missing }} unresolved across all dates</span>
         </div>
         <div class="audit-tile tile-unexpected">
           <span class="audit-tile-num">{{ s.unexpected }}</span>

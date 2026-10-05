@@ -28,6 +28,7 @@
           <input type="text" id="lookup-input" placeholder="SO-131844 · 801-06486-00 · CV163773" autofocus />
           <button type="submit" class="button" id="lookup-go">Open</button>
         </form>
+        <label class="checkbox-row"><input type="checkbox" id="lookup-scanner-mode" /> Scanner mode: Tab opens the suggested page</label>
         <p class="helper-text lookup-route" id="lookup-route" aria-live="polite">Type or scan a value to see where it will open.</p>
         <div class="lookup-as" id="lookup-as" hidden>
           <span class="helper-text">Or open as:</span>
@@ -95,6 +96,8 @@
           return (value || "").trim().toUpperCase().replace(/\s+/g, "");
         }
         function normalizeOrder(value) {
+          var prefixed = value.match(/^(SO|EDI|WEB)-?(\d{5,7})$/);
+          if (prefixed) return prefixed[1] + "-" + prefixed[2];
           var m = value.match(/^(?:SO-?)?(\d{5,7})$/);
           return m ? "SO-" + m[1] : value;
         }
@@ -108,12 +111,10 @@
           }
           return null;
         }
-        // Decide from the shape of the input. Order numbers are 5-7 digits with an
-        // optional SO- prefix. Part ids start with three digits and a hyphen
-        // (801-06486-00). Everything else is a serial.
+        // Suggest a destination; explicit alternatives preserve ambiguous IDs.
         function guess(value) {
           if (!value) return null;
-          if (/^(?:SO-?)?\d{5,7}$/.test(value)) {
+          if (/^(?:(?:SO|EDI|WEB)-?)?\d{5,7}$/.test(value)) {
             return FLAGS.orders ? { kind: "order", label: "Order " + normalizeOrder(value) } : null;
           }
           if (/^\d{3}-[0-9A-Z]+(?:-[0-9A-Z]+)*$/.test(value)) {
@@ -133,7 +134,7 @@
           if (!value) {
             routeEl.textContent = "Type or scan a value to see where it will open.";
           } else if (g) {
-            routeEl.textContent = "Enter opens: " + g.label + ".";
+            routeEl.textContent = "Enter opens: " + g.label + ". If this is a different type of identifier, choose Open as below.";
           } else {
             routeEl.textContent = "No obvious match. Pick a page below.";
           }
@@ -148,7 +149,7 @@
         });
         // Barcode scanners often terminate with Tab instead of Enter.
         input.addEventListener("keydown", function (e) {
-          if (e.key === "Tab" && clean(input.value)) {
+          if (e.key === "Tab" && document.getElementById("lookup-scanner-mode").checked && clean(input.value)) {
             e.preventDefault();
             form.requestSubmit ? form.requestSubmit() : form.dispatchEvent(new Event("submit", { cancelable: true }));
           }

@@ -58,6 +58,7 @@ def audit_dashboard():
         warehouses=warehouses,
         tied_row=tied_row,
         recent_sessions=recent,
+        active_sessions=audit_store.unfinished_sessions(),
         due_locations=due_locations,
         sync_error=sync_error,
         last_synced_display=_audit_dt_display(audit_store.last_synced_at()),

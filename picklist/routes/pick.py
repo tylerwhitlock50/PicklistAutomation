@@ -1,5 +1,7 @@
 """Pick sessions."""
 import io
+import json
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import pandas as pd
@@ -11,12 +13,47 @@ from picklist.domain.pick_path import pick_line_sort_key
 from picklist.erp import run_erp_query_file
 from picklist.security import require_csrf, require_trusted_client
 from picklist.services.query_options import get_query_type
-from picklist.services.run_history import get_latest_successful_run
+from picklist.services.run_history import get_latest_successful_run, get_run_by_id
 from picklist.services.shipping_service import build_pick_order_queue
-from picklist.stores import pick_store
+from picklist.stores import pick_store, readiness_store
 from picklist.timeutil import _audit_dt_display
 
 bp = Blueprint("pick", __name__)
+
+
+def _session_warnings(session: dict, orders: list[dict]) -> list[str]:
+    """Advisory saved data only; failures must not prevent picking."""
+    warnings = []
+    try:
+        sources = json.loads(session.get("source_runs_json") or "{}")
+        if not sources and session.get("run_id"):
+            sources = {session.get("query_type"): session["run_id"]}
+        for kind, run_id in sources.items():
+            run = get_run_by_id(run_id, kind)
+            if not run:
+                warnings.append(f"Source {kind} run #{run_id} is no longer available.")
+                continue
+            timestamp = datetime.fromisoformat(str(run["run_timestamp"]).replace("Z", "+00:00"))
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+            age = max(0, (datetime.now(timezone.utc) - timestamp).total_seconds() / 3600)
+            warnings.append(f"{'Stale saved plan' if age >= 24 else 'Saved plan'}: {kind} run #{run_id}, {_audit_dt_display(run['run_timestamp'])}, {age:.1f} hours old. Current stock may differ.")
+    except Exception:
+        logger.warning("Session source warnings unavailable", exc_info=True)
+        warnings.append("Saved-plan age is unavailable. Picking remains available.")
+    try:
+        snapshot = readiness_store.latest_snapshot()
+        if not snapshot or snapshot.get("error"):
+            warnings.append("Readiness information is unavailable; it does not prevent picking.")
+        else:
+            order_ids = {str(row.get("cust_order_id") or "").upper() for row in orders}
+            concerns = [row for row in snapshot.get("orders", []) if str(row.get("order_id") or "").upper() in order_ids and row.get("state") in ("BLOCKED", "ATTENTION")]
+            if concerns:
+                warnings.append("Readiness advice from " + _audit_dt_display(snapshot.get("evaluated_at")) + ": " + ", ".join(f"{row['order_id']} ({row['state'].lower()})" for row in concerns) + ". These warnings do not prevent picking.")
+    except Exception:
+        logger.warning("Session readiness warnings unavailable", exc_info=True)
+        warnings.append("Readiness information is unavailable; it does not prevent picking.")
+    return warnings
 
 
 @bp.post("/pick/session/start")
@@ -135,6 +172,7 @@ def pick_session_page(session_id: int):
     return render_template(
         "pick_session.html",
         session=session_row,
+        pick_warnings=_session_warnings(session_row, orders),
         started_display=_audit_dt_display(session_row.get("started_at")),
         completed_display=_audit_dt_display(session_row.get("completed_at")),
         lines=lines,

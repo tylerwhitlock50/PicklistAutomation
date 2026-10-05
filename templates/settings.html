@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Picklist Settings</title>
+    <title>Settings · Warehouse Ops</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
   </head>
   <body>
@@ -11,7 +11,7 @@
       {% include '_topnav.html' %}
       <section class="hero card">
         <p class="eyebrow">Configuration</p>
-        <h1>Runtime Settings</h1>
+        <h1>Settings</h1>
         {% if settings_unlocked %}
         <p class="hero-copy">
           Save notification and connection settings in the app database. Saved values override matching
@@ -23,7 +23,7 @@
         </p>
         {% endif %}
         <section class="actions">
-          <a class="button secondary" href="{{ url_for('runs.index') }}">Back to Dashboard</a>
+          <a class="button secondary" href="{{ url_for('shipping.work_page') }}">Back to Today</a>
           {% if settings_unlocked %}
           <form method="post" action="{{ url_for('settings.settings') }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
@@ -43,38 +43,6 @@
       </section>
       {% endif %}
       {% endwith %}
-
-      <section class="card">
-        <div class="table-header">
-          <h2>Automation Value</h2>
-          <p>Distinct successful generations only</p>
-        </div>
-        <div class="reporting-grid">
-          <article class="reporting-stat">
-            <p class="reporting-label">Counted runs today</p>
-            <p class="reporting-value">{{ reporting_metrics['today_runs_count'] }}</p>
-            <p class="helper-text">
-              Estimated time saved today: <strong>{{ reporting_metrics['today_minutes_saved'] }} minutes</strong>
-            </p>
-          </article>
-          <article class="reporting-stat">
-            <p class="reporting-label">Total counted runs</p>
-            <p class="reporting-value">{{ reporting_metrics['total_runs_count'] }}</p>
-            <p class="helper-text">
-              Estimated total time saved: <strong>{{ reporting_metrics['total_minutes_saved'] }} minutes</strong>
-            </p>
-          </article>
-        </div>
-        <p class="helper-text">
-          This counts successful picklist generations only when they occur at least
-          {{ reporting_metrics['distinct_window_minutes'] }} minutes apart. Each counted run is valued at
-          {{ reporting_metrics['estimated_minutes_per_run'] }} minutes saved.
-        </p>
-        <p class="helper-text">
-          Latest counted run:
-          <strong>{{ reporting_metrics['latest_event_display'] or 'No counted runs yet' }}</strong>
-        </p>
-      </section>
 
       <section class="card">
         {% if not settings_unlocked %}
@@ -543,6 +511,38 @@
           <code>SCHEDULE_TIMEZONE=UTC-7</code> or <code>SCHEDULE_TIMEZONE=Etc/GMT+7</code>.
         </p>
       </section>
+      <section class="card">
+        <div class="table-header">
+          <h2>Automation Value</h2>
+          <p>Distinct successful generations only</p>
+        </div>
+        <div class="reporting-grid">
+          <article class="reporting-stat">
+            <p class="reporting-label">Counted runs today</p>
+            <p class="reporting-value">{{ reporting_metrics['today_runs_count'] }}</p>
+            <p class="helper-text">
+              Estimated time saved today: <strong>{{ reporting_metrics['today_minutes_saved'] }} minutes</strong>
+            </p>
+          </article>
+          <article class="reporting-stat">
+            <p class="reporting-label">Total counted runs</p>
+            <p class="reporting-value">{{ reporting_metrics['total_runs_count'] }}</p>
+            <p class="helper-text">
+              Estimated total time saved: <strong>{{ reporting_metrics['total_minutes_saved'] }} minutes</strong>
+            </p>
+          </article>
+        </div>
+        <p class="helper-text">
+          This counts successful picklist generations only when they occur at least
+          {{ reporting_metrics['distinct_window_minutes'] }} minutes apart. Each counted run is valued at
+          {{ reporting_metrics['estimated_minutes_per_run'] }} minutes saved.
+        </p>
+        <p class="helper-text">
+          Latest counted run:
+          <strong>{{ reporting_metrics['latest_event_display'] or 'No counted runs yet' }}</strong>
+        </p>
+      </section>
+
     </main>
 
     {% if settings_unlocked %}

@@ -46,7 +46,7 @@ def _get(row: Mapping[str, Any], key: str) -> Any:
 
 
 def _date_text(value: Any) -> Optional[str]:
-    if value is None:
+    if not _text(value):
         return None
     if isinstance(value, dt.datetime):
         return value.date().isoformat()
@@ -57,7 +57,7 @@ def _date_text(value: Any) -> Optional[str]:
 
 
 def _datetime_text(value: Any) -> Optional[str]:
-    if value is None:
+    if not _text(value):
         return None
     if isinstance(value, dt.datetime):
         return value.isoformat(timespec="minutes")

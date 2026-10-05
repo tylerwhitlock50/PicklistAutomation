@@ -89,7 +89,7 @@ class NavRouteTests(unittest.TestCase):
         self.assertIn("/orders/__ID__", html)
 
     def test_retired_shipping_views_redirect(self):
-        for view, target in (("work", "/work"), ("holds", "/orders"), ("requests", "/requests")):
+        for view, target in (("work", "/work"), ("holds", "/orders?from_report=1"), ("requests", "/requests")):
             response = self.client.get(f"/shipping?view={view}")
             self.assertEqual(response.status_code, 302, view)
             self.assertTrue(response.headers["Location"].endswith(target), (view, response.headers["Location"]))

@@ -29,7 +29,7 @@ from picklist.config import (
     SHORTAGE_PRODUCT_CODES,
     SHORTAGE_PRODUCT_CODES_TOKEN,
     SHORTAGE_QUERY_FILE,
-    STAGE_AGING_TARGET_HOURS,
+    STAGING_TARGET_HOURS,
     STAGE_LOCATION_TERM,
     VERIFY_DAILY_CACHE_SECONDS,
 )
@@ -80,7 +80,7 @@ def build_stage_aging() -> dict[str, Any]:
     STAGE_LOCATION_TERM — staged goods are sold and boxed, so anything aging
     here is an order that has not actually left.
     """
-    target = STAGE_AGING_TARGET_HOURS
+    target = STAGING_TARGET_HOURS
     result: dict[str, Any] = {
         "target_hours": target,
         "term": STAGE_LOCATION_TERM,
@@ -820,6 +820,7 @@ def build_verify_daily_payload(
 def build_pick_order_queue(pick_type: str | None = None) -> dict[str, Any]:
     """Combine the latest guns/components plans into one order work queue."""
     source_runs: dict[str, int] = {}
+    sources = []
     plan_rows: list[dict[str, Any]] = []
     for query_type in QUERY_FILES:
         if pick_type and query_type != pick_type:
@@ -828,6 +829,18 @@ def build_pick_order_queue(pick_type: str | None = None) -> dict[str, Any]:
         if not run:
             continue
         source_runs[query_type] = int(run["id"])
+        timestamp = run["run_timestamp"]
+        age_hours = None
+        try:
+            generated = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+            if generated.tzinfo is None:
+                generated = generated.replace(tzinfo=timezone.utc)
+            age_hours = max(0, (datetime.now(timezone.utc) - generated).total_seconds() / 3600)
+        except (ValueError, TypeError):
+            pass
+        sources.append({"type": query_type, "id": run["id"], "timestamp": timestamp,
+                        "age_hours": round(age_hours, 1) if age_hours is not None else None,
+                        "stale": age_hours is not None and age_hours >= 24})
         for row in rows:
             plan_rows.append({**row, "_query_type": query_type})
 
@@ -842,6 +855,7 @@ def build_pick_order_queue(pick_type: str | None = None) -> dict[str, Any]:
             {
                 "order_id": order_id,
                 "customer_id": str(row.get("Customer ID") or "").strip(),
+                "customer_name": str(row.get("Customer Name") or "").strip(),
                 "guns": 0,
                 "components": 0,
                 "units": 0,
@@ -869,6 +883,13 @@ def build_pick_order_queue(pick_type: str | None = None) -> dict[str, Any]:
     orders = []
     for entry in by_order.values():
         entry["locations"] = sorted(entry["locations"])
+        try:
+            due = date.fromisoformat(str(entry["desired_ship_date"])[:10])
+            days_overdue = (_today_local() - due).days
+        except (ValueError, TypeError):
+            days_overdue = None
+        entry["urgency"] = (f"Overdue {days_overdue} days" if days_overdue and days_overdue > 0
+                            else "Due today" if days_overdue == 0 else "")
         orders.append(entry)
     orders.sort(
         key=lambda row: (
@@ -877,7 +898,7 @@ def build_pick_order_queue(pick_type: str | None = None) -> dict[str, Any]:
             row["order_id"],
         )
     )
-    return {"orders": orders, "plan_rows": plan_rows, "source_runs": source_runs}
+    return {"orders": orders, "plan_rows": plan_rows, "source_runs": source_runs, "sources": sources}
 
 
 def _recent_sessions_for_display(store: Any, limit: int = 10) -> list[dict[str, Any]]:

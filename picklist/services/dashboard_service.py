@@ -1,5 +1,6 @@
 """View models for the run page and status API."""
 from typing import Optional
+from datetime import datetime, timezone
 
 from picklist.config import QUERY_FILES, UI_REFRESH_INTERVAL_SECONDS
 from picklist.scheduler import get_next_scheduled_run
@@ -10,6 +11,17 @@ from picklist.services.run_history import (
 )
 from picklist.services.run_service import get_run_state_snapshot
 from picklist.timeutil import format_datetime_for_display, format_relative_age, format_run_timestamp
+
+
+def chronological_runs(runs_by_type: dict[str, list[dict]]) -> list[dict]:
+    """Interleave the displayed run types by actual time, with a stable tie break."""
+    def key(run):
+        stamp = datetime.fromisoformat(run["run_timestamp"])
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        return stamp, run["id"]
+    rows = [{**run, "query_type": kind} for kind, runs in runs_by_type.items() for run in runs]
+    return sorted(rows, key=key, reverse=True)
 
 
 def build_dashboard_data(recent_limit: int = 5) -> tuple[

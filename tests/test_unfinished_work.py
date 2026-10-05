@@ -19,3 +19,29 @@ class UnfinishedWorkTests(unittest.TestCase):
         self.assertEqual([row["stale"] for row in result], [True, True, False])
         self.assertEqual(result[-1]["operator_display"], "NEW PICKER")
         self.assertEqual(result[-1]["idle_hours"], 0.5)
+
+    def test_audits_use_datetime_activity_and_exact_idle_boundary(self):
+        now = datetime(2026, 10, 5, 12, tzinfo=timezone.utc)
+        audits = [{"id": 337, "scope": "SHIPPING / INTERNATIONAL", "operator": "AUDITOR",
+                   "last_activity": datetime(2026, 10, 5, 2, tzinfo=timezone.utc),
+                   "done_units": 4, "planned_units": 9},
+                  {"id": 338, "label": "New audit", "last_activity": now,
+                   "done_units": 0, "planned_units": 3}]
+        with patch("picklist.services.unfinished_work.pick_store.unfinished_sessions", return_value=[]), \
+             patch("picklist.services.unfinished_work.verify_store.unfinished_sessions", return_value=[]), \
+             patch("picklist.services.unfinished_work.audit_store.unfinished_sessions", return_value=audits):
+            result = build_unfinished_work(now)
+        self.assertEqual([row["id"] for row in result], [337, 338])
+        self.assertEqual([row["stale"] for row in result], [True, False])
+        self.assertEqual(result[0]["label"], "SHIPPING / INTERNATIONAL")
+        self.assertEqual(result[0]["kind"], "audit")
+        self.assertEqual(result[1]["idle_hours"], 0)
+
+    def test_optional_audit_failure_retains_local_work_and_warns(self):
+        picks = [{"id": 1, "order_ids": "SO-1", "last_activity": "2026-10-05T12:00:00Z"}]
+        with patch("picklist.services.unfinished_work.pick_store.unfinished_sessions", return_value=picks), \
+             patch("picklist.services.unfinished_work.verify_store.unfinished_sessions", return_value=[]), \
+             patch("picklist.services.unfinished_work.audit_store.unfinished_sessions", side_effect=ConnectionError("offline")):
+            result = build_unfinished_work(datetime(2026, 10, 5, 12, tzinfo=timezone.utc))
+        self.assertEqual([row["id"] for row in result], [1])
+        self.assertTrue(result.audit_unavailable)

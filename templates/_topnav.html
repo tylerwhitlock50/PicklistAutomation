@@ -1,5 +1,5 @@
 <header class="topnav">
-  <a class="topnav-brand" href="{{ url_for('shipping.work_page') }}">
+  <a class="topnav-brand" aria-label="Warehouse Ops · Today" href="{{ url_for('shipping.work_page') }}">
     <span class="topnav-logo" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
     <span class="topnav-brand-text">
       <span class="topnav-brand-title">Warehouse Ops</span>
@@ -29,32 +29,29 @@
   </nav>
 
   <div class="topnav-user">
-    <div class="topnav-user-meta">
+    <button type="button" class="identity-chip" data-operator-edit aria-haspopup="dialog" title="Edit operator name and team">
+      <span class="topnav-avatar" data-operator-initial aria-hidden="true">?</span>
+      <span class="identity-chip-copy"><span data-operator-name>Set your name</span><span class="topnav-user-role" data-operator-team></span></span>
+      <span aria-hidden="true">&#9662;</span>
+    </button>
+    <a class="topnav-settings" href="{{ url_for('settings.settings') }}">Settings</a>
+    <button class="topnav-menu" type="button" aria-expanded="false" aria-label="Show navigation">Menu</button>
+  </div>
+  <template id="operator-editor-fields">
+    <label>Your name
       {% if operator_roster %}
-      <select class="topnav-operator-select" data-operator-picker aria-label="Who are you?" title="Pick your name so requests and holds carry it">
-        <option value="">Who are you?</option>
-        {% for member in operator_roster %}
-        <option value="{{ member.name }}" data-team="{{ member.team }}">{{ member.name }}</option>
-        {% endfor %}
+      <select data-operator-picker required aria-label="Your name">
+        <option value="">Choose your name</option>
+        {% for member in operator_roster %}<option value="{{ member.name }}" data-team="{{ member.team }}">{{ member.name }}</option>{% endfor %}
       </select>
       {% else %}
-      {# No roster configured: Settings promises "any typed name", so offer a box to type it in. #}
-      <span class="topnav-operator-free">
-        <input class="topnav-operator-input" data-operator-input type="text" maxlength="60" autocomplete="off"
-               placeholder="Who are you?" aria-label="Your name" title="Type your name so requests and holds carry it" />
-        <select class="topnav-operator-select topnav-operator-team" data-operator-team-picker aria-label="Your team" title="Your team">
-          <option value="">Team</option>
-          {% for team_key, team_label in operator_teams %}
-          <option value="{{ team_key }}">{{ team_label }}</option>
-          {% endfor %}
-        </select>
-      </span>
+      <input data-operator-input required type="text" maxlength="60" autocomplete="name" aria-label="Your name">
       {% endif %}
-      <span class="topnav-user-role" data-operator-team>Shipping</span>
-    </div>
-    <div class="topnav-avatar" data-operator-initial>O</div>
-    <a class="topnav-settings" href="{{ url_for('settings.settings') }}" title="Connection, notification and feature settings">Settings</a>
-  </div>
+    </label>
+    {% if not operator_roster %}
+    <label>Team <select data-operator-team-picker aria-label="Your team"><option value="">No team selected</option>{% for team_key, team_label in operator_teams %}<option value="{{ team_key }}">{{ team_label }}</option>{% endfor %}</select></label>
+    {% endif %}
+  </template>
 
   {% if nav_group != 'requests' %}
   <nav class="topnav-subnav" aria-label="{{ nav_group|capitalize }} pages">
@@ -73,7 +70,7 @@
     <a class="topnav-sub {% if nav_item == 'scorecard' %}is-active{% endif %}" href="{{ url_for('shipping.shipping_page', view='scorecard') }}" data-loading-message="Loading scorecard&hellip;">Scorecard</a>
     {% endif %}
     {% if feature_flags.orders %}
-    <a class="topnav-sub {% if nav_item == 'holds' %}is-active{% endif %}" href="{{ url_for('orders.orders_page') }}" data-loading-message="Loading holds&hellip;">Holds</a>
+    <a class="topnav-sub {% if nav_item == 'holds' %}is-active{% endif %}" href="{{ url_for('orders.orders_page', from_report='1') }}" data-loading-message="Loading holds&hellip;">Holds</a>
     {% endif %}
     {% if feature_flags.shipping %}
     <a class="topnav-sub {% if nav_item == 'shortages' %}is-active{% endif %}" href="{{ url_for('shipping.shipping_page', view='shortages') }}" data-loading-message="Loading shortages&hellip;">Shortages</a>
@@ -107,6 +104,7 @@
 <div class="nav-loading-overlay" data-nav-loading hidden role="status" aria-live="polite">
   <span class="nav-loading-spinner" aria-hidden="true"></span>
   <span class="nav-loading-text" data-nav-loading-text>Loading&hellip;</span>
+  <span class="helper-text" data-nav-slow hidden>This is taking longer than usual. Press Escape to return to your inputs. Check the operation status before submitting again.</span>
 </div>
 
 <script>
@@ -119,6 +117,8 @@
     var textEl = overlay.querySelector("[data-nav-loading-text]");
     var defaultText = textEl ? textEl.textContent : "";
     var showTimer = null;
+    var slowTimer = null;
+    var slowHint = overlay.querySelector("[data-nav-slow]");
 
     function show(message) {
       if (textEl) textEl.textContent = message || defaultText;
@@ -126,12 +126,15 @@
       if (showTimer) clearTimeout(showTimer);
       showTimer = setTimeout(function () {
         overlay.hidden = false;
+        slowTimer = setTimeout(function () { if (slowHint) slowHint.hidden = false; }, 15000);
       }, 150);
     }
 
     function hide() {
       if (showTimer) clearTimeout(showTimer);
       showTimer = null;
+      if (slowTimer) clearTimeout(slowTimer);
+      if (slowHint) slowHint.hidden = true;
       overlay.hidden = true;
     }
 
@@ -163,168 +166,5 @@
     document.addEventListener("keydown", function (event) {
       if (event.key === "Escape") hide();
     });
-  })();
-</script>
-
-<script>
-  // Operator identity (v1): remember who is using this browser and send it
-  // with every request (X-Operator headers on fetch, hidden fields on POST
-  // forms) so holds, requests and audit trails carry a real name.
-  (function () {
-    var NAME_KEY = "audit_operator_name";
-    var TEAM_KEY = "ops_operator_team";
-    var TEAM_LABELS = { sales: "Inside Sales", shipping: "Shipping", finance: "Finance", management: "Management" };
-    var picker = document.querySelector("[data-operator-picker]");
-    var freeName = document.querySelector("[data-operator-input]");
-    var teamPicker = document.querySelector("[data-operator-team-picker]");
-    var nameEl = document.querySelector("[data-operator-name]");
-    var teamEl = document.querySelector("[data-operator-team]");
-    var initialEl = document.querySelector("[data-operator-initial]");
-
-    function read() {
-      try {
-        return {
-          name: (localStorage.getItem(NAME_KEY) || "").trim(),
-          team: (localStorage.getItem(TEAM_KEY) || "").trim(),
-        };
-      } catch (e) {
-        return { name: "", team: "" };
-      }
-    }
-    function write(name, team) {
-      try {
-        localStorage.setItem(NAME_KEY, name || "");
-        localStorage.setItem(TEAM_KEY, team || "");
-      } catch (e) {}
-      try {
-        var maxAge = "; path=/; max-age=31536000; SameSite=Lax";
-        document.cookie = "ops_operator=" + encodeURIComponent(name || "") + maxAge;
-        document.cookie = "ops_operator_team=" + encodeURIComponent(team || "") + maxAge;
-      } catch (e) {}
-    }
-    function render(current) {
-      var matched = null;
-      if (picker) {
-        Array.prototype.forEach.call(picker.options, function (opt) {
-          if (opt.value && opt.value.toLowerCase() === (current.name || "").toLowerCase()) matched = opt;
-        });
-        picker.value = matched ? matched.value : "";
-        picker.classList.toggle("is-unset", !matched);
-      }
-      if (freeName) {
-        freeName.value = current.name || "";
-        freeName.classList.toggle("is-unset", !current.name);
-      }
-      if (teamPicker) {
-        teamPicker.value = current.team || "";
-        teamPicker.classList.toggle("is-unset", !current.team);
-      }
-      if (nameEl) nameEl.textContent = current.name || "Operator";
-      if (teamEl) {
-        teamEl.textContent = current.team
-          ? (TEAM_LABELS[current.team] || current.team)
-          : (picker ? "Pick your name" : (freeName ? (current.name ? "Pick your team" : "Type your name") : "Shipping"));
-      }
-      if (initialEl) initialEl.textContent = (current.name || "?").charAt(0).toUpperCase();
-    }
-
-    var current = read();
-    if (picker && current.name) {
-      // Keep the stored team in step with the roster.
-      Array.prototype.forEach.call(picker.options, function (opt) {
-        if (opt.value && opt.value.toLowerCase() === current.name.toLowerCase()) {
-          var team = opt.getAttribute("data-team") || "";
-          if (team && team !== current.team) { current.team = team; write(opt.value, team); }
-        }
-      });
-    }
-    render(current);
-
-    // Eight tabs do not fit beside the brand and the operator block in the
-    // 1080px shell. When the strip overflows, move it to its own row; if it
-    // still overflows (narrow window), keep the active tab in view.
-    try {
-      var bar = document.querySelector(".topnav");
-      var strip = document.querySelector(".topnav-tabs");
-      var activeTab = document.querySelector(".topnav-tab.is-active");
-      function layoutTabs() {
-        if (!bar || !strip) return;
-        bar.classList.remove("is-crowded");
-        if (strip.scrollWidth > strip.clientWidth + 1) bar.classList.add("is-crowded");
-        if (activeTab && strip.scrollWidth > strip.clientWidth + 1) {
-          var left = activeTab.offsetLeft - (strip.clientWidth - activeTab.offsetWidth) / 2;
-          strip.scrollLeft = Math.max(0, left);
-        }
-      }
-      layoutTabs();
-      window.addEventListener("resize", layoutTabs);
-    } catch (e) {}
-
-    if (picker) {
-      picker.addEventListener("change", function () {
-        var opt = picker.options[picker.selectedIndex];
-        var name = opt ? opt.value : "";
-        var team = opt ? (opt.getAttribute("data-team") || "") : "";
-        write(name, team);
-        current = read();
-        render(current);
-      });
-    }
-    if (freeName) {
-      // "change" fires on blur and on Enter; Enter also drops focus so the
-      // name is committed before the user clicks "New request".
-      function commitFree() {
-        var name = (freeName.value || "").trim();
-        var team = teamPicker ? teamPicker.value : (current.team || "");
-        write(name, team);
-        current = read();
-        render(current);
-      }
-      freeName.addEventListener("change", commitFree);
-      freeName.addEventListener("keydown", function (event) {
-        if (event.key === "Enter") { event.preventDefault(); freeName.blur(); }
-      });
-      if (teamPicker) teamPicker.addEventListener("change", commitFree);
-    }
-
-    // Hidden operator fields on every same-origin POST form (unless the page
-    // already renders its own, e.g. the audit session form).
-    document.addEventListener("submit", function (event) {
-      var form = event.target;
-      if (!form || form.tagName !== "FORM") return;
-      if ((form.getAttribute("method") || "get").toLowerCase() !== "post") return;
-      var who = read();
-      if (!who.name) return;
-      if (!form.querySelector("input[name='operator']")) {
-        var nameInput = document.createElement("input");
-        nameInput.type = "hidden"; nameInput.name = "operator"; nameInput.value = who.name;
-        form.appendChild(nameInput);
-      }
-      if (!form.querySelector("input[name='operator_team']")) {
-        var teamInput = document.createElement("input");
-        teamInput.type = "hidden"; teamInput.name = "operator_team"; teamInput.value = who.team;
-        form.appendChild(teamInput);
-      }
-    }, true);
-
-    // X-Operator headers on same-origin fetch() calls.
-    if (window.fetch) {
-      var nativeFetch = window.fetch;
-      window.fetch = function (input, init) {
-        try {
-          var url = typeof input === "string" ? input : ((input && input.url) || "");
-          var sameOrigin = !/^https?:\/\//i.test(url) || url.indexOf(window.location.origin) === 0;
-          var who = read();
-          if (sameOrigin && who.name) {
-            init = init || {};
-            var headers = new Headers(init.headers || (input && input.headers) || {});
-            if (!headers.has("X-Operator")) headers.set("X-Operator", who.name);
-            if (who.team && !headers.has("X-Operator-Team")) headers.set("X-Operator-Team", who.team);
-            init.headers = headers;
-          }
-        } catch (e) {}
-        return nativeFetch.call(this, input, init);
-      };
-    }
   })();
 </script>

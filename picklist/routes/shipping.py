@@ -9,6 +9,7 @@ from flask import Blueprint, flash, jsonify, redirect, render_template, request,
 from picklist.config import logger, QUERY_FILES
 from picklist.domain import readiness
 from picklist.features import get_feature_flags
+from picklist.routes.orders import safe_return_path
 from picklist.security import require_csrf, require_trusted_client
 from picklist.services import readiness_service
 from picklist.services.digest_service import build_shipped_digest_payload, send_shipped_digest
@@ -28,7 +29,7 @@ from picklist.services.shipping_service import (
     build_verify_daily_payload,
     parse_scorecard_days,
 )
-from picklist.stores import pick_store, readiness_store, request_store, shipping_store, verify_store
+from picklist.stores import audit_store, pick_store, readiness_store, request_store, shipping_store, verify_store
 from picklist.timeutil import _audit_dt_display, _today_local
 from picklist.util import _audit_json_safe
 
@@ -81,16 +82,41 @@ def work_page():
             shipping_requests = request_store.list_requests(owner_team="shipping", open_only=True)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Open request list failed: %s", exc)
+    due_audit_locations = []
+    due_audit_unavailable = False
+    if flags["audit"]:
+        try:
+            due_audit_locations = [row for row in audit_store.list_location_status() if row.get("due")]
+        except Exception:
+            logger.warning("Due audit locations unavailable", exc_info=True)
+            due_audit_unavailable = True
     return render_template(
         "work.html",
+        due_audit_locations=due_audit_locations,
+        due_audit_unavailable=due_audit_unavailable,
         pick_sessions=pick_sessions,
         verify_sessions=verify_sessions,
         latest_success_by_type=_latest_success_by_type(),
         run_state_by_type=get_run_state_snapshot(),
         query_options=list(QUERY_FILES.keys()),
         shipping_requests=_audit_json_safe(shipping_requests),
-        unfinished_work=build_unfinished_work() if flags["shipping"] else [],
+        unfinished_work=build_unfinished_work() if flags["shipping"] or flags["audit"] else [],
     )
+
+
+def paginate_decisions(rows, query=None, page=None, page_size=100):
+    """Search the complete saved decision set before taking a display page."""
+    term = str(query or "").strip()
+    matches = [row for row in rows if not term or term.casefold() in " ".join(str(value) for value in row.values()).casefold()]
+    pages = max(1, (len(matches) + page_size - 1) // page_size)
+    try:
+        number = min(pages, max(1, int(page or 1)))
+    except (ValueError, TypeError):
+        number = 1
+    start = (number - 1) * page_size
+    return {"rows": matches[start:start + page_size], "query": term, "page": number,
+            "pages": pages, "total": len(rows), "filtered": len(matches), "start": start + 1 if matches else 0,
+            "end": min(start + page_size, len(matches))}
 
 
 @bp.get("/shipping")
@@ -98,7 +124,7 @@ def work_page():
 def shipping_page():
     view = request.args.get("view") or "scorecard"
     if view in RETIRED_SHIPPING_VIEWS:
-        return redirect(url_for(RETIRED_SHIPPING_VIEWS[view]))
+        return redirect(url_for(RETIRED_SHIPPING_VIEWS[view], **({"from_report": "1"} if view == "holds" else {})))
     if view not in SHIPPING_VIEWS:
         view = "scorecard"
 
@@ -115,6 +141,10 @@ def shipping_page():
     release_gate_payload = None
     hold_stats = None
     request_stats = None
+    pick_queue = {}
+    pick_readiness = None
+    decision_page = {}
+    flags = get_feature_flags()
     scorecard_days = parse_scorecard_days(request.args.get("days"))
 
     if view == "scorecard":
@@ -122,12 +152,13 @@ def shipping_page():
             build_shipping_scorecard_payload(scorecard_days)
         )
         release_gate_payload = _audit_json_safe(build_release_gate_payload())
+        decision_page = paginate_decisions(release_gate_payload.get("decisions") or [], request.args.get("decision_q"), request.args.get("decision_page"))
         try:
             hold_stats = readiness_store.hold_durations(scorecard_days)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Hold duration stats failed: %s", exc)
         try:
-            request_stats = request_store.queue_summary(scorecard_days)
+            request_stats = request_store.queue_summary(scorecard_days) if flags["requests"] else None
         except Exception as exc:  # noqa: BLE001
             logger.warning("Request queue stats failed: %s", exc)
     elif view == "recon":
@@ -149,7 +180,17 @@ def shipping_page():
         if pick_type not in ("guns", "components"):
             pick_type = "guns"
         pick_sessions = [session for session in pick_sessions if session.get("query_type") in (pick_type, "mixed")]
-        pick_orders = build_pick_order_queue(pick_type)["orders"]
+        pick_queue = build_pick_order_queue(pick_type)
+        pick_orders = pick_queue["orders"]
+        # Local saved snapshot only: readiness must never be a live claim prerequisite.
+        try:
+            snapshot = readiness_store.latest_snapshot()
+            if snapshot:
+                queued = {row["order_id"] for row in pick_orders}
+                concerns = [row for row in snapshot.get("orders", []) if row.get("order_id") in queued and row.get("state") in ("BLOCKED", "ATTENTION")]
+                pick_readiness = {"evaluated_at": snapshot.get("evaluated_at"), "concerns": concerns, "error": snapshot.get("error")}
+        except Exception:
+            logger.warning("Saved readiness warnings unavailable", exc_info=True)
         ready_for_pack = pick_store.ready_for_pack_orders(limit=100)
         ready_for_pack = [order for order in ready_for_pack if order.get("query_type") in (pick_type, "mixed")]
         for row in ready_for_pack:
@@ -159,6 +200,10 @@ def shipping_page():
         "shipping.html",
         unfinished_work=build_unfinished_work() if view in WORK_VIEWS else [],
         view=view,
+        report_return=safe_return_path(request.args.get("return_to")) if request.args.get("return_to") else None,
+        pick_queue=pick_queue,
+        pick_readiness=pick_readiness,
+        decision_page=decision_page,
         view_options=SHIPPING_VIEWS,
         recon=recon_payload,
         stage=stage,

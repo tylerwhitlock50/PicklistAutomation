@@ -15,6 +15,7 @@ from picklist.services.orders_service import (
     build_stock_lookup,
 )
 from picklist.util import _audit_json_safe
+from picklist.routes.orders import safe_return_path
 
 bp = Blueprint("lookup", __name__)
 
@@ -82,6 +83,7 @@ def stock_page():
             error = str(exc)
     return render_template(
         "stock.html",
+        return_to=safe_return_path(request.args.get("return_to")) if request.args.get("return_to") else None,
         part=part,
         serial=serial,
         payload=_audit_json_safe(payload) if payload else None,

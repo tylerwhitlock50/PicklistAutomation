@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Shipping Ops</title>
+    <title>{{ view_options[view] }} · Warehouse Ops</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
   </head>
   <body>
@@ -27,7 +27,7 @@
         'shortages': 'Component shortages',
         'stage': 'Staged shipments',
         'pick': 'Pick orders',
-        'verify': 'Packlist verification',
+        'verify': 'Verify boxes',
         'excess': 'Excess packlists',
       } %}
       {% set view_copy = {
@@ -37,7 +37,7 @@
         'stage': 'Serialized units sitting in SHIPPING stage bins — staged goods should be gone within the target window.',
         'pick': 'Scan-verify every pull against the correct sales order before it reaches the packing bench.',
         'verify': 'Enter a packlist, scan the guns in the box, and confirm the physical contents match what the ERP says shipped.',
-        'excess': 'Every extra packlist on an order that already shipped a box the same day is an avoidable carrier charge. This view prices the habit and lists the orders to consolidate.',
+        'excess': 'Potential consolidation savings for orders with multiple same-day packlists. Review legitimate split shipments before combining boxes.',
       } %}
 
       <section class="hero card">
@@ -64,7 +64,7 @@
             <h2>Is the process working?</h2>
             <p class="helper-text">
               {{ scorecard.period.start }} through today &middot; {{ scorecard.period.days }} day{{ '' if scorecard.period.days == 1 else 's' }}
-              {% if scorecard.as_of %}&middot; refreshed {{ scorecard.as_of[:16]|replace('T', ' ') }} UTC{% endif %}
+              {% if scorecard.as_of %}&middot; refreshed {{ scorecard.as_of|local_dt }}{% endif %}
               &middot; today is a partial day
             </p>
           </div>
@@ -105,7 +105,7 @@
             </div>
             <div class="scorecard-kpi-context">
               {% if metric.denominator is not none %}{{ metric.numerator }} / {{ metric.denominator }}{% endif %}
-              {% if key == 'single_gun_shipments' and metric.companion.rate_pct is not none %}
+              {% if key == 'single_gun_shipments' and metric.companion.get('rate_pct') is not none %}
                 &middot; {{ '%.1f%%'|format(metric.companion.rate_pct) }} of shipments
               {% endif %}
               {% if metric.prior_value is not none %}
@@ -122,10 +122,10 @@
       <section class="card">
         <div class="scorecard-head">
           <div>
-            <p class="eyebrow">Friction</p><h2>Holds and requests</h2>
-            <p class="helper-text">How long orders sit on readiness holds and how fast requests get answered &middot; last {{ scorecard_days }} days</p>
+            <p class="eyebrow">Friction</p><h2>Holds{% if feature_flags.requests %} and requests{% endif %}</h2>
+            <p class="helper-text">Open holds: all currently unresolved, including stock and RMA holds. Cleared holds{% if feature_flags.requests %} and request response times{% endif %}: last {{ scorecard_days }} days.</p>
           </div>
-          <a class="button tertiary" href="{{ url_for('shipping.shipping_page', view='holds') }}">Open holds</a>
+          <a class="button tertiary" href="{{ url_for('orders.orders_page', from_report='1', return_to=request.full_path) }}">Open holds</a>
         </div>
         <div class="audit-tiles analytics-tiles">
           {% if hold_stats %}
@@ -133,7 +133,7 @@
           {% set cleared_total = hold_stats.cleared.total %}
           <div class="audit-tile {{ 'tile-misplaced' if open_total.count else 'tile-verified' }}">
             <span class="audit-tile-num">{{ open_total.count }}</span>
-            <span class="audit-tile-label">Open holds</span>
+            <span class="audit-tile-label">Open holds · all time</span>
             <span class="audit-tile-sub">{% if open_total.median_hours is not none %}median age {{ (open_total.median_hours / 24)|round(1) }} days &middot; oldest {{ (open_total.max_hours / 24)|round(1) }} days{% else %}none open{% endif %}</span>
           </div>
           <div class="audit-tile tile-verified">
@@ -155,6 +155,8 @@
           </div>
           {% endif %}
         </div>
+        {% if not feature_flags.requests %}<p class="helper-text">Requests are disabled. Coordinate hold resolution with the responsible team outside this app.</p>{% endif %}
+        <p class="helper-text">Hold age starts when this app first observes the hold, not when the ERP order was created. Ages are rounded to 0.1 day; holds first observed together may have identical ages.</p>
         {% if hold_stats and hold_stats.open.by_owner %}
         <div class="table-wrap">
           <table>
@@ -206,7 +208,7 @@
             <p class="helper-text">
               Policy v{{ release_gate.policy_version }} &middot; <strong>{{ release_gate.mode|upper }}</strong> &middot;
               commitment protection {{ release_gate.due_override_days }} day{{ '' if release_gate.due_override_days == 1 else 's' }}
-              {% if release_gate.source_as_of %}&middot; {{ release_gate.source_as_of[:16]|replace('T', ' ') }} UTC{% endif %}
+              {% if release_gate.source_as_of %}&middot; {{ release_gate.source_as_of|local_dt }}{% endif %}
             </p>
           </div>
           <a class="button tertiary" href="{{ url_for('settings.settings') }}">Gate settings</a>
@@ -237,21 +239,31 @@
         {% elif release_gate.mode == 'enforced' %}
         <p class="scorecard-enforced"><strong>Enforced:</strong> only Ship Now orders enter picklist allocation. Accumulating inventory stays on its shelf and is protected from later normal orders. A gate-query failure stops the run.</p>
         {% endif %}
-        {% set decision_limit = 100 %}
-        <div class="table-controls"><h3>Management action queue</h3><input class="release-gate-filter" type="search" data-table-filter placeholder="Filter orders, customers, reasons..." aria-label="Filter release decisions" /></div>
-        {% if release_gate.decisions|length > decision_limit %}<p class="helper-text">Showing the first {{ decision_limit }} prioritized decisions of {{ release_gate.decisions|length }}. Summary counts include every candidate order.</p>{% endif %}
-        {% if release_gate.decisions %}
+        <h3>Management action queue</h3>
+        <form method="get" class="actions">
+          <input type="hidden" name="view" value="scorecard" /><input type="hidden" name="days" value="{{ scorecard_days }}" />
+          <label>Search all decisions <input name="decision_q" type="search" value="{{ decision_page.query }}" placeholder="Order, customer, reason" /></label>
+          <button type="submit" class="button tertiary">Search</button>
+          <a href="{{ url_for('shipping.shipping_page', view='scorecard', days=scorecard_days) }}">Clear search</a>
+        </form>
+        <p class="helper-text">Showing {{ decision_page.start }}–{{ decision_page.end }} of {{ decision_page.filtered }} matching decisions; {{ decision_page.total }} total candidates. Summary counts cover all candidates.</p>
+        <nav class="actions" aria-label="Decision pages">
+        {% if decision_page.page > 1 %}<a href="{{ url_for('shipping.shipping_page', view='scorecard', days=scorecard_days, decision_q=decision_page.query, decision_page=decision_page.page-1) }}">Previous</a>{% endif %}
+        <span>Page {{ decision_page.page }} of {{ decision_page.pages }}</span>
+        {% if decision_page.page < decision_page.pages %}<a href="{{ url_for('shipping.shipping_page', view='scorecard', days=scorecard_days, decision_q=decision_page.query, decision_page=decision_page.page+1) }}">Next</a>{% endif %}
+        </nav>
+        {% if decision_page.rows %}
         <div class="table-wrap"><table id="release-gate-table" data-filterable-table>
           <thead><tr><th>Decision</th><th>Order</th><th>Customer</th><th>Reason</th><th>Promise ship</th><th>Protected or ready / open</th><th>Next release</th></tr></thead>
-          <tbody>{% for row in release_gate.decisions[:decision_limit] %}<tr>
+          <tbody>{% for row in decision_page.rows %}<tr>
             <td><span class="pill gate-{{ row.decision|lower }}">{{ row.decision }}</span></td>
-            <td class="mono"><strong>{{ row.order_id }}</strong></td><td>{{ row.customer_name or row.customer_id or '' }}{% if row.ship_to_id %}<br /><span class="helper-text">Ship-to {{ row.ship_to_id }}</span>{% endif %}</td><td>{{ row.label }}{% if row.release_condition %}<br /><span class="helper-text">{{ row.release_condition }}</span>{% endif %}{% if row.last_ship_to_shipment_date %}<br /><span class="helper-text">Last ship-to shipment {{ row.last_ship_to_shipment_date }}{% if row.ship_to_cooldown_days %} &middot; {{ row.ship_to_cooldown_days }}d cooldown{% endif %}</span>{% endif %}</td>
+            <td class="mono"><a href="{{ url_for('orders.order_detail_page', order_id=row.order_id, return_to=request.full_path) }}"><strong>{{ row.order_id }}</strong></a></td><td>{{ row.customer_name or row.customer_id or '' }}{% if row.ship_to_id %}<br /><span class="helper-text">Ship-to {{ row.ship_to_id }}</span>{% endif %}</td><td>{{ row.label }}{% if row.release_condition %}<br /><span class="helper-text">{{ row.release_condition }}</span>{% endif %}{% if row.last_ship_to_shipment_date %}<br /><span class="helper-text">Last ship-to shipment {{ row.last_ship_to_shipment_date }}{% if row.ship_to_cooldown_days %} &middot; {{ row.ship_to_cooldown_days }}d cooldown{% endif %}</span>{% endif %}</td>
             <td>{{ row.promise_ship or '&mdash;'|safe }}</td>
             <td>{% if row.decision == 'ACCUMULATING' %}<strong>{{ row.protected_qty }}</strong> protected{% else %}{{ row.ready_qty }} ready{% endif %} / {{ row.open_qty }} open{% if row.open_guns %}<span class="helper-text"> &middot; {{ row.ready_guns }}/{{ row.open_guns }} guns</span>{% endif %}{% if row.serial_assignments %}<span class="helper-text"> &middot; {{ row.serial_assignments|length }} sticky serial{{ '' if row.serial_assignments|length == 1 else 's' }}{% if row.reservation_age_days is not none %}, oldest {{ row.reservation_age_days }}d{% endif %}</span>{% endif %}</td>
             <td>{{ row.next_release_date or '' }}{% if row.ship_to_cooldown_active and row.next_ship_to_eligible_date and row.next_ship_to_eligible_date != row.next_release_date %}<br /><span class="helper-text">Ship-to {{ row.next_ship_to_eligible_date }}</span>{% endif %}</td>
           </tr>{% endfor %}</tbody>
         </table></div>
-        {% else %}<p class="empty-state">No open physical orders are inside the release horizon.</p>{% endif %}
+        {% else %}<p class="empty-state">No matching decisions. Clear the search to see all candidates.</p>{% endif %}
 
         <details class="gate-exception-panel"><summary>Approve a temporary exception</summary>
           <form method="post" action="{{ url_for('shipping.shipping_release_exception_add') }}" class="gate-exception-form">
@@ -267,7 +279,7 @@
         <h3>Active exceptions</h3><div class="table-wrap"><table>
           <thead><tr><th>Order</th><th>Reason</th><th>Approved by</th><th>Expires</th><th></th></tr></thead>
           <tbody>{% for ex in release_gate.active_exceptions %}<tr>
-            <td class="mono">{{ ex.cust_order_id }}</td><td>{{ ex.reason }}</td><td>{{ ex.created_by }}</td><td>{{ ex.expires_at|local_dt }}</td>
+            <td class="mono"><a href="{{ url_for('orders.order_detail_page', order_id=ex.cust_order_id, return_to=request.full_path) }}">{{ ex.cust_order_id }}</a></td><td>{{ ex.reason }}</td><td>{{ ex.created_by }}</td><td>{{ ex.expires_at|local_dt }}</td>
             <td><form method="post" action="{{ url_for('shipping.shipping_release_exception_revoke', exception_id=ex.id) }}" class="inline-form"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}" /><input type="hidden" name="operator" value="" data-revoke-operator /><button class="button tertiary table-button" type="submit">Revoke</button></form></td>
           </tr>{% endfor %}</tbody>
         </table></div>
@@ -278,7 +290,7 @@
       <section class="scorecard-action-grid">
         <article class="card"><h2>Late / short at commitment</h2><p class="helper-text">Due-order failures in the selected window. These drive Ship on time.</p>
           {% if scorecard.actions.late_orders %}<div class="table-wrap"><table><thead><tr><th>Promise</th><th>Order</th><th>Customer</th><th>Short</th></tr></thead><tbody>
-          {% for row in scorecard.actions.late_orders[:20] %}<tr><td>{{ row.promise_ship }}</td><td class="mono">{{ row.order_id }}</td><td>{{ row.customer_name or row.customer_id or '' }}</td><td>{{ row.short_qty }} of {{ row.ordered_qty }}</td></tr>{% endfor %}</tbody></table></div>
+          {% for row in scorecard.actions.late_orders[:20] %}<tr><td>{{ row.promise_ship }}</td><td class="mono"><a href="{{ url_for('orders.order_detail_page', order_id=row.order_id, return_to=request.full_path) }}">{{ row.order_id }}</a></td><td>{{ row.customer_name or row.customer_id or '' }}</td><td>{{ row.short_qty }} of {{ row.ordered_qty }}</td></tr>{% endfor %}</tbody></table></div>
           {% else %}<p class="work-clear">No late/short due orders in this window.</p>{% endif %}
         </article>
         <article class="card"><h2>Single-gun review</h2><p class="helper-text">Separates complete one-unit orders from likely avoidable partials.</p>
@@ -443,8 +455,8 @@
               <tr{% if loop.index > row_cap %} class="row-capped"{% endif %}>
                 <td><span class="pill audit-status status-{{ pill }}">{{ l.status|replace('_', ' ') }}</span></td>
                 <td>{{ l.customer_name or l.customer_id or '' }}</td>
-                <td class="mono">{{ l.cust_order_id }}</td>
-                <td class="mono">{{ l.part_id }}{% if l.product_code %} <span class="helper-text">{{ l.product_code }}</span>{% endif %}</td>
+                <td class="mono"><a href="{{ url_for('orders.order_detail_page', order_id=l.cust_order_id, return_to=request.full_path) }}">{{ l.cust_order_id }}</a></td>
+                <td class="mono"><a href="{{ url_for('lookup.stock_page', part=l.part_id, return_to=request.full_path) }}">{{ l.part_id }}</a>{% if l.product_code %} <span class="helper-text">{{ l.product_code }}</span>{% endif %}</td>
                 <td>{{ l.types|join(', ') }}</td>
                 <td>{{ l.locations|join(', ') }}</td>
                 <td>{{ l.planned_qty|int }}</td>
@@ -455,7 +467,7 @@
                   {%- if l.over_shipped %} <span class="helper-text">(over by {{ l.over_shipped|int }})</span>{% endif %}
                 </td>
                 <td>
-                  {% for p in l.packlists %}{{ p.packlist_id }}{% if p.late %} ({{ p.shipped_date }}){% endif %}{% if p.voided %} (voided){% endif %}{{ ', ' if not loop.last }}{% endfor %}
+                  {% for p in l.packlists %}<a href="{{ url_for('shipping.shipping_page', view='verify', packlist=p.packlist_id, return_to=request.full_path) }}#verify-start">{{ p.packlist_id }}</a>{% if p.late %} ({{ p.shipped_date }}){% endif %}{% if p.voided %} (voided){% endif %}{{ ', ' if not loop.last }}{% endfor %}
                   {% if l.tracking %}<br /><span class="helper-text">{{ l.tracking|join(', ') }}</span>{% endif %}
                 </td>
               </tr>
@@ -484,11 +496,11 @@
               {% for u in recon.unplanned %}
               <tr>
                 <td>{{ u.customer_name or u.customer_id or '' }}</td>
-                <td class="mono">{{ u.cust_order_id }}</td>
-                <td class="mono">{{ u.part_id or '' }}</td>
+                <td class="mono"><a href="{{ url_for('orders.order_detail_page', order_id=u.cust_order_id, return_to=request.full_path) }}">{{ u.cust_order_id }}</a></td>
+                <td class="mono">{% if u.part_id %}<a href="{{ url_for('lookup.stock_page', part=u.part_id, return_to=request.full_path) }}">{{ u.part_id }}</a>{% endif %}</td>
                 <td>{{ u.qty|int }}</td>
                 <td>
-                  {% for p in u.packlists %}{{ p.packlist_id }}{{ ', ' if not loop.last }}{% endfor %}
+                  {% for p in u.packlists %}<a href="{{ url_for('shipping.shipping_page', view='verify', packlist=p.packlist_id, return_to=request.full_path) }}#verify-start">{{ p.packlist_id }}</a>{{ ', ' if not loop.last }}{% endfor %}
                   {% if u.tracking %}<br /><span class="helper-text">{{ u.tracking|join(', ') }}</span>{% endif %}
                 </td>
               </tr>
@@ -509,7 +521,7 @@
         <p class="helper-text">
           Open component demand the picklist <strong>cannot see</strong>: the picklist only pulls from
           the DISTRIBUTION bins and rack R11, and silently drops everything it cannot cover from there.
-          This is the remainder, split by why{% if shortages.as_of %} &middot; as of {{ shortages.as_of[:16]|replace('T', ' ') }} UTC{% endif %}.
+          This is the remainder, split by why{% if shortages.as_of %} &middot; as of {{ shortages.as_of|local_dt }}{% endif %}.
         </p>
         {% if shortages.error %}
         <p class="empty-state">Shortage data unavailable &mdash; the ERP query failed: {{ shortages.error }}</p>
@@ -528,7 +540,7 @@
           </div>
           <div class="audit-tile {{ 'tile-misplaced' if sh.transfer_units else '' }}">
             <span class="audit-tile-num">{{ sh.transfer_units }}</span>
-            <span class="audit-tile-label">Need transfer</span>
+            <span class="audit-tile-label">Transfer candidates</span>
             <span class="audit-tile-sub">stock exists, wrong warehouse</span>
           </div>
           <div class="audit-tile {{ 'tile-missing' if sh.stockout_units else '' }}">
@@ -538,8 +550,8 @@
           </div>
         </div>
 
-        {% if shortages.transfers %}
-        <h3>Transfer move list</h3>
+        {% if shortages.transfers %}<p class="helper-text">Review transfer candidates before moving stock. Held, quality, engineering, and consignment locations may need authorization or release.</p>
+        <p class="helper-text">Confirm source availability before moving stock, especially held, quality, engineering, or consignment inventory.</p><h3>Transfer candidates for review</h3>
         <p class="helper-text">Move these to DISTRIBUTION (or R11) and the waiting orders print on the next picklist. Biggest impact first.</p>
         <div class="table-wrap">
           <table>
@@ -549,7 +561,7 @@
             <tbody>
               {% for t in shortages.transfers %}
               <tr>
-                <td class="mono"><strong>{{ t.part_id }}</strong></td>
+                <td class="mono"><strong><a href="{{ url_for('lookup.stock_page', part=t.part_id, return_to=request.full_path) }}">{{ t.part_id }}</a></strong></td>
                 <td>{{ t.part_description or '' }}</td>
                 <td>{{ t.qty_needed }}</td>
                 <td>{{ t.stock_locations or '' }}</td>
@@ -595,8 +607,8 @@
                 </td>
                 <td>{{ l.desired_ship_date or '' }}{% if l.past_due %} <span class="pill audit-status status-missing">past due</span>{% endif %}</td>
                 <td>{{ l.customer_name or l.customer_id or '' }}</td>
-                <td class="mono">{{ l.cust_order_id }} / {{ l.line_no }}</td>
-                <td class="mono">{{ l.part_id }}{% if l.part_description %} <span class="helper-text">{{ l.part_description }}</span>{% endif %}</td>
+                <td class="mono"><a href="{{ url_for('orders.order_detail_page', order_id=l.cust_order_id, return_to=request.full_path) }}">{{ l.cust_order_id }}</a> / {{ l.line_no }}</td>
+                <td class="mono"><a href="{{ url_for('lookup.stock_page', part=l.part_id, return_to=request.full_path) }}">{{ l.part_id }}</a>{% if l.part_description %} <span class="helper-text">{{ l.part_description }}</span>{% endif %}</td>
                 <td>{{ l.open_qty }}</td>
                 <td>{{ l.will_print_qty }}</td>
                 <td><strong>{{ l.short_qty }}</strong></td>
@@ -622,10 +634,10 @@
       <section class="card">
         <h2>Excess packlist cost</h2>
         <p class="helper-text">
-          Same order, same day, more than one packlist &mdash; each extra box costs about
-          <strong>${{ '%.0f'|format(excess.summary.cost_per_excess if excess.summary else 51) }}</strong> in avoidable shipping.
+          Same order, same day, more than one packlist &mdash; each extra box represents about
+          <strong>${{ '%.0f'|format(excess.summary.cost_per_excess if excess.summary else 51) }}</strong> in potential consolidation savings; review legitimate split shipments.
           Legitimate splits (backorders, hazmat) are not detected; use the line/serial counts to judge
-          {%- if excess.as_of %} &middot; as of {{ excess.as_of[:16]|replace('T', ' ') }} UTC{% endif %}.
+          {%- if excess.as_of %} &middot; as of {{ excess.as_of|local_dt }}{% endif %}.
         </p>
         {% if excess.error %}
         <p class="empty-state">Excess packlist data unavailable &mdash; the ERP query failed: {{ excess.error }}</p>
@@ -651,7 +663,7 @@
                   <td>{{ g.customer_name or g.customer_id or '' }}</td>
                   <td>
                     {% for p in g.packlists %}
-                    <span class="mono">{{ p.packlist_id }}</span>
+                    <a class="mono" href="{{ url_for('shipping.shipping_page', view='verify', packlist=p.packlist_id, return_to=request.full_path) }}#verify-start">{{ p.packlist_id }}</a>
                     <span class="helper-text">({{ p.line_count }} line{{ '' if p.line_count == 1 else 's' }},
                       {{ p.serial_count }} serial{{ '' if p.serial_count == 1 else 's' }}{{ ', not shipped yet' if not p.shipped }})</span>{{ '' if loop.last else ', ' }}
                     {% endfor %}
@@ -714,7 +726,7 @@
                 <td>{{ g.customer_name or g.customer_id or '' }}</td>
                 <td>
                   {% for p in g.packlists %}
-                  <span class="mono">{{ p.packlist_id }}</span>
+                  <a class="mono" href="{{ url_for('shipping.shipping_page', view='verify', packlist=p.packlist_id, return_to=request.full_path) }}#verify-start">{{ p.packlist_id }}</a>
                   <span class="helper-text">({{ p.line_count }}L/{{ p.serial_count }}S{% if p.ship_via %} {{ p.ship_via }}{% endif %})</span>{{ '' if loop.last else ', ' }}
                   {% endfor %}
                 </td>
@@ -743,7 +755,7 @@
         <p class="helper-text">
           Serialized units sitting in SHIPPING <strong>{{ stage.term }}</strong> bins &mdash; staged goods
           should be gone within {{ '%.0f'|format(stage.target_hours) }} hours. Live ERP snapshot{% if stage.as_of %}
-          as of {{ stage.as_of[:16]|replace('T', ' ') }}{% endif %}.
+          as of {{ stage.as_of|local_dt }}{% endif %}.
         </p>
         {% if stage.error %}
         <p class="empty-state">Stage data unavailable &mdash; the ERP query failed: {{ stage.error }}</p>
@@ -800,7 +812,7 @@
         <div class="table-wrap">
           <table id="aged-serials-table">
             <thead>
-              <tr><th>Serial</th><th>Part</th><th>Stage bin</th><th>Arrived</th><th>Time staged</th></tr>
+              <tr><th>Serial</th><th>Part</th><th>Stage bin</th><th>Arrived (ERP local time)</th><th>Time staged</th></tr>
             </thead>
             <tbody>
               {% for row in stage.aged_serials %}
@@ -826,6 +838,15 @@
       {% endif %}
 
       {% if view == 'pick' %}
+      <section class="card" aria-label="Saved plan and readiness warnings">
+        <strong>Saved plan · advisory warnings only</strong>
+        <p>Any operator can claim available orders. Readiness concerns and older plans do not prevent claiming; ownership and scan checks still apply.</p>
+        {% for source in pick_queue.sources %}<p class="helper-text">{{ source.type|capitalize }} run #{{ source.id }} · {{ source.timestamp|local_dt }} · {% if source.age_hours is not none %}{{ source.age_hours }} hours old{% else %}age unavailable{% endif %}{% if source.stale %} · <strong>Stale plan (24+ hours)</strong>{% endif %}</p>{% endfor %}
+        {% if pick_readiness %}<p class="helper-text">Saved readiness evaluated {{ pick_readiness.evaluated_at|local_dt }}. {{ pick_readiness.concerns|length }} queued orders have readiness concerns{% if pick_readiness.error %}; last evaluation reported an error{% endif %}. Current stock may differ.</p>
+          {% if pick_readiness.concerns %}<details><summary>Show readiness concerns</summary>{% for order in pick_readiness.concerns %}<p><a href="{{ url_for('orders.order_detail_page', order_id=order.order_id, return_to=request.full_path) }}">{{ order.order_id }}</a> · {{ order.state }}{% for hold in order.holds %} · {{ hold.label }}{% endfor %}</p>{% endfor %}</details>{% endif %}
+        {% else %}<p class="helper-text">Saved readiness information is unavailable. Claiming remains available.</p>{% endif %}
+        <a href="{{ url_for('runs.index') }}">Generate a fresh plan (optional)</a>
+      </section>
       {% include '_unfinished_work.html' %}
       <section class="card">
         <div class="hero-top">
@@ -846,21 +867,25 @@
             <a class="button {{ 'secondary' if pick_type == 'components' else 'tertiary' }}" href="{{ url_for('shipping.shipping_page', view='pick', pick_type='components') }}" aria-current="{{ 'page' if pick_type == 'components' else 'false' }}">Components</a>
           </div>
           <label class="audit-field"><span>Scan an order or search the queue</span><input id="pick-order-search" autocomplete="off" placeholder="Sales order or customer" /></label>
+          <p class="helper-text">Enter selects an exact order; Tab moves focus. Use Start to claim. Available orders appear first, then claimed orders; each group is sorted by desired ship date.</p>
+          <div data-selected-orders aria-live="polite"></div>
+          <p data-no-pick-matches class="empty-state" hidden>No matching orders. <button type="button" class="button tertiary" data-clear-pick-search>Clear search</button></p>
           {% if pick_orders %}
           <div class="table-wrap pick-order-queue">
             <table>
               <thead><tr><th>Pick</th><th>Order</th><th>Customer</th><th>Guns</th><th>Components</th><th>Units</th><th>Locations</th><th>Desired ship</th></tr></thead>
               <tbody>
                 {% for order in pick_orders %}
+                {% if loop.first or order.claimed != pick_orders[loop.index0-1].claimed %}<tr data-queue-group><th colspan="8">{{ 'Claimed orders' if order.claimed else 'Available orders' }} · desired ship date, oldest first</th></tr>{% endif %}
                 <tr class="{{ 'is-claimed' if order.claimed else '' }}">
-                  <td><input type="checkbox" name="orders" value="{{ order.order_id }}" aria-label="Select {{ order.order_id }}" {{ 'disabled' if order.claimed else '' }} /></td>
+                  <td><input type="checkbox" name="orders" value="{{ order.order_id }}" data-customer="{{ order.customer_name or order.customer_id }}" data-units="{{ order.units }}" aria-label="Select {{ order.order_id }}" {{ 'disabled' if order.claimed else '' }} /></td>
                   <td class="mono"><strong>{{ order.order_id }}</strong>{% if order.claimed %}<br><span class="pill running">claimed</span>{% endif %}</td>
-                  <td>{{ order.customer_id }}</td>
+                  <td>{{ order.customer_name or order.customer_id }}</td>
                   <td>{{ order.guns }}</td>
                   <td>{{ order.components }}</td>
                   <td>{{ order.units }}</td>
                   <td>{{ order.locations|join(', ') }}</td>
-                  <td>{{ order.desired_ship_date or '' }}</td>
+                  <td>{{ order.desired_ship_date or '' }}{% if order.urgency %}<br><strong>{{ order.urgency }}</strong>{% endif %}</td>
                 </tr>
                 {% endfor %}
               </tbody>
@@ -914,13 +939,13 @@
       {% if ready_for_pack %}
       <section class="card">
         <h2>Completed picking</h2>
-        <p class="helper-text">These picking assignments are complete. Mixed orders need both teams to finish before packing.</p>
+        <p class="helper-text">These picking assignments are complete. Mixed orders need both teams to finish before packing. Packing staff create the packlist in VISUAL, then enter it under Verify boxes to attach completed picks. Component-only contents require a manual packing check; attachment is not a contents verification.</p>
         <div class="table-wrap">
           <table>
             <thead><tr><th>Order</th><th>Customer</th><th>Tote</th><th>Picker</th><th>Ready</th><th>Pick session</th></tr></thead>
             <tbody>
               {% for order in ready_for_pack %}
-              <tr><td class="mono"><strong>{{ order.cust_order_id }}</strong></td><td>{{ order.customer_id or '' }}</td><td>{{ order.query_type|capitalize }} · {{ order.tote_code }}</td><td>{{ order.operator or '' }}</td><td>{{ order.completed_display or '' }}</td><td><a href="{{ url_for('pick.pick_session_page', session_id=order.pick_session_id) }}">#{{ order.pick_session_id }}</a></td></tr>
+              <tr><td class="mono"><strong><a href="{{ url_for('orders.order_detail_page', order_id=order.cust_order_id, return_to=request.full_path) }}">{{ order.cust_order_id }}</a></strong></td><td>{{ order.customer_id or '' }}</td><td>{{ order.query_type|capitalize }} · {{ order.tote_code }}</td><td>{{ order.operator or '' }}</td><td>{{ order.completed_display or '' }}</td><td><a href="{{ url_for('pick.pick_session_page', session_id=order.pick_session_id) }}">#{{ order.pick_session_id }}</a></td></tr>
               {% endfor %}
             </tbody>
           </table>
@@ -934,7 +959,7 @@
       <section class="card" id="verify-start">
         <div class="hero-top">
           <div>
-            <h2>Verify a packlist</h2>
+            <h2>Verify a packlist</h2>{% if report_return %}<p><a href="{{ report_return }}">Back to report results</a></p>{% endif %}
             <p class="helper-text">
               Scan or type the <strong>packlist number</strong>, then scan every gun in the box.
               A serial that belongs on a different packlist beeps immediately and says which one.
@@ -946,7 +971,7 @@
           <input type="hidden" name="operator" value="" data-operator-field />
           <label class="audit-field">
             <span>Packlist</span>
-            <input type="text" id="packlist-input" name="packlist_id" placeholder="Scan or enter a packlist" autocomplete="off" autocapitalize="characters" spellcheck="false" autofocus required />
+            <input type="text" id="packlist-input" name="packlist_id" value="{{ request.args.get('packlist', '') }}" placeholder="Scan or enter a packlist" autocomplete="off" autocapitalize="characters" spellcheck="false" autofocus required />
           </label>
           <button type="submit" class="button">Start verification</button>
         </form>
@@ -993,7 +1018,7 @@
 
         <div class="work-filter-bar" aria-label="Filter verification work">
           <span class="analytics-toolbar-label">Show:</span>
-          <button type="button" class="analytics-window active" data-verify-filter="actionable" aria-pressed="true">Needs action ({{ vs.not_verified + vs.in_progress }})</button>
+          <button type="button" class="analytics-window active" data-verify-filter="actionable" aria-pressed="true">Needs action ({{ vs.not_verified + vs.in_progress + vs.verified_issues + vs.no_serials }})</button>
           <button type="button" class="analytics-window" data-verify-filter="in_progress" aria-pressed="false">In progress ({{ vs.in_progress }})</button>
           <button type="button" class="analytics-window" data-verify-filter="verified_issues" aria-pressed="false">Issues ({{ vs.verified_issues }})</button>
           <button type="button" class="analytics-window" data-verify-filter="verified_clean" aria-pressed="false">Completed ({{ vs.verified_clean }})</button>
@@ -1010,7 +1035,7 @@
             <thead>
               <tr>
                 <th>Packlist</th>
-                <th>Created</th>
+                <th>Created (ERP local time)</th>
                 <th>Customer</th>
                 <th>Order</th>
                 <th>Serials</th>
@@ -1032,11 +1057,11 @@
                 <td class="mono"><strong>{{ p.packlist_id }}</strong></td>
                 <td>{{ p.created_display or '' }}</td>
                 <td>{{ p.customer or '' }}</td>
-                <td class="mono">{{ p.cust_order_id or '' }}</td>
+                <td class="mono">{% if p.cust_order_id %}<a href="{{ url_for('orders.order_detail_page', order_id=p.cust_order_id, return_to=request.full_path) }}">{{ p.cust_order_id }}</a>{% endif %}</td>
                 <td>{{ p.serial_count }}{% if p.line_count > 1 %} <span class="helper-text">({{ p.line_count }} lines)</span>{% endif %}</td>
                 <td>
                   {% if p.status == 'no_serials' %}
-                  <span class="helper-text">no serials &mdash; nothing to verify</span>
+                  <span class="helper-text">No serialized guns · manual component check required</span>
                   {% else %}
                   <span class="pill audit-status status-{{ pill }}">{{ p.status|replace('_', ' ') }}</span>
                   {% endif %}
@@ -1046,13 +1071,13 @@
                 </td>
                 <td>
                   {% if p.session and p.session.status != 'cancelled' %}
-                  <a class="button tertiary table-button" href="{{ url_for('verify.verify_session_page', session_id=p.session.id) }}">Session #{{ p.session.id }}</a>
-                  {% elif p.status == 'not_verified' %}
+                  <a class="button tertiary table-button" href="{{ url_for('verify.verify_session_page', session_id=p.session.id) }}">{{ 'Review issues' if p.status == 'verified_issues' else 'Session #' ~ p.session.id }}</a>{% if p.status == 'verified_issues' %}<span class="helper-text">Shipping: correct contents and re-verify; issue history remains available.</span>{% endif %}
+                  {% elif p.status in ('not_verified', 'no_serials') %}
                   <form method="post" action="{{ url_for('verify.verify_session_start') }}" class="verify-start-form inline-form" data-loading-message="Loading {{ p.packlist_id }} from the ERP&hellip;">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
                     <input type="hidden" name="packlist_id" value="{{ p.packlist_id }}" />
                     <input type="hidden" name="operator" value="" data-operator-field />
-                    <button type="submit" class="button tertiary table-button">{{ 'Restart verification' if p.session else 'Verify' }}</button>
+                    <button type="submit" class="button tertiary table-button">{{ 'Attach completed picks' if p.status == 'no_serials' else ('Restart verification' if p.session else 'Verify') }}</button>
                   </form>
                   {% if p.session %}<a href="{{ url_for('verify.verify_session_page', session_id=p.session.id) }}">Cancelled attempt #{{ p.session.id }}</a>{% endif %}
                   {% endif %}
@@ -1116,7 +1141,15 @@
             selected = boxes.filter(function (box) { return box.checked; });
             alert("A pick wave can contain at most " + max + " orders.");
           }
-          if (button) button.disabled = selected.length === 0;
+          if (button) { button.disabled = selected.length === 0; button.textContent = selected.length === 1 ? "Start " + selected[0].value : "Start picking"; }
+          const summary = form.querySelector("[data-selected-orders]");
+          summary.replaceChildren();
+          selected.forEach(function (box, index) {
+            const row = document.createElement("p");
+            row.textContent = box.value + " · " + box.dataset.customer + " · " + box.dataset.units + " units" + (max > 1 ? " · separate tote " + (index + 1) : "") + " ";
+            const remove = document.createElement("button"); remove.type = "button"; remove.className = "button tertiary"; remove.textContent = "Remove " + box.value;
+            remove.addEventListener("click", function () { box.checked = false; update(null); }); row.appendChild(remove); summary.appendChild(row);
+          });
           if (count) count.textContent = selected.length + " of " + max + " selected";
         }
         boxes.forEach(function (box) {
@@ -1131,14 +1164,18 @@
           search.addEventListener("input", function () {
             const term = search.value.trim().toUpperCase();
             boxes.forEach(function (box) { box.closest("tr").hidden = !!term && !box.closest("tr").textContent.toUpperCase().includes(term); });
+            form.querySelector("[data-no-pick-matches]").hidden = boxes.some(box => !box.closest("tr").hidden);
+            form.querySelectorAll("[data-queue-group]").forEach(row => row.hidden = !!term);
           });
           search.addEventListener("keydown", function (event) {
-            if (event.key !== "Enter" && event.key !== "Tab") return;
+            if (event.key !== "Enter") return;
             const match = boxes.find(function (box) { return !box.disabled && box.value.toUpperCase() === search.value.trim().toUpperCase(); });
             if (!match) { if (event.key === "Enter") event.preventDefault(); return; }
-            event.preventDefault(); boxes.forEach(function (box) { box.checked = box === match; }); update(match); form.requestSubmit(button);
+            event.preventDefault(); boxes.forEach(function (box) { box.checked = box === match; }); update(match); if (button) button.focus();
           });
         }
+        const clearSearch = form.querySelector("[data-clear-pick-search]");
+        if (clearSearch) clearSearch.addEventListener("click", function () { search.value = ""; search.dispatchEvent(new Event("input")); search.focus(); });
         update(null);
       })();
 
@@ -1156,7 +1193,7 @@
         table.querySelectorAll("tbody tr").forEach(function (tr) {
           const status = tr.getAttribute("data-verify-status");
           const statusMatches = !status || statusFilter === "all" ||
-            (statusFilter === "actionable" && (status === "not_verified" || status === "in_progress")) ||
+            (statusFilter === "actionable" && (status === "not_verified" || status === "in_progress" || status === "verified_issues" || status === "no_serials")) ||
             status === statusFilter;
           const termMatches = !term || tr.textContent.toLowerCase().indexOf(term) !== -1;
           tr.hidden = !(statusMatches && termMatches);

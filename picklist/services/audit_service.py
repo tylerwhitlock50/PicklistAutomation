@@ -13,6 +13,7 @@ from picklist.config import (
     AUDIT_LOCATION_SYNC_MAX_AGE_MINUTES,
     AUDIT_LOCATIONS_SYNC_FILE,
     AUDIT_QUERY_FILE,
+    STAGING_TARGET_HOURS,
     logger,
 )
 from picklist.domain import audit_universe
@@ -211,7 +212,7 @@ AUDIT_ANALYTICS_DEFAULT_DAYS = 30
 
 
 # Dwell time: guns should clear the staging bins within this many hours.
-AUDIT_DWELL_TARGET_HOURS = float(os.getenv("AUDIT_DWELL_TARGET_HOURS", "24"))
+AUDIT_DWELL_TARGET_HOURS = STAGING_TARGET_HOURS
 
 
 # Warehouse/location pairs the clearance metric watches.

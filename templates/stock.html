@@ -11,6 +11,7 @@
       {% set active_nav = 'lookup' %}
       {% set active_sub = 'stock' %}
       {% include '_topnav.html' %}
+      {% if return_to %}<a class="button tertiary" href="{{ return_to }}">Back to results</a>{% endif %}
 
       <section class="hero card">
         <div class="hero-top">
@@ -28,6 +29,7 @@
 
       <section class="card">
         <form method="get" action="{{ url_for('lookup.stock_page') }}" class="filters-row" data-no-loading>
+          {% if return_to %}<input type="hidden" name="return_to" value="{{ return_to }}" />{% endif %}
           <label>SKU / part
             <input type="text" name="part" id="stock-part" value="{{ part }}" list="stock-part-options" placeholder="801-06486-00" autocomplete="off" />
             <datalist id="stock-part-options"></datalist>
@@ -82,7 +84,7 @@
                   <td><span class="hold-pill {{ '' if b.class == 'pickable' else 'blocking' if b.class in ['stage', 'international', 'rack10'] else '' }}">{{ b.class_label }}</span></td>
                   <td>{{ b.qty|int }}</td>
                   <td class="mono bin-list">{{ b.serials|join(', ') }}{% if b.serials_truncated %} &hellip; ({{ b.serial_count }} total){% endif %}</td>
-                  <td class="mono">{{ (b.oldest_transaction_at or '')[:10] }}</td>
+                  <td class="mono">{{ b.oldest_transaction_at[:10] if b.oldest_transaction_at else 'Not recorded' }}</td>
                 </tr>
                 {% endfor %}
               </tbody>

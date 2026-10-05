@@ -20,7 +20,7 @@
           </div>
         </div>
         <p class="hero-copy">
-          Every picklist run, newest first, with its row count and export. Start a new run from
+          Recent retained runs (up to 25 per type), newest first, with its row count and export. Start a new run from
           <a href="{{ url_for('runs.index') }}">Run picklist</a>.
         </p>
         <div class="audit-tiles analytics-tiles">
@@ -63,8 +63,8 @@
               </tr>
             </thead>
             <tbody>
-              {% for option in query_options %}
-              {% for run in recent_runs_by_type[option] %}
+              {% for run in recent_runs %}
+              {% set option = run.query_type %}
               <tr>
                 <td><span class="pill run-type {{ option }}">{{ option|capitalize }}</span></td>
                 <td>#{{ run['id'] }}</td>
@@ -92,7 +92,6 @@
                   {% endif %}
                 </td>
               </tr>
-              {% endfor %}
               {% endfor %}
             </tbody>
           </table>

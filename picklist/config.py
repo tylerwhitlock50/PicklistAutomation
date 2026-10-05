@@ -13,6 +13,9 @@ load_dotenv()
 # Project root (the folder that holds sql/, templates/, static/, data/).
 BASE_DIR = Path(__file__).resolve().parents[1]
 
+# One operational target for both shipping and audit staging views.
+STAGING_TARGET_HOURS = 48.0
+
 
 def resolve_path_setting(value: str) -> Path:
     path = Path(value)
@@ -143,7 +146,7 @@ PLAN_SNAPSHOT_RETENTION_DAYS = int(os.getenv("PLAN_SNAPSHOT_RETENTION_DAYS", "60
 
 
 # Staged shipments should leave the building within this many hours.
-STAGE_AGING_TARGET_HOURS = float(os.getenv("STAGE_AGING_TARGET_HOURS", "48"))
+STAGE_AGING_TARGET_HOURS = STAGING_TARGET_HOURS  # compatibility alias for the shared policy
 
 
 # SHIPPING locations whose ID contains this term count as staging bins.

@@ -32,7 +32,7 @@
         </p>
         <ol class="operator-checklist">
           <li>Click <strong>1. Run</strong> for the list you need.</li>
-          <li>Wait until its status returns to <strong>idle</strong>.</li>
+          <li>Wait until its status says <strong>Ready to export</strong>.</li>
           <li>Click <strong>2. Export</strong> when it shows as ready.</li>
         </ol>
         <section class="quick-actions">
@@ -55,7 +55,7 @@
                 data-pl-status
               >
                 <span class="inline-spinner pill-spinner" data-pl-status-spinner {% if not run_state.get('running') %}hidden{% endif %} aria-hidden="true"></span>
-                <span data-pl-status-label>{% if run_state.get('running') %}Running{% elif latest_summary and latest_summary['status'] == 'success' %}Ready{% else %}Idle{% endif %}</span>
+                <span data-pl-status-label>{% if run_state.get('running') %}Running{% elif can_export_latest %}Ready to export{% elif latest_summary and latest_summary['status'] == 'failed' %}Failed{% elif latest_summary and latest_summary['status'] == 'success' %}Export unavailable{% else %}No successful run{% endif %}</span>
               </span>
             </div>
 
@@ -68,7 +68,7 @@
               <span class="inline-spinner" data-quick-action-spinner {% if not run_state.get('running') %}hidden{% endif %} aria-hidden="true"></span>
               <span data-quick-action-message-text>
               {% if run_state.get('running') %}
-              Running now. Wait for idle before exporting.
+              Running now. Wait for Ready to export.
               {% elif latest_summary and latest_summary['status'] == 'success' %}
                 {% if can_export_latest %}
                 Ready to export. Last successful run:
@@ -77,7 +77,7 @@
                 Last run completed, but export data is not available yet. Run again before exporting.
                 {% endif %}
               {% elif latest_summary and latest_summary['status'] == 'failed' %}
-                Last run failed. Run {{ option|capitalize }} again before exporting.
+                Last run failed. Retry the run, or download an earlier successful export from Recent Runs below.
               {% else %}
                 No completed run yet. Start with 1. Run {{ option|capitalize }}.
               {% endif %}
@@ -222,7 +222,7 @@
         <div class="table-header">
           <h2>Live Run Status</h2>
           <p>
-            Polls every {{ ui_refresh_interval_seconds }}s when idle; every 2s while a run is active.
+            Updates every {{ ui_refresh_interval_seconds }}s when not running; every 2s while a run is active.
           </p>
         </div>
         <div class="run-control-grid" id="run-control-grid">
@@ -238,7 +238,7 @@
                 data-run-state
               >
                 <span class="inline-spinner pill-spinner" data-run-state-spinner {% if not run_state.get('running') %}hidden{% endif %} aria-hidden="true"></span>
-                <span data-run-state-label>{% if run_state.get('running') %}running{% else %}idle{% endif %}</span>
+                <span data-run-state-label>{% if run_state.get('running') %}Running{% elif mode_latest and mode_latest.status == 'success' and (mode_latest.export_path or mode_latest.row_count > 0) %}Ready to export{% elif mode_latest and mode_latest.status == 'failed' %}Failed{% elif mode_latest and mode_latest.status == 'success' %}Export unavailable{% else %}No successful run{% endif %}</span>
               </span>
             </p>
             <p class="helper-text" data-run-started-at data-advanced-inline>
@@ -337,9 +337,8 @@
               </tr>
             </thead>
             <tbody>
-              {% for option in query_options %}
-              {% set recent_runs = recent_runs_by_type[option] %}
               {% for run in recent_runs %}
+              {% set option = run.query_type %}
               <tr>
                 <td><span class="pill run-type {{ option }}">{{ option|capitalize }}</span></td>
                 <td>#{{ run['id'] }}</td>
@@ -367,7 +366,6 @@
                   {% endif %}
                 </td>
               </tr>
-              {% endfor %}
               {% endfor %}
             </tbody>
           </table>
@@ -890,7 +888,7 @@
               const stateLabel = stateNode.querySelector("[data-run-state-label]");
               const stateSpinner = stateNode.querySelector("[data-run-state-spinner]");
               if (stateLabel) {
-                stateLabel.textContent = visualState;
+                stateLabel.textContent = isRunning ? "Running" : isSubmitting ? "Starting" : latest && latest.status === "success" && (latest.export_path || Number(latest.row_count) > 0) ? "Ready to export" : latest && latest.status === "failed" ? "Failed" : latest && latest.status === "success" ? "Export unavailable" : "No successful run";
               }
               if (stateSpinner) {
                 stateSpinner.hidden = visualState !== "running";
@@ -960,7 +958,7 @@
               const statusLabel = statusPill.querySelector("[data-pl-status-label]");
               const statusSpinner = statusPill.querySelector("[data-pl-status-spinner]");
               if (statusLabel) {
-                statusLabel.textContent = running ? "Running" : ready ? "Ready" : "Idle";
+                statusLabel.textContent = running ? "Running" : canExportLatest ? "Ready to export" : latest && latest.status === "failed" ? "Failed" : ready ? "Export unavailable" : "No successful run";
               }
               if (statusSpinner) {
                 statusSpinner.hidden = !running;
@@ -974,7 +972,7 @@
 
             if (messageTextNode) {
               if (running) {
-                messageTextNode.textContent = "Running now. Wait for idle before exporting.";
+                messageTextNode.textContent = "Running now. Wait for Ready to export.";
               } else if (latest && latest.status === "success" && canExportLatest) {
                 messageTextNode.textContent =
                   "Ready to export. Last successful run: " + (successAge[queryType] || "just now") + ".";
@@ -982,7 +980,7 @@
                 messageTextNode.textContent =
                   "Last run completed, but export data is not available yet. Run again before exporting.";
               } else if (latest && latest.status === "failed") {
-                messageTextNode.textContent = "Last run failed. Run " + label + " again before exporting.";
+                messageTextNode.textContent = "Last run failed. Retry the run, or download an earlier successful export from Recent Runs below.";
               } else {
                 messageTextNode.textContent = "No completed run yet. Start with 1. Run " + label + ".";
               }

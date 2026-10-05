@@ -61,13 +61,13 @@
         <h2>Open demand &mdash; allocation order</h2>
         <p class="helper-text">
           Priority = Promise Del Date (line overrides header, blanks last), then Promise
-          Ship, desired date, order date. Click a row to reprioritize it. Dimmed rows are
+          Ship, desired date, order date. Choose Review/change date to preview a change. Dimmed rows are
           outside the picklist window; badged rows are not eligible for allocation.
         </p>
         <div id="demand-table"></div>
       </section>
 
-      <section class="card alloc-drawer" id="drawer" hidden>
+      <section class="card alloc-drawer" id="drawer" role="region" aria-labelledby="drawer-title" tabindex="-1" hidden>
         <div class="alloc-drawer-head">
           <div>
             <p class="eyebrow" id="drawer-eyebrow"></p>
@@ -100,7 +100,7 @@
             <p class="helper-text" id="drawer-suggest-hint" hidden></p>
             <label class="audit-field">
               <span>Operator name (audit trail)</span>
-              <input type="text" id="drawer-operator" placeholder="Your name" maxlength="60" />
+              <input type="text" id="drawer-operator" placeholder="Choose operator in the header" readonly />
             </label>
             <label class="audit-field">
               <span>Reason (optional)</span>
@@ -110,7 +110,9 @@
               <button type="button" class="button button-ghost" id="drawer-preview">Preview</button>
               <button type="button" class="button" id="drawer-save" disabled>Save to VISUAL</button>
             </div>
-            <p class="helper-text" id="drawer-hint" hidden></p>
+            <p class="helper-text">Saving changes this order line's Promise Delivery Date in VISUAL. Preview first to review the effect on other orders.</p>
+            <p class="helper-text" id="drawer-change-summary" aria-live="polite"></p>
+            <p class="helper-text" id="drawer-hint" role="status" hidden></p>
           </div>
         </div>
       </section>
@@ -485,15 +487,20 @@
               else td.textContent = c === null || c === undefined ? "" : c;
               tr.appendChild(td);
             });
-            tr.addEventListener("click", function () {
-              selectLine(line);
-            });
+            const actionCell = document.createElement("td");
+            const action = el("button", "button tertiary table-button", "Review/change date");
+            action.type = "button";
+            action.dataset.lineKey = lineKey(line);
+            action.setAttribute("aria-label", "Review/change date for " + line.so + " line " + line.line_no);
+            action.addEventListener("click", function () { selectLine(line); });
+            actionCell.appendChild(action);
+            tr.appendChild(actionCell);
             return tr;
           });
 
           demandTable.appendChild(table(
             ["#", "Order / line", "Customer", "Ordered", "Open qty",
-             "Promise Del", "Promise Ship", "Prod Date", "Supply", "Est. available"],
+             "Promise Del", "Promise Ship", "Prod Date", "Supply", "Est. available", "Action"],
             rows));
           demandCard.hidden = false;
         }
@@ -553,6 +560,7 @@
         }
 
         async function loadPart(partId) {
+          if (drawerBusy) return;
           partId = (partId || "").trim().toUpperCase();
           if (!partId) { partInput.focus(); return; }
           loadButton.disabled = true;
@@ -601,6 +609,10 @@
         const drawerSave = document.getElementById("drawer-save");
         const drawerHint = document.getElementById("drawer-hint");
         let selectedLine = null;
+        let previewedChange = null, drawerBusy = false;
+        function changeKey() { return selectedLine ? JSON.stringify([currentPart, lineKey(selectedLine), pendingNewValue()]) : null; }
+        function invalidatePreview() { previewedChange = null; setPreviewMode(false); updateSaveEnabled(); }
+        window.addEventListener("ops-identity-change", function () { drawerOperator.value = window.OpsIdentity.name(); updateSaveEnabled(); });
 
         try {
           drawerOperator.value = (localStorage.getItem("audit_operator_name") || "").trim();
@@ -616,19 +628,21 @@
         function updateSaveEnabled() {
           const hasOperator = !!drawerOperator.value.trim();
           const hasChange = drawerClear.checked || !!drawerDate.value;
-          drawerSave.disabled = !(hasOperator && hasChange && selectedLine);
+          drawerSave.disabled = drawerBusy || !(hasOperator && hasChange && selectedLine && previewedChange === changeKey());
         }
         drawerOperator.addEventListener("input", updateSaveEnabled);
         drawerDate.addEventListener("input", function () {
           if (drawerDate.value) drawerClear.checked = false;
-          updateSaveEnabled();
+          invalidatePreview();
         });
         drawerClear.addEventListener("change", function () {
           if (drawerClear.checked) drawerDate.value = "";
-          updateSaveEnabled();
+          invalidatePreview();
         });
 
         function selectLine(line) {
+          if (drawerBusy) return;
+          previewedChange = null;
           selectedLine = line;
           selectedKey = lineKey(line);
           drawerEyebrow.textContent = line.customer_id +
@@ -657,17 +671,38 @@
           updateSaveEnabled();
           if (currentPayload) renderDemand(currentPayload, null);
           drawer.scrollIntoView({ behavior: "smooth", block: "nearest" });
+          drawerDate.focus({preventScroll: true});
+          updateChangeSummary();
         }
+
+        function updateChangeSummary() {
+          document.getElementById("drawer-change-summary").textContent = selectedLine
+            ? selectedLine.so + " line " + selectedLine.line_no + ": " +
+              (selectedLine.dates.line_promise_del || "Header date") + " → " +
+              (pendingNewValue() || "Header date") + " in VISUAL."
+            : "";
+        }
+        drawerDate.addEventListener("input", updateChangeSummary);
+        drawerClear.addEventListener("change", updateChangeSummary);
 
         function closeDrawer() {
           drawer.hidden = true;
+          previewedChange = null;
           selectedLine = null;
           selectedKey = null;
         }
         document.getElementById("drawer-close").addEventListener("click", function () {
+          if (drawerBusy) return;
+          const key = selectedKey;
           closeDrawer();
           setPreviewMode(false);
-          if (currentPart) loadPart(currentPart);
+          if (currentPart) loadPart(currentPart).then(function () {
+            const action = Array.from(demandTable.querySelectorAll("button[data-line-key]")).find(function (button) { return button.dataset.lineKey === key; });
+            if (action) action.focus(); else partInput.focus();
+          });
+        });
+        drawer.addEventListener("keydown", function (event) {
+          if (event.key === "Escape") { event.preventDefault(); document.getElementById("drawer-close").click(); }
         });
 
         function pendingNewValue() {
@@ -677,6 +712,7 @@
 
         drawerSuggest.addEventListener("click", async function () {
           if (!selectedLine || !drawerTarget.value) return;
+          const suggestedFor = changeKey();
           drawerSuggest.disabled = true;
           drawerSuggestHint.hidden = true;
           try {
@@ -691,9 +727,11 @@
               drawerSuggestHint.textContent = data.message || "No suggestion available.";
               return;
             }
+            if (suggestedFor !== changeKey()) return;
             drawerDate.value = data.suggested_date || "";
             drawerClear.checked = false;
-            updateSaveEnabled();
+            invalidatePreview();
+            updateChangeSummary();
             drawerSuggestHint.textContent = data.predicted_position ===
               parseInt(drawerTarget.value, 10)
               ? "Setting " + data.suggested_date + " lands this order at position " +
@@ -709,7 +747,12 @@
         });
 
         drawerPreview.addEventListener("click", async function () {
-          if (!selectedLine) return;
+          if (!selectedLine || drawerBusy) return;
+          const requestedChange = changeKey();
+          setPreviewMode(false);
+          previewedChange = null;
+          drawerBusy = true;
+          updateSaveEnabled();
           drawerPreview.disabled = true;
           drawerHint.hidden = true;
           try {
@@ -732,6 +775,12 @@
               drawerHint.textContent = data.message || "Preview failed.";
               return;
             }
+            if (requestedChange !== changeKey()) {
+              drawerHint.hidden = false;
+              drawerHint.textContent = "The date changed while previewing. Preview the current value before saving.";
+              return;
+            }
+            previewedChange = requestedChange;
             setPreviewMode(true,
               selectedLine.so + " line " + selectedLine.line_no + " would move from position " +
               (data.baseline_position === null ? "—" : data.baseline_position) + " to " +
@@ -744,17 +793,24 @@
             drawerHint.hidden = false;
             drawerHint.textContent = "Network error — preview failed.";
           } finally {
+            drawerBusy = false;
             drawerPreview.disabled = false;
+            updateSaveEnabled();
           }
         });
 
         drawerSave.addEventListener("click", async function () {
-          if (!selectedLine) return;
-          const operator = drawerOperator.value.trim();
-          if (!operator) return;
-          try { localStorage.setItem("audit_operator_name", operator); } catch (e) {}
+          if (!selectedLine || drawerBusy || previewedChange !== changeKey()) return;
+          drawerBusy = true;
           drawerSave.disabled = true;
-          drawerHint.hidden = true;
+          const operator = await window.OpsIdentity.confirm();
+          drawerOperator.value = operator;
+          if (!selectedLine || previewedChange !== changeKey()) { drawerBusy = false; updateSaveEnabled(); return; }
+          if (!operator) { drawerBusy = false; updateSaveEnabled(); return; }
+          drawerSave.disabled = true;
+          drawerHint.hidden = false;
+          drawerHint.textContent = "Saving to VISUAL… Please wait.";
+          [drawerDate, drawerClear, drawerSuggest, drawerPreview, drawerReason].forEach(control => control.disabled = true);
           try {
             const resp = await fetch(CONFIG.saveUrl, {
               method: "POST",
@@ -776,8 +832,11 @@
             if (resp.status === 409) {
               drawerHint.hidden = false;
               drawerHint.textContent = (data.message || "Edit conflict.") +
-                " Current value: " + (data.current_value || "blank") + ". Reloading…";
-              setTimeout(function () { loadPart(currentPart); }, 2500);
+                " Current value: " + (data.current_value || "blank") + ". Your proposed date and reason are preserved. Review the current value and preview again before saving.";
+              selectedLine.dates.line_promise_del = data.current_value || null;
+              previewedChange = null;
+              setPreviewMode(false);
+              updateChangeSummary();
               return;
             }
             if (!resp.ok) {
@@ -805,11 +864,14 @@
             flagsEl.appendChild(banner);
             flagsEl.hidden = false;
             loadHistory(currentPart);
-            if (data.warning) loadPart(currentPart);
+            if (data.warning) { drawerBusy = false; loadPart(currentPart); }
           } catch (e) {
             drawerHint.hidden = false;
-            drawerHint.textContent = "Network error — the save may not have completed. Reload before retrying.";
+            previewedChange = null;
+            drawerHint.textContent = "Network error — the save may have completed. Your inputs are preserved. Check the current ERP value before previewing and retrying.";
           } finally {
+            drawerBusy = false;
+            [drawerDate, drawerClear, drawerSuggest, drawerPreview, drawerReason].forEach(control => control.disabled = false);
             updateSaveEnabled();
           }
         });
@@ -820,13 +882,7 @@
           suggestionsEl.hidden = true;
           loadPart(partInput.value);
         });
-        partInput.addEventListener("keydown", function (e) {
-          if (e.key === "Tab" && partInput.value.trim()) {
-            e.preventDefault();
-            suggestionsEl.hidden = true;
-            loadPart(partInput.value);
-          }
-        });
+
 
         if (CONFIG.prefillPart) {
           partInput.value = CONFIG.prefillPart;

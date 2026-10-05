@@ -497,6 +497,23 @@ def _fetch_location_status_rows() -> list[dict[str, Any]]:
         )
 
 
+def unfinished_sessions() -> list[dict[str, Any]]:
+    """Every active audit, including older sessions outside recent history."""
+    if not _available:
+        return []
+    with _engine.connect() as conn:
+        rows = _rows(conn.execute(text("""
+            SELECT s.*, COALESCE((SELECT MAX(scanned_at) FROM audit_scans
+                WHERE session_id = s.id), s.started_at) AS last_activity,
+                s.expected_count AS planned_units,
+                (SELECT COUNT(*) FROM audit_expected e WHERE e.session_id = s.id
+                    AND e.in_scope AND e.status IN ('verified', 'misplaced')) AS done_units
+            FROM audit_sessions s WHERE s.status = 'in_progress'
+            ORDER BY s.started_at
+        """)))
+    return rows
+
+
 def recent_sessions(limit: int = 10) -> list[dict[str, Any]]:
     if not _available:
         return []

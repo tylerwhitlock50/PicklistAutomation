@@ -77,7 +77,7 @@ def start_scheduler() -> None:
     scheduler.add_job(
         execute_picklist_run,
         kwargs={"query_type": DEFAULT_QUERY_TYPE},
-        trigger=CronTrigger(hour=hour, minute=minute),
+        trigger=CronTrigger(hour=hour, minute=minute, timezone=SCHEDULE_TIMEZONE),
         id="daily_picklist_run",
         replace_existing=True,
     )

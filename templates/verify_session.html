@@ -7,10 +7,11 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
   </head>
   <body>
-    <main class="page-shell scan-workspace">
+    <main class="page-shell scan-workspace {{ 'session-closed' if session.status != 'active' else '' }}">
       {% set active_nav = 'work' %}
       {% set active_sub = 'verify' %}
       {% include '_topnav.html' %}
+      {% with messages = get_flashed_messages(with_categories=true) %}{% for category, message in messages %}<p class="flash {{ category }}" role="status">{{ message }}</p>{% endfor %}{% endwith %}
 
       <section class="hero card">
         <div class="hero-top">
@@ -52,6 +53,7 @@
       {% if session.status == 'active' %}
       <section class="card scan-station">
         <h2>Scan guns</h2>
+        <p class="helper-text">Serial scans check guns only. Check component quantities against the packlist using your normal packing process.</p>
         <div class="audit-scan-grid">
           <label class="audit-field">
             <span>Gun serial</span>
@@ -62,7 +64,7 @@
           One scan per gun &mdash; the scanner's Tab/Enter submits automatically. Complete the
           session when the box is empty; anything left unscanned is flagged missing.
         </p>
-        <div id="scan-result" class="audit-scan-result" hidden></div>
+        <div id="scan-result" class="audit-scan-result" role="status" aria-live="polite" hidden></div>
         <div class="actions">
           <button type="button" class="button secondary" id="complete-verify">Complete verification</button>
           <a class="button tertiary" href="{{ url_for('verify.verify_session_export', session_id=session.id) }}" data-no-loading>Export</a>
@@ -78,14 +80,14 @@
       </section>
       {% else %}
       <section class="card">
-        {% if session.status == 'cancelled' %}
-        <h2>Verification cancelled</h2>
-        <p>This box has no verification result from this attempt. Restart to scan all of its guns again.</p>
+        {% if session.status == 'cancelled' or (session.status == 'completed' and session.outcome != 'clean') %}
+        <h2>{{ 'Verification cancelled' if session.status == 'cancelled' else 'Review required: verification issues' }}</h2>
+        <p>{% if session.status == 'cancelled' %}This box has no verification result from this attempt.{% else %}Review missing and problem scans below with your shipping lead and correct the box contents. This result is not a clean verification.{% endif %} Restart after review to scan every gun again; this attempt stays in the history.</p>
         <form method="post" action="{{ url_for('verify.verify_session_start') }}" class="verify-start-form">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
           <input type="hidden" name="packlist_id" value="{{ session.packlist_id }}" />
           <input type="hidden" name="operator" />
-          <button type="submit" class="button">Restart verification</button>
+          <button type="submit" class="button">Restart verification after review</button>
         </form>
         {% endif %}
         <div class="actions">

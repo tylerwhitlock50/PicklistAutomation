@@ -9,8 +9,8 @@
   </head>
   <body>
     <main class="page-shell">
-      {% set active_nav = 'lookup' %}
-      {% set active_sub = 'orders' %}
+      {% set active_nav = 'reports' if request.args.get('from_report') else 'lookup' %}
+      {% set active_sub = 'holds' if active_nav == 'reports' else 'orders' %}
       {% include '_topnav.html' %}
 
       {% with messages = get_flashed_messages(with_categories=true) %}
@@ -39,7 +39,7 @@
           Every open order inside the window, with the reason it is not on the picklist and the team that owns the fix.
           {% if payload.stock_holds_hidden %}Stock holds are hidden: an order with no other hold will be picked as soon as we have the parts.{% endif %}
           {% if payload.rma_hidden %}{{ payload.rma_hidden }} RMA order{{ '' if payload.rma_hidden == 1 else 's' }} hidden.{% endif %}
-          Evaluated {{ (payload.evaluated_at or '')[:16]|replace('T', ' ') }} UTC
+          Evaluated {{ payload.evaluated_at|local_dt }}
           {% if payload.stale_minutes is not none and payload.stale_minutes > 45 %}<strong>({{ payload.stale_minutes }} minutes ago)</strong>{% endif %}.
           {% if payload.error %}<strong>Last refresh failed:</strong> {{ payload.error }}{% endif %}
           {% endif %}
@@ -47,18 +47,20 @@
         <p class="inline-status" id="refresh-status" hidden></p>
 
         {% if not payload.never_run %}
+        <p class="helper-text">Snapshot totals below cover all evaluated orders after stock/RMA exclusions, before search, owner, state, and due-date filters. The table shows {{ orders|length }} matching orders.</p>
+        {% if request.args.get('from_report') %}<p><a href="{{ report_return }}">Back to scorecard</a></p>{% endif %}
         <div class="audit-tiles analytics-tiles">
-          <a class="audit-tile {{ 'tile-missing' if rs.blocked else 'tile-verified' }}" href="{{ url_for('orders.orders_page', state='BLOCKED', owner='') }}">
+          <a class="audit-tile {{ 'tile-missing' if rs.blocked else 'tile-verified' }}" href="{{ filter_url(state='BLOCKED') }}">
             <span class="audit-tile-num">{{ rs.blocked }}</span>
             <span class="audit-tile-label">Blocked</span>
             <span class="audit-tile-sub">someone must act</span>
           </a>
-          <a class="audit-tile {{ 'tile-misplaced' if rs.attention else 'tile-verified' }}" href="{{ url_for('orders.orders_page', state='ATTENTION', owner='') }}">
+          <a class="audit-tile {{ 'tile-misplaced' if rs.attention else 'tile-verified' }}" href="{{ filter_url(state='ATTENTION') }}">
             <span class="audit-tile-num">{{ rs.attention }}</span>
             <span class="audit-tile-label">Attention</span>
             <span class="audit-tile-sub">can ship, worth a look</span>
           </a>
-          <a class="audit-tile tile-verified" href="{{ url_for('orders.orders_page', state='READY', owner='') }}">
+          <a class="audit-tile tile-verified" href="{{ filter_url(state='READY') }}">
             <span class="audit-tile-num">{{ rs.ready }}</span>
             <span class="audit-tile-label">Ready</span>
             <span class="audit-tile-sub">no holds</span>
@@ -70,16 +72,16 @@
           </div>
         </div>
         <div class="owner-chips" aria-label="Filter by owning team">
-          <a class="{{ 'active' if not filters.owner }}" href="{{ url_for('orders.orders_page', owner='', state=filters.state, reason=filters.reason, q=filters.q, window=filters.window) }}">Everyone</a>
+          <a class="{{ 'active' if not filters.owner }}" href="{{ filter_url(owner='') }}">Everyone</a>
           {% for team, count in (rs.by_owner or {}).items() %}
-          <a class="{{ 'active' if filters.owner == team }}" href="{{ url_for('orders.orders_page', owner=team, state=filters.state, reason=filters.reason, q=filters.q, window=filters.window) }}">{{ owner_labels.get(team, team) }} &middot; {{ count }}</a>
+          <a class="{{ 'active' if filters.owner == team }}" href="{{ filter_url(owner=team) }}">{{ owner_labels.get(team, team) }} &middot; {{ count }}</a>
           {% endfor %}
         </div>
         {% endif %}
       </section>
 
       <section class="card">
-        <form method="get" action="{{ url_for('orders.orders_page') }}" class="filters-row" data-no-loading>
+        <form method="get" action="{{ url_for('orders.orders_page') }}" class="filters-row" data-no-loading>{% if request.args.get("from_report") %}<input type="hidden" name="from_report" value="1" /><input type="hidden" name="return_to" value="{{ report_return }}" />{% endif %}
           <label>Owner
             <select name="owner">
               <option value="" {% if not filters.owner %}selected{% endif %}>Everyone</option>
@@ -153,7 +155,7 @@
               {% for o in orders %}
               <tr>
                 <td class="mono">
-                  <a href="{{ url_for('orders.order_detail_page', order_id=o.order_id) }}"><strong>{{ o.order_id }}</strong></a>
+                  <a href="{{ url_for('orders.order_detail_page', order_id=o.order_id, return_to=request.full_path) }}"><strong>{{ o.order_id }}</strong></a>
                   <br /><span class="helper-text">{{ o.order_status }}{% if o.po_ref %} &middot; PO {{ o.po_ref }}{% endif %}</span>
                 </td>
                 <td>{{ o.customer_name or o.customer_id }}<br /><span class="helper-text">{{ o.ship_to.name if o.ship_to else '' }}</span></td>

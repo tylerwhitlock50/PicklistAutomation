@@ -2,8 +2,9 @@
 import os
 from datetime import timedelta
 from typing import Any
+from urllib.parse import urlsplit
 
-from flask import Blueprint, g, jsonify, render_template, request
+from flask import Blueprint, g, jsonify, render_template, request, url_for
 
 from picklist.config import logger
 from picklist.domain import identity, readiness, shipments
@@ -97,8 +98,15 @@ def orders_page():
             blocking_only=filters["blocking"],
         )
     )
+    def filter_url(**changes):
+        args = {key: value for key, value in request.args.items()}
+        args.update({"owner": filters["owner"], "window": filters["window"]})
+        args.update(changes)
+        return url_for("orders.orders_page", **args)
     return render_template(
         "orders.html",
+        filter_url=filter_url,
+        report_return=safe_return_path(request.args.get("return_to")) if request.args.get("return_to") else url_for("shipping.shipping_page", view="scorecard"),
         windows=READINESS_WINDOWS,
         payload=payload,
         orders=orders,
@@ -110,6 +118,14 @@ def orders_page():
     )
 
 
+def safe_return_path(value):
+    """Only internal report/order return links are accepted."""
+    parts = urlsplit(value or "")
+    if not parts.scheme and not parts.netloc and parts.path in ("/orders", "/shipping"):
+        return value
+    return url_for("orders.orders_page")
+
+
 @bp.get("/orders/<order_id>")
 @require_trusted_client
 def order_detail_page(order_id: str):
@@ -119,6 +135,7 @@ def order_detail_page(order_id: str):
     return (
         render_template(
             "order_detail.html",
+            return_to=safe_return_path(request.args.get("return_to")),
             order=detail,
             owner_labels=readiness.OWNER_LABELS,
             bin_labels=readiness.BIN_CLASS_LABELS,

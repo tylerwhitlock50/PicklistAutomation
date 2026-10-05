@@ -57,9 +57,9 @@ def format_schedule_time(time_value: str) -> str:
     return sample.strftime("%H:%M %Z")
 
 
-def _local_dt_filter(value, fmt: str = "%Y-%m-%d %H:%M") -> str:
+def _local_dt_filter(value, fmt: str = "%Y-%m-%d %H:%M %Z") -> str:
     """Render an ISO timestamp (any zone) in plant time for templates."""
-    if not value:
+    if value is None or str(value).strip().lower() in {"", "nat", "nan", "none"}:
         return ""
     if isinstance(value, datetime):
         parsed = value

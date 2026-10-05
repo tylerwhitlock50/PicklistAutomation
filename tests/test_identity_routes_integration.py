@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 _TEST_DB = Path(tempfile.gettempdir()) / f"picklist-identity-routes-{os.getpid()}.db"
@@ -11,7 +12,8 @@ os.environ["RUN_HISTORY_DB_PATH"] = str(_TEST_DB)
 os.environ.pop("OPERATOR_ROSTER_JSON", None)
 os.environ.pop("TEAMS_WEBHOOK_URL", None)
 
-from picklist import app as app_module  # noqa: E402
+with patch("picklist.stores.audit_store.initialize", return_value=False):
+    from picklist import app as app_module  # noqa: E402
 from picklist import config  # noqa: E402
 from picklist import db  # noqa: E402
 from picklist import features  # noqa: E402
@@ -58,9 +60,11 @@ class IdentityRouteTests(unittest.TestCase):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
-        self.assertIn("Who are you?", html)
+        self.assertIn("operator-editor-fields", html)
         self.assertIn('data-team="sales"', html)
-        self.assertIn("X-Operator", html)
+        self.assertIn("data-operator-edit", html)
+        with self.client.get("/static/operator.js") as script:
+            self.assertIn("X-Operator", script.get_data(as_text=True))
 
     def test_dashboard_without_roster_offers_free_text_name(self):
         db.delete_setting("operator_roster_json")
