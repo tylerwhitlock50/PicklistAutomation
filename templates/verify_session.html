@@ -7,7 +7,7 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
   </head>
   <body>
-    <main class="page-shell">
+    <main class="page-shell scan-workspace">
       {% set active_nav = 'work' %}
       {% set active_sub = 'verify' %}
       {% include '_topnav.html' %}
@@ -23,7 +23,7 @@
         <p class="hero-copy">
           {% if session.status == 'completed' %}
           This verification is complete
-          {%- if session.outcome %} &mdash; <strong>{{ 'no issues' if session.outcome == 'clean' else 'issues found' }}</strong>{% endif %}.
+          {%- if session.outcome %} &mdash; <strong>{{ 'Verified — no issues' if session.outcome == 'clean' else 'Closed with issues — review required' }}</strong>{% endif %}.
           Review the results below.
           {% else %}
           Scan every gun in the box. Each serial is checked against what the ERP says
@@ -47,8 +47,8 @@
       </section>
 
       {% if session.status != 'completed' %}
-      <section class="card">
-        <h2>Scan</h2>
+      <section class="card scan-station">
+        <h2>Scan guns</h2>
         <div class="audit-scan-grid">
           <label class="audit-field">
             <span>Gun serial</span>
@@ -64,24 +64,24 @@
           <button type="button" class="button secondary" id="complete-verify">Complete verification</button>
           <a class="button tertiary" href="{{ url_for('verify.verify_session_export', session_id=session.id) }}" data-no-loading>Export</a>
         </div>
-        <div class="audit-log" id="scan-log" aria-live="polite">
+        <details class="scan-history"><summary>Recent scans</summary><div class="audit-log" id="scan-log" aria-live="polite">
           {% for scan in scans[:25] %}
           <div class="audit-log-entry result-{{ 'verified' if scan.result == 'verified' else ('misplaced' if scan.result == 'duplicate' else 'unexpected') }}">
             {{ scan.scan_value }} &mdash; {{ scan.message }}
           </div>
           {% endfor %}
-        </div>
+        </div></details>
       </section>
       {% else %}
       <section class="card">
         <div class="actions">
-          <a class="button secondary" href="{{ url_for('shipping.shipping_page', view='verify') }}#verify-start">Verify next packlist</a>
+          <a class="button secondary" href="{{ url_for('shipping.shipping_page', view='verify') }}#verify-start">Scan next packlist</a>
           <a class="button secondary" href="{{ url_for('verify.verify_session_export', session_id=session.id) }}" data-no-loading>Export results</a>
         </div>
       </section>
       {% endif %}
 
-      <section class="card">
+      <section class="card"><details class="work-details" ><summary>Expected serials</summary>
         <div class="table-controls">
           <h2>Expected serials</h2>
           <input type="search" data-table-filter placeholder="Filter serials, parts..." aria-label="Filter expected serials" />
@@ -116,10 +116,10 @@
             </tbody>
           </table>
         </div>
-      </section>
+      </details></section>
 
       {% if info_rows %}
-      <section class="card">
+      <section class="card"><details class="work-details" open><summary>Non-serialized lines</summary>
         <h2>Non-serialized lines</h2>
         <p class="helper-text">These shipped on the packlist but carry no serial numbers &mdash; visual check only, not part of scan verification.</p>
         <div class="table-wrap">
@@ -138,7 +138,7 @@
             </tbody>
           </table>
         </div>
-      </section>
+      </details></section>
       {% endif %}
 
       {% if session.status == 'completed' and scans %}
@@ -212,6 +212,8 @@
         const scanResult = document.getElementById("scan-result");
         const scanLog = document.getElementById("scan-log");
         let submitting = false;
+        const pendingScans = [];
+        let remaining = {{ counts.remaining }};
 
         function showResult(kind, message) {
           scanResult.hidden = false;
@@ -228,6 +230,7 @@
 
         function applyCounts(counts) {
           if (!counts) return;
+          remaining = counts.remaining;
           document.querySelectorAll("[data-tile]").forEach(function (el) {
             const key = el.getAttribute("data-tile");
             if (counts[key] !== undefined) el.textContent = counts[key];
@@ -245,19 +248,24 @@
         }
 
         async function submitScan(value) {
+          pendingScans.push(value);
           if (submitting) return;
           submitting = true;
+          document.getElementById("complete-verify").disabled = true;
+          while (pendingScans.length) {
+          const value = pendingScans.shift();
           try {
+            const operator = await OpsIdentity.confirm();
             const resp = await fetch(VERIFY.scanUrl, {
               method: "POST",
               headers: { "Content-Type": "application/json", "X-CSRF-Token": VERIFY.csrfToken },
-              body: JSON.stringify({ scan: value, operator: VERIFY.operator }),
+              body: JSON.stringify({ scan: value, operator: operator }),
             });
             const data = await resp.json();
             if (!resp.ok) {
               showResult("problem", "Error: " + (data.message || resp.status));
               beep("problem");
-              return;
+              continue;
             }
             const prefix = {
               verified: "✔ ", duplicate: "⚠ DUPLICATE ",
@@ -272,10 +280,11 @@
             showResult("problem", "Network error — scan " + value + " was NOT recorded. Try again.");
             beep("problem");
           } finally {
-            submitting = false;
-            scanInput.value = "";
             scanInput.focus();
           }
+          }
+          submitting = false;
+          document.getElementById("complete-verify").disabled = false;
         }
 
         scanInput.addEventListener("keydown", function (e) {
@@ -289,7 +298,14 @@
         });
 
         document.getElementById("complete-verify").addEventListener("click", async function () {
-          if (!confirm("Complete this verification? Anything not scanned will be flagged missing.")) return;
+          if (submitting || pendingScans.length) return;
+          await OpsIdentity.confirm();
+          const message = remaining > 0
+            ? "Close with issues? " + remaining + " gun(s) have not been scanned and will be flagged missing."
+            : "Complete verification for this packlist?";
+          if (!confirm(message)) return;
+          const button = document.getElementById("complete-verify");
+          button.disabled = true; scanInput.readOnly = true;
           try {
             const resp = await fetch(VERIFY.completeUrl, {
               method: "POST",
@@ -300,6 +316,7 @@
             if (resp.ok && data.redirect) { window.location.href = data.redirect; }
             else { alert(data.message || "Could not complete the verification."); }
           } catch (err) { alert("Network error completing the verification."); }
+          finally { button.disabled = false; scanInput.readOnly = false; }
         });
 
         scanInput.focus();

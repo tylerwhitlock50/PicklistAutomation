@@ -817,11 +817,13 @@ def build_verify_daily_payload(
     return payload
 
 
-def build_pick_order_queue() -> dict[str, Any]:
+def build_pick_order_queue(pick_type: str | None = None) -> dict[str, Any]:
     """Combine the latest guns/components plans into one order work queue."""
     source_runs: dict[str, int] = {}
     plan_rows: list[dict[str, Any]] = []
     for query_type in QUERY_FILES:
+        if pick_type and query_type != pick_type:
+            continue
         run, rows = get_latest_successful_run(query_type=query_type)
         if not run:
             continue
@@ -829,7 +831,7 @@ def build_pick_order_queue() -> dict[str, Any]:
         for row in rows:
             plan_rows.append({**row, "_query_type": query_type})
 
-    claimed = pick_store.claimed_orders()
+    claimed = pick_store.claimed_orders(pick_type)
     by_order: dict[str, dict[str, Any]] = {}
     for row in plan_rows:
         order_id = str(row.get("Cust Order ID") or "").strip().upper()

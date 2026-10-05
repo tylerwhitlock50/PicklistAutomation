@@ -143,7 +143,10 @@ def shipping_page():
     elif view == "pick":
         pick_sessions = _recent_sessions_for_display(pick_store)
         latest_success_by_type = _latest_success_by_type()
-        pick_orders = build_pick_order_queue()["orders"]
+        pick_type = request.args.get("pick_type", "guns")
+        if pick_type not in ("guns", "components"):
+            pick_type = "guns"
+        pick_orders = build_pick_order_queue(pick_type)["orders"]
         ready_for_pack = pick_store.ready_for_pack_orders(limit=100)
         for row in ready_for_pack:
             row["completed_display"] = _audit_dt_display(row.get("completed_at"))
@@ -161,6 +164,7 @@ def shipping_page():
         latest_success_by_type=latest_success_by_type,
         query_options=list(QUERY_FILES.keys()),
         pick_orders=pick_orders,
+        pick_type=request.args.get("pick_type", "guns") if request.args.get("pick_type", "guns") in ("guns", "components") else "guns",
         ready_for_pack=ready_for_pack,
         max_pick_orders=pick_store.MAX_ORDERS_PER_SESSION,
         today_iso=_today_local().isoformat(),

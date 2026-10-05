@@ -2870,3 +2870,28 @@ details.detail-section > .table-wrap {
   clip: rect(0 0 0 0);
   white-space: nowrap;
 }
+/* Operator work screens keep scanning and progress together. */
+.scan-workspace { max-width: 1120px; }
+.scan-workspace .hero { padding: 16px 20px; }
+.scan-workspace .hero h1 { font-size: 1.5rem; }
+.scan-workspace .hero-copy { font-size: .9rem; margin-bottom: 0; }
+.scan-workspace .audit-tiles { padding: 10px; gap: 8px; }
+.scan-workspace .audit-tile { padding: 8px; }
+.scan-workspace .audit-tile-num { font-size: 1.5rem; }
+.scan-workspace .scan-station { position: sticky; top: 8px; z-index: 5; box-shadow: 0 4px 18px rgba(0,0,0,.08); }
+.scan-workspace .scan-station input { font-size: 1.15rem; min-height: 48px; }
+.scan-workspace .scan-station input[readonly] { background: #edf1f5; cursor: wait; }
+.scan-workspace .scan-history { margin-top: 12px; }
+.scan-workspace .scan-history summary { cursor: pointer; }
+.single-guns .audit-scan-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.single-guns .pick-wave-order { padding: 10px; }
+.single-guns .pick-order-actions { margin-top: 4px; }
+.operator-confirm { border: 1px solid #ccd4df; border-radius: 12px; padding: 24px; max-width: 420px; width: calc(100% - 40px); }
+.operator-confirm::backdrop { background: rgba(15,23,42,.55); }
+.operator-confirm label, .operator-confirm input { display: block; width: 100%; }
+.operator-confirm input { box-sizing: border-box; min-height: 48px; margin: 8px 0 16px; }
+@media (max-width: 700px) {
+  .single-guns .audit-scan-grid { grid-template-columns: 1fr; }
+  .scan-workspace .scan-station { position: static; }
+  .scan-workspace .audit-tiles { grid-template-columns: repeat(3, 1fr); }
+}

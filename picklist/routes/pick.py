@@ -24,17 +24,21 @@ bp = Blueprint("pick", __name__)
 def pick_session_start():
     operator = (request.form.get("operator") or "").strip() or None
     selected_orders = request.form.getlist("orders")
-    queue = build_pick_order_queue()
+    pick_type = request.form.get("pick_type", "guns")
+    if pick_type not in ("guns", "components"):
+        return jsonify({"message": "Choose guns or components."}), 400
+    queue = build_pick_order_queue(pick_type)
     try:
         session_id = pick_store.start_order_session(
             plan_rows=queue["plan_rows"],
             selected_orders=selected_orders,
             source_runs=queue["source_runs"],
             operator=operator,
+            pick_type=pick_type,
         )
     except ValueError as exc:
         flash(str(exc), "error")
-        return redirect(url_for("shipping.shipping_page", view="pick"))
+        return redirect(url_for("shipping.shipping_page", view="pick", pick_type=pick_type))
     logger.info(
         "Started order pick session #%s for %s.",
         session_id,
@@ -237,6 +241,19 @@ def api_pick_scan(session_id: int):
             502,
         )
 
+    checked_upc = str(payload.get("upc") or "").strip().upper() or None
+    upc_parts = []
+    if session_row.get("workflow_mode") == "single_guns":
+        if not checked_upc or len(checked_upc) > SERIAL_MAX_LENGTH:
+            return jsonify({"message": "Scan the item UPC before its serial."}), 400
+        upc_parts = [line["part_id"] for line in lines if str(line.get("upc") or "").upper() == checked_upc]
+        if not upc_parts:
+            try:
+                upc_df = run_erp_query_file(PICK_UPC_LOOKUP_FILE, {"upc": checked_upc}, "gun UPC lookup")
+                upc_parts = [str(row.get("PART_ID") or "") for row in upc_df.to_dict(orient="records")]
+            except Exception:
+                logger.exception("Gun UPC lookup failed")
+                return jsonify({"message": "UPC lookup failed. Retry this item."}), 502
     try:
         result = pick_store.record_scan(
             session_id,
@@ -249,6 +266,8 @@ def api_pick_scan(session_id: int):
             request_id=request_id,
             scanned_tote=scanned_tote,
             scanned_location=scanned_location,
+            checked_upc=checked_upc,
+            upc_parts=upc_parts,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to record pick scan: %s", exc)

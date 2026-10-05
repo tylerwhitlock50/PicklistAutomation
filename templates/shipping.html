@@ -831,17 +831,20 @@
           <div>
             <h2>Select orders to pick</h2>
             <p class="helper-text">
-              Default to one order, or create a controlled wave of up to
-              <strong>{{ max_pick_orders }}</strong>. Each selected order gets its own tote.
+              {% if pick_type == 'guns' %}One order per cart. Start an order to claim it, then scan shelf, UPC and serial.
+              {% else %}Pick one order, or select up to {{ max_pick_orders }} with a separate tote for each.{% endif %}
             </p>
           </div>
         </div>
-        <form method="post" action="{{ url_for('pick.pick_session_start') }}" class="pick-start-form" data-max-orders="{{ max_pick_orders }}" data-loading-message="Claiming selected orders&hellip;">
+        <form method="post" action="{{ url_for('pick.pick_session_start') }}" class="pick-start-form" data-max-orders="{{ 1 if pick_type == 'guns' else max_pick_orders }}" data-loading-message="Claiming selected orders&hellip;">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
-          <label class="audit-operator">
-            <span>Operator</span>
-            <input type="text" id="operator-name" name="operator" placeholder="Your name or initials" autocomplete="off" required />
-          </label>
+          <input type="hidden" name="operator" data-operator-field />
+          <input type="hidden" name="pick_type" value="{{ pick_type }}" />
+          <div class="actions pick-type-toggle" aria-label="Picking team">
+            <a class="button {{ 'secondary' if pick_type == 'guns' else 'tertiary' }}" href="{{ url_for('shipping.shipping_page', view='pick', pick_type='guns') }}" aria-current="{{ 'page' if pick_type == 'guns' else 'false' }}">Guns</a>
+            <a class="button {{ 'secondary' if pick_type == 'components' else 'tertiary' }}" href="{{ url_for('shipping.shipping_page', view='pick', pick_type='components') }}" aria-current="{{ 'page' if pick_type == 'components' else 'false' }}">Components</a>
+          </div>
+          <label class="audit-field"><span>Scan an order or search the queue</span><input id="pick-order-search" autocomplete="off" placeholder="Sales order or customer" /></label>
           {% if pick_orders %}
           <div class="table-wrap pick-order-queue">
             <table>
@@ -863,7 +866,7 @@
             </table>
           </div>
           <div class="actions">
-            <button type="submit" class="button" data-start-wave disabled>Start selected orders</button>
+            <button type="submit" class="button" data-start-wave disabled>Start picking</button>
             <span class="helper-text" data-selection-count>0 of {{ max_pick_orders }} selected</span>
           </div>
           {% else %}
@@ -909,14 +912,14 @@
 
       {% if ready_for_pack %}
       <section class="card">
-        <h2>Ready for packing</h2>
-        <p class="helper-text">These orders are fully picked and include their accepted serial/UPC scan history.</p>
+        <h2>Completed picking</h2>
+        <p class="helper-text">These picking assignments are complete. Mixed orders need both teams to finish before packing.</p>
         <div class="table-wrap">
           <table>
             <thead><tr><th>Order</th><th>Customer</th><th>Tote</th><th>Picker</th><th>Ready</th><th>Pick session</th></tr></thead>
             <tbody>
               {% for order in ready_for_pack %}
-              <tr><td class="mono"><strong>{{ order.cust_order_id }}</strong></td><td>{{ order.customer_id or '' }}</td><td>{{ order.tote_code }}</td><td>{{ order.operator or '' }}</td><td>{{ order.completed_display or '' }}</td><td><a href="{{ url_for('pick.pick_session_page', session_id=order.pick_session_id) }}">#{{ order.pick_session_id }}</a></td></tr>
+              <tr><td class="mono"><strong>{{ order.cust_order_id }}</strong></td><td>{{ order.customer_id or '' }}</td><td>{{ order.query_type|capitalize }} · {{ order.tote_code }}</td><td>{{ order.operator or '' }}</td><td>{{ order.completed_display or '' }}</td><td><a href="{{ url_for('pick.pick_session_page', session_id=order.pick_session_id) }}">#{{ order.pick_session_id }}</a></td></tr>
               {% endfor %}
             </tbody>
           </table>
@@ -936,10 +939,6 @@
             </p>
           </div>
         </div>
-        <label class="audit-operator">
-          <span>Operator (optional)</span>
-          <input type="text" id="operator-name" placeholder="Your name or initials" autocomplete="off" />
-        </label>
         <form method="post" action="{{ url_for('verify.verify_session_start') }}" class="verify-start-form actions" data-loading-message="Loading the packlist from the ERP&hellip;">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
           <input type="hidden" name="operator" value="" data-operator-field />
@@ -1099,24 +1098,6 @@
     </main>
 
     <script>
-      // Shared operator name with the audit pages (pick view only; no-ops elsewhere).
-      (function () {
-        var STORAGE_KEY = "audit_operator_name";
-        var input = document.getElementById("operator-name");
-        if (input) {
-          try { input.value = localStorage.getItem(STORAGE_KEY) || ""; } catch (e) {}
-          input.addEventListener("input", function () {
-            try { localStorage.setItem(STORAGE_KEY, input.value.trim()); } catch (e) {}
-          });
-        }
-        document.querySelectorAll(".pick-start-form, .verify-start-form").forEach(function (form) {
-          form.addEventListener("submit", function () {
-            var field = form.querySelector("[data-operator-field]");
-            if (field && input) field.value = input.value.trim();
-          });
-        });
-      })();
-
       // Controlled micro-batch: one order by default, never more than three.
       (function () {
         const form = document.querySelector(".pick-start-form[data-max-orders]");
@@ -1142,6 +1123,19 @@
           const selected = boxes.filter(function (box) { return box.checked; }).length;
           if (selected < 1 || selected > max) event.preventDefault();
         });
+        const search = document.getElementById("pick-order-search");
+        if (search) {
+          search.addEventListener("input", function () {
+            const term = search.value.trim().toUpperCase();
+            boxes.forEach(function (box) { box.closest("tr").hidden = !!term && !box.closest("tr").textContent.toUpperCase().includes(term); });
+          });
+          search.addEventListener("keydown", function (event) {
+            if (event.key !== "Enter" && event.key !== "Tab") return;
+            const match = boxes.find(function (box) { return !box.disabled && box.value.toUpperCase() === search.value.trim().toUpperCase(); });
+            if (!match) { if (event.key === "Enter") event.preventDefault(); return; }
+            event.preventDefault(); boxes.forEach(function (box) { box.checked = box === match; }); update(match); form.requestSubmit(button);
+          });
+        }
         update(null);
       })();
 

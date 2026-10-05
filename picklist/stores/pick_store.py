@@ -135,6 +135,8 @@ def initialize(get_conn: Callable[[], sqlite3.Connection]) -> None:
             """
         )
         _ensure_column(conn, "pick_sessions", "source_runs_json", "TEXT")
+        _ensure_column(conn, "pick_sessions", "workflow_mode", "TEXT NOT NULL DEFAULT 'legacy'")
+        _ensure_column(conn, "pick_scans", "checked_upc", "TEXT")
         _ensure_column(conn, "pick_lines", "item_type", "TEXT NOT NULL DEFAULT 'guns'")
         _ensure_column(conn, "pick_lines", "upc", "TEXT")
         _ensure_column(conn, "pick_scans", "target_order", "TEXT")
@@ -274,6 +276,7 @@ def start_order_session(
     selected_orders: list[str],
     source_runs: dict[str, int],
     operator: Optional[str] = None,
+    pick_type: Optional[str] = None,
 ) -> int:
     """Claim one to three orders and snapshot only their pick lines."""
     operator_name = (operator or "").strip()
@@ -288,6 +291,10 @@ def start_order_session(
         )
 
     selected_set = set(selected)
+    if pick_type not in (None, "guns", "components"):
+        raise ValueError("Choose guns or components.")
+    if pick_type == "guns" and len(selected) != 1:
+        raise ValueError("Gun picking requires exactly one order per cart.")
     customers: dict[str, Optional[str]] = {}
     lines: dict[tuple[str, str, str, str, str], dict] = {}
     for row in plan_rows:
@@ -300,6 +307,8 @@ def start_order_session(
         customer = str(row.get("Customer ID") or "").strip() or None
         location = _norm(row.get("Location"))
         item_type = str(row.get("_query_type") or "guns").strip().lower()
+        if pick_type and item_type != pick_type:
+            continue
         upc = _norm(row.get("UPC") or row.get("GTIN") or row.get("Barcode"))
         customers.setdefault(order, customer)
         key = (order, part, location, item_type, upc)
@@ -342,6 +351,14 @@ def start_order_session(
                 f"You already have {active_for_operator} active order(s); "
                 f"you can claim {available} more."
             )
+        if pick_type == "guns" and conn.execute(
+            """SELECT 1 FROM pick_orders po JOIN pick_sessions ps ON ps.id = po.session_id
+               WHERE ps.status = 'active' AND po.status = 'picking'
+                 AND ps.query_type IN ('guns', 'mixed')
+                 AND UPPER(TRIM(COALESCE(po.assigned_operator, ps.operator, ''))) = ?""",
+            (_norm(operator_name),),
+        ).fetchone():
+            raise ValueError("Resume or finish your active gun order before starting another.")
         placeholders = ",".join("?" for _ in selected)
         claimed = conn.execute(
             f"""
@@ -349,12 +366,13 @@ def start_order_session(
             FROM pick_orders po
             JOIN pick_sessions ps ON ps.id = po.session_id
             WHERE po.cust_order_id IN ({placeholders})
+              AND (? IS NULL OR ps.query_type IN (?, 'mixed'))
               AND (
                     (ps.status = 'active' AND po.status = 'picking')
                     OR po.status IN ('ready_for_pack', 'packing', 'exception')
                   )
             """,
-            selected,
+            [*selected, pick_type, pick_type],
         ).fetchall()
         legacy_claimed = conn.execute(
             f"""
@@ -362,12 +380,13 @@ def start_order_session(
             FROM pick_lines pl
             JOIN pick_sessions ps ON ps.id = pl.session_id
             WHERE pl.cust_order_id IN ({placeholders})
+              AND (? IS NULL OR ps.query_type IN (?, 'mixed'))
               AND ps.status = 'active'
               AND NOT EXISTS (
                   SELECT 1 FROM pick_orders po WHERE po.session_id = ps.id
               )
             """,
-            selected,
+            [*selected, pick_type, pick_type],
         ).fetchall()
         claimed = [*claimed, *legacy_claimed]
         if claimed:
@@ -377,7 +396,7 @@ def start_order_session(
             )
 
         run_id = max(source_runs.values()) if source_runs else 0
-        query_type = next(iter(source_runs)) if len(source_runs) == 1 else "mixed"
+        query_type = pick_type or (next(iter(source_runs)) if len(source_runs) == 1 else "mixed")
         cursor = conn.execute(
             """
             INSERT INTO pick_sessions
@@ -393,6 +412,8 @@ def start_order_session(
             ),
         )
         session_id = int(cursor.lastrowid)
+        conn.execute("UPDATE pick_sessions SET workflow_mode = ? WHERE id = ?",
+                     ("single_guns" if pick_type == "guns" else "legacy", session_id))
         conn.executemany(
             """
             INSERT INTO pick_orders
@@ -476,16 +497,17 @@ def get_orders(session_id: int) -> list[dict]:
     return [dict(row) for row in rows]
 
 
-def claimed_orders() -> set[str]:
+def claimed_orders(pick_type: Optional[str] = None) -> set[str]:
     with _conn() as conn:
         rows = conn.execute(
             """
             SELECT DISTINCT po.cust_order_id
             FROM pick_orders po
             JOIN pick_sessions ps ON ps.id = po.session_id
-            WHERE (ps.status = 'active' AND po.status = 'picking')
-               OR po.status IN ('ready_for_pack', 'packing', 'exception')
-            """
+            WHERE ((ps.status = 'active' AND po.status = 'picking')
+               OR po.status IN ('ready_for_pack', 'packing', 'exception'))
+               AND (? IS NULL OR ps.query_type IN (?, 'mixed'))
+            """, (pick_type, pick_type)
         ).fetchall()
         legacy_rows = conn.execute(
             """
@@ -493,10 +515,11 @@ def claimed_orders() -> set[str]:
             FROM pick_lines pl
             JOIN pick_sessions ps ON ps.id = pl.session_id
             WHERE ps.status = 'active'
+              AND (? IS NULL OR ps.query_type IN (?, 'mixed'))
               AND NOT EXISTS (
                   SELECT 1 FROM pick_orders po WHERE po.session_id = ps.id
               )
-            """
+            """, (pick_type, pick_type)
         ).fetchall()
     return {
         row["cust_order_id"]
@@ -509,7 +532,7 @@ def ready_for_pack_orders(limit: int = 100) -> list[dict]:
     with _conn() as conn:
         rows = conn.execute(
             """
-            SELECT po.*, ps.operator, ps.id AS pick_session_id
+            SELECT po.*, ps.operator, ps.query_type, ps.id AS pick_session_id
             FROM pick_orders po
             JOIN pick_sessions ps ON ps.id = po.session_id
             WHERE po.status = 'ready_for_pack'
@@ -591,6 +614,16 @@ def order_action(
         ).fetchone()["picked"]
 
         from_operator = row["assigned_operator"]
+        workflow = conn.execute("SELECT workflow_mode FROM pick_sessions WHERE id = ?", (session_id,)).fetchone()
+        if workflow["workflow_mode"] == "single_guns" and action_name in {"transfer", "resume"}:
+            receiver = recipient if action_name == "transfer" else actor
+            if conn.execute(
+                """SELECT 1 FROM pick_orders po JOIN pick_sessions ps ON ps.id = po.session_id
+                   WHERE po.id != ? AND po.status = 'picking' AND ps.status = 'active'
+                     AND ps.query_type IN ('guns', 'mixed') AND UPPER(TRIM(po.assigned_operator)) = ?""",
+                (row["id"], _norm(receiver)),
+            ).fetchone():
+                raise ValueError(f"{receiver} already has an active gun order.")
         if action_name == "release":
             if picked:
                 raise ValueError(
@@ -678,45 +711,35 @@ def order_action(
     }
 
 
-def attach_packlist(cust_order_id: str, packlist_id: str) -> bool:
-    """Attach the ERP packlist to the newest ready order and leave the queue."""
-    order = _norm(cust_order_id)
-    packlist = _norm(packlist_id)
+def attach_packlist(cust_order_id: str, packlist_id: str, required_types: Optional[set[str]] = None) -> bool:
+    """Attach a packlist only after all known picking teams have finished."""
+    order, packlist = _norm(cust_order_id), _norm(packlist_id)
     if not order or not packlist:
         return False
     with _conn() as conn:
-        row = conn.execute(
-            """
-            SELECT id, session_id, assigned_operator FROM pick_orders
-            WHERE cust_order_id = ? AND status = 'ready_for_pack'
-            ORDER BY id DESC LIMIT 1
-            """,
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            """SELECT po.*, ps.query_type FROM pick_orders po
+               JOIN pick_sessions ps ON ps.id = po.session_id
+               WHERE po.cust_order_id = ? AND po.status IN ('picking', 'exception', 'ready_for_pack', 'packing')""",
             (order,),
-        ).fetchone()
-        if not row:
+        ).fetchall()
+        if any(row["status"] in ('picking', 'exception') for row in rows):
             return False
-        conn.execute(
-            """
-            UPDATE pick_orders
-            SET status = 'packing', packlist_id = ?, packed_at = ?
-            WHERE id = ?
-            """,
-            (packlist, _now_iso(), row["id"]),
-        )
-        conn.execute(
-            """
-            INSERT INTO pick_order_events
-                (session_id, cust_order_id, event_type, operator, created_at, details_json)
-            VALUES (?, ?, 'packlist_attached', ?, ?, ?)
-            """,
-            (
-                row["session_id"],
-                order,
-                row["assigned_operator"],
-                _now_iso(),
-                json.dumps({"packlist_id": packlist}),
-            ),
-        )
+        ready = [row for row in rows if row["status"] == 'ready_for_pack']
+        finished_types = {row["query_type"] for row in rows}
+        if not ready or (required_types and 'mixed' not in finished_types and not required_types.issubset(finished_types)):
+            return False
+        now = _now_iso()
+        for row in ready:
+            conn.execute("UPDATE pick_orders SET status = 'packing', packlist_id = ?, packed_at = ? WHERE id = ?",
+                         (packlist, now, row["id"]))
+            conn.execute(
+                """INSERT INTO pick_order_events
+                   (session_id, cust_order_id, event_type, operator, created_at, details_json)
+                   VALUES (?, ?, 'packlist_attached', ?, ?, ?)""",
+                (row["session_id"], order, row["assigned_operator"], now, json.dumps({"packlist_id": packlist})),
+            )
     return True
 
 
@@ -1179,6 +1202,8 @@ def record_scan(
     request_id: Optional[str] = None,
     scanned_tote: Optional[str] = None,
     scanned_location: Optional[str] = None,
+    checked_upc: Optional[str] = None,
+    upc_parts: Optional[list[str]] = None,
 ) -> dict:
     """Verify a serial/UPC against one claimed order and record the event."""
     scan_value = _norm(scan_value)
@@ -1220,6 +1245,8 @@ def record_scan(
             """,
             (session_id,),
         ).fetchall()
+        workflow = conn.execute("SELECT workflow_mode FROM pick_sessions WHERE id = ?", (session_id,)).fetchone()
+        single_guns = workflow and workflow["workflow_mode"] == "single_guns"
         candidate_parts = {
             _norm(candidate.get("part_id"))
             for candidate in candidates
@@ -1275,7 +1302,7 @@ def record_scan(
                 f"{target} is assigned to {order_row['assigned_operator']}; "
                 "transfer it before scanning."
             )
-        elif order_row and tote not in expected_totes:
+        elif order_row and not single_guns and tote not in expected_totes:
             result = RESULT_WRONG_TOTE
             message = (
                 f"Scan tote {order_row['tote_barcode']} for {target} before the item."
@@ -1286,6 +1313,10 @@ def record_scan(
                 f"{location_context or 'No location'} is not a planned location for "
                 f"{target}; expected {', '.join(sorted(valid_locations))}."
             )
+        elif single_guns and (not serial or not checked_upc or not upc_parts
+                              or not candidate_parts.intersection({_norm(p) for p in upc_parts})):
+            result = RESULT_WRONG_ITEM
+            message = "Scan the item UPC, then a matching firearm serial."
         elif unknown or not candidates:
             pass
         elif duplicate:
@@ -1323,6 +1354,8 @@ def record_scan(
                 for line in order_lines
                 if line["picked_qty"] < line["planned_qty"]
             ]
+            if single_guns:
+                open_lines = [line for line in open_lines if _norm(line["part_id"]) in {_norm(p) for p in upc_parts or []}]
             if serial and open_lines:
                 locations_by_part = {
                     _norm(candidate.get("part_id")): {
@@ -1416,8 +1449,8 @@ def record_scan(
             INSERT INTO pick_scans
                 (session_id, line_id, scan_value, serial, part_id, target_order,
                  result, message, operator, scanned_at, request_id, scanned_tote,
-                 scanned_location)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 scanned_location, checked_upc)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -1434,6 +1467,7 @@ def record_scan(
                 request_token,
                 tote,
                 location_context,
+                checked_upc,
             ),
         )
 

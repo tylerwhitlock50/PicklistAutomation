@@ -13,7 +13,7 @@ from picklist.config import (
 )
 from picklist.erp import run_erp_query_file
 from picklist.security import require_csrf, require_trusted_client
-from picklist.services.shipping_service import build_verify_daily_payload
+from picklist.services.shipping_service import build_verify_daily_payload, build_pick_order_queue
 from picklist.stores import pick_store, verify_store
 from picklist.timeutil import _audit_dt_display
 from picklist.util import _audit_json_safe
@@ -78,9 +78,11 @@ def verify_session_start():
     if shipper_status in ("X", "V"):
         flash(f"{packlist_id} is voided in the ERP — nothing to verify.", "error")
         return redirect(url_for("shipping.shipping_page", view="verify"))
-    pick_attached = pick_store.attach_packlist(
-        header.get("CUST_ORDER_ID"), packlist_id
-    )
+    order_id = str(header.get("CUST_ORDER_ID") or "").strip().upper()
+    required_types = {row["_query_type"] for row in build_pick_order_queue()["plan_rows"]
+                      if str(row.get("Cust Order ID") or "").strip().upper() == order_id}
+    pick_attached = pick_store.attach_packlist(order_id, packlist_id, required_types)
+
     if not any(str(r.get("TRACE_ID") or "").strip() for r in rows):
         if pick_attached:
             flash(

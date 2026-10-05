@@ -35,6 +35,66 @@ class PickStoreOrderFlowTests(unittest.TestCase):
             "_query_type": item_type,
         }
 
+    def test_teams_can_claim_same_order_independently(self):
+        rows = [self.row("SO-1", "GUN", "guns", upc="123"), self.row("SO-1", "COMP", "components")]
+        gun = pick_store.start_order_session(plan_rows=rows, selected_orders=["SO-1"],
+            source_runs={"guns": 1, "components": 2}, operator="GUNNER", pick_type="guns")
+        self.assertEqual(pick_store.claimed_orders("components"), set())
+        component = pick_store.start_order_session(plan_rows=rows, selected_orders=["SO-1"],
+            source_runs={"guns": 1, "components": 2}, operator="COMPONENT", pick_type="components")
+        self.assertEqual([line["part_id"] for line in pick_store.get_lines(gun)], ["GUN"])
+        self.assertEqual([line["part_id"] for line in pick_store.get_lines(component)], ["COMP"])
+        self.assertEqual(pick_store.claimed_orders("guns"), {"SO-1"})
+        with self.assertRaisesRegex(ValueError, "Already claimed"):
+            pick_store.start_order_session(plan_rows=rows, selected_orders=["SO-1"],
+                source_runs={"guns": 1}, operator="OTHER", pick_type="guns")
+
+    def test_gun_picker_has_one_active_order(self):
+        rows = [self.row("SO-1", "GUN", "guns"), self.row("SO-2", "GUN", "guns")]
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            pick_store.start_order_session(plan_rows=rows, selected_orders=["SO-1", "SO-2"],
+                source_runs={"guns": 1}, operator="GUNNER", pick_type="guns")
+        pick_store.start_order_session(plan_rows=rows, selected_orders=["SO-1"],
+            source_runs={"guns": 1}, operator="GUNNER", pick_type="guns")
+        with self.assertRaisesRegex(ValueError, "active gun order"):
+            pick_store.start_order_session(plan_rows=rows, selected_orders=["SO-2"],
+                source_runs={"guns": 1}, operator="GUNNER", pick_type="guns")
+
+    def test_gun_upc_serial_pair_requires_shelf_but_no_tote(self):
+        session = pick_store.start_order_session(plan_rows=[self.row("SO-1", "GUN", "guns", qty=2, upc="123")],
+            selected_orders=["SO-1"], source_runs={"guns": 1}, operator="GUNNER", pick_type="guns")
+        args = dict(target_order="SO-1", operator="GUNNER", serial="SERIAL",
+            part_candidates=[{"part_id": "GUN", "locations": ["A01"]}])
+        self.assertEqual(pick_store.record_scan(session, "SERIAL", **args)["result"], "wrong_location")
+        args["scanned_location"] = "A01"
+        self.assertEqual(pick_store.record_scan(session, "SERIAL", **args)["result"], "wrong_item")
+        args.update(checked_upc="999", upc_parts=["OTHER"])
+        self.assertEqual(pick_store.record_scan(session, "SERIAL", **args)["result"], "wrong_item")
+        args.update(checked_upc="123", upc_parts=["GUN"], request_id="paired-1")
+        self.assertEqual(pick_store.record_scan(session, "SERIAL", **args)["result"], "ok")
+        self.assertTrue(pick_store.record_scan(session, "SERIAL", **args)["idempotent_replay"])
+        args["request_id"] = "paired-2"
+        self.assertEqual(pick_store.record_scan(session, "SERIAL", **args)["result"], "duplicate")
+        self.assertEqual(pick_store.compute_counts(session)["picked_units"], 1)
+        self.assertEqual(pick_store.get_scans(session)[0]["checked_upc"], "123")
+
+    def test_packlist_waits_for_both_teams(self):
+        rows = [self.row("SO-1", "GUN", "guns"), self.row("SO-1", "COMP", "components")]
+        sessions = {}
+        for team in ("guns", "components"):
+            sessions[team] = pick_store.start_order_session(plan_rows=rows, selected_orders=["SO-1"],
+                source_runs={team: 1}, operator=team, pick_type=team)
+        with self.connection:
+            self.connection.execute("UPDATE pick_lines SET picked_qty = planned_qty WHERE session_id = ?", (sessions["guns"],))
+        pick_store.complete_order(sessions["guns"], "SO-1")
+        self.assertFalse(pick_store.attach_packlist("SO-1", "PL-1", {"guns", "components"}))
+        with self.connection:
+            self.connection.execute("UPDATE pick_lines SET picked_qty = planned_qty WHERE session_id = ?", (sessions["components"],))
+        pick_store.complete_order(sessions["components"], "SO-1")
+        self.assertTrue(pick_store.attach_packlist("SO-1", "PL-1", {"guns", "components"}))
+        for session in sessions.values():
+            self.assertEqual(pick_store.get_orders(session)[0]["status"], "packing")
+
     def test_wave_is_limited_to_three_orders(self):
         rows = [self.row(f"SO-{i}", f"P-{i}", "components") for i in range(4)]
         with self.assertRaisesRegex(ValueError, "at most 3"):
