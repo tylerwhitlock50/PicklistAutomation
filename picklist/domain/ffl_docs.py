@@ -309,7 +309,9 @@ _FFL_FOOTER_RE = re.compile(
     r"(?m)^\s*([^:\r\n]{3,}):([^:\r\n]{3,}):(\d{5}(?:-\d{4})?):"
     r"([0-9]-[0-9]{2}-[0-9]{3}-[0-9]{2}-[0-9A-Z]{2}-[0-9]{5}):"  # 5th segment carries a letter (9D)
 )
-_ZIP_RE = re.compile(r"\b(\d{5})(?:-\d{4})?\b")
+# ATF EZ Check prints ZIP+4 without the hyphen ("TN - 376040000"), so the +4 is
+# optional with or without it; a bare \d{5}\b would miss the nine-digit form.
+_ZIP_RE = re.compile(r"\b(\d{5})(?:-?\d{4})?\b")
 _STREET_NUMBER_RE = re.compile(r"^\s*(\d+)\b")
 _ATTN_OR_UNIT_RE = re.compile(r"\b(?:ATTN|ATTENTION|SUITE|STE|UNIT|#)\b.*", re.IGNORECASE)
 
