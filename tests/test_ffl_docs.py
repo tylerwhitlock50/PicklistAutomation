@@ -112,6 +112,34 @@ class CompareTests(unittest.TestCase):
         self.assertIn("ZIP 99801", premise["detail"]["why"])
         self.assertEqual(premise["detail"]["ffl_premise"], "123 MAIN ST JUNEAU AL 36480")
 
+    def test_ez_check_nine_digit_zip_matches_ship_to(self):
+        # ATF EZ Check prints ZIP+4 with no hyphen ("TN - 376040000"); that must
+        # read as 37604, not as a missing ZIP (which hard-fails the premise check).
+        text = (
+            "License Number:1-62-XXX-XX-XX-09516\n"
+            "Expiration Date:03/01/2028\n"
+            "License Name:MAHONEYS SPORTSMANS PARADISE INC\n"
+            "Trade Name:\n"
+            "Premise Address:830 SUNSET DR\n"
+            "JOHNSON CITY\n"
+            "TN - 376040000\n"
+            "Mailing Address:830 SUNSET DR\n"
+        )
+        parsed = ffl_docs.parse_ffl_doc(text)
+        self.assertEqual(parsed["premise"], "830 SUNSET DR JOHNSON CITY TN - 376040000")
+        for ship_zip in ("37604", "37604-0000", "376040000"):
+            findings = {f["reason_code"]: f for f in ffl_docs.compare(
+                ship_to(name="MAHONEYS SPORTSMAN PARADISE INC", addr_1="830 SUNSET DR",
+                        city="JOHNSON CITY", state="TN", zip=ship_zip), parsed)}
+            premise = findings[ffl_docs.REASON_PREMISE]
+            self.assertTrue(premise["passed"], premise)
+            self.assertTrue(premise["detail"]["zip_match"])
+        wrong = {f["reason_code"]: f for f in ffl_docs.compare(
+            ship_to(name="MAHONEYS SPORTSMAN PARADISE INC", addr_1="830 SUNSET DR",
+                    city="JOHNSON CITY", state="TN", zip="37601"), parsed)}
+        self.assertFalse(wrong[ffl_docs.REASON_PREMISE]["passed"])
+        self.assertIn("ZIP 37601 on the ship-to vs 37604", wrong[ffl_docs.REASON_PREMISE]["detail"]["why"])
+
     def test_name_mismatch_fails(self):
         parsed = ffl_docs.parse_ffl_doc(EZ_CHECK_TEXT)
         findings = {f["reason_code"]: f for f in ffl_docs.compare(ship_to(name="Bob's Bait Shop"), parsed)}
