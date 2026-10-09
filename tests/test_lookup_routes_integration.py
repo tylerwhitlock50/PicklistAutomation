@@ -70,6 +70,23 @@ class LookupRouteTests(unittest.TestCase):
         data = self.client.get("/api/orders/SO-132000").get_json()
         self.assertEqual(data["shipment_summary"]["shipped_packlists"], 1)
 
+    def test_order_detail_renders_live_hold_without_stored_row(self):
+        # The detail page evaluates the order live. A hold raised there but never
+        # persisted by a refresh (new since the last run, or already cleared) has
+        # no readiness_holds row, so it must still carry age/ack fields as None
+        # instead of leaving the template to hit an Undefined (EDI-00819, 2026-10-09).
+        readiness_service.configure(fetch_order_rows=lambda so: [order_row(order=so, AVAILABLE_QTY=0)])
+        with patch.object(readiness_service.readiness_store, "open_holds", return_value=[]):
+            resp = self.client.get("/orders/SO-132000")
+            self.assertEqual(resp.status_code, 200)
+            data = self.client.get("/api/orders/SO-132000").get_json()
+        codes = [h["reason_code"] for h in data["holds"]]
+        self.assertIn("no_supply", codes)
+        for hold in data["holds"]:
+            self.assertIsNone(hold["age_hours"])
+            self.assertIsNone(hold["acknowledged_at"])
+            self.assertIsNone(hold["id"])
+
     def test_archived_order_with_shipments_only(self):
         html = self.client.get("/orders/SO-132001").get_data(as_text=True)
         self.assertIn("PL-288872", html)

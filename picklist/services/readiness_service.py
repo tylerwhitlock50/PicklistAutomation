@@ -365,6 +365,10 @@ def current_payload() -> dict[str, Any]:
     holds: list[dict[str, Any]] = []
     for order in snapshot["orders"]:
         for hold in order.get("holds", []):
+            # Every hold carries these keys so templates can test them; a hold
+            # with no stored row (new since the last refresh) stays None.
+            for field in ("first_seen_at", "acknowledged_at", "acknowledged_by", "age_hours"):
+                hold.setdefault(field, None)
             row = open_rows.get(hold.get("id"))
             if row:
                 hold["first_seen_at"] = row["first_seen_at"]
@@ -520,6 +524,10 @@ def order_detail(so: str) -> dict[str, Any]:
     open_rows = readiness_store.open_holds(cust_order_id=order_id)
     by_key = {(r["cust_order_id"], r["line_no"], r["reason_code"]): r for r in open_rows}
     for hold in detail.get("holds", []):
+        # Live evaluation can raise a hold the last refresh never persisted;
+        # default the stored-row fields so the template never sees Undefined.
+        for field in ("id", "first_seen_at", "age_hours", "acknowledged_at", "acknowledged_by"):
+            hold.setdefault(field, None)
         row = by_key.get((hold["order_id"], str(hold.get("line_no") or ""), hold["reason_code"]))
         if row:
             hold["id"] = row["id"]
