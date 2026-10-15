@@ -7,15 +7,15 @@
     <link rel="stylesheet" href="{{ url_for('audit.static', filename='styles.css') }}" />
   </head>
   <body>
-    <main class="page-shell">
-      {% set active_nav = 'work' %}
-      {% set active_sub = 'audit' %}
+    <div class="audit-shell">
       {% include 'audit_nav.html' %}
+      <main class="page-shell" id="audit-content">
+        {% include 'audit_banner.html' %}
       <section class="hero card">
         <div class="hero-top">
           <div>
-            <p class="eyebrow">Work</p>
-            <h1>Serialized Inventory Audit</h1>
+            <p class="eyebrow">INVENTORY CONTROL</p>
+            <h1>Inventory audit</h1>
           </div>
           <div class="actions">
             <a class="button secondary" href="{{ url_for('audit.audit_analytics_page') }}">Analytics</a>
@@ -27,7 +27,6 @@
           confirms every serial is where the system expects it &mdash; flagging misplaced, missing,
           and unexpected guns &mdash; so the weekly manual count becomes a quick daily scan.
         </p>
-        <p class="helper-text">Signed in as {{ g.actor.name }} · {{ g.actor.id }}</p>
       </section>
 
       {% with messages = audit_messages() %}
@@ -67,7 +66,7 @@
         <h2>Find an audit location</h2>
         <p class="helper-text">{{ due_locations|length }} locations due. Due locations are separate from the active sessions above.</p>
         <label class="audit-field"><span>Search or scan a location</span><input type="search" id="audit-location-filter" placeholder="Warehouse, location, description" /></label>
-        <label><input type="checkbox" id="audit-due-only" /> Only locations due for audit</label>
+        <label class="check-label"><input type="checkbox" id="audit-due-only" /> Only locations due for audit</label>
         <p id="audit-filter-count" class="helper-text" role="status"></p>
       </section>
 
@@ -238,7 +237,8 @@
         {% endif %}
       </section>
       {% endif %}
-    </main>
+      </main>
+    </div>
 
     <script nonce="{{ g.audit_nonce }}">
       (function () {

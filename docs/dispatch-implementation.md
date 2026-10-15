@@ -146,7 +146,10 @@ Auditing never adjusts ERP inventory, allocates stock, or changes Dispatch pick 
 It is available in shadow mode because its writes are confined to audit records.
 
 The API retains `/api/audit/...` paths and is documented in `/api/v1/openapi.json`.
-HTML screens and exports are under `/audit`. Audit records and pages are never
+HTML screens and exports are under `/audit`. The dashboard, scanning sessions,
+analytics and settings share Dispatch’s dark sidebar, green accents, typography
+and responsive controls. Audit settings are grouped into targets, cadence and
+change reason panels. Audit records and pages are never
 cached by the service worker. The cloned screens use local assets and nonce-protected
 scripts; no external font or chart service is needed.
 

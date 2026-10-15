@@ -7,15 +7,15 @@
     <link rel="stylesheet" href="{{ url_for('audit.static', filename='styles.css') }}" />
   </head>
   <body>
-    <main class="page-shell">
-      {% set active_nav = 'reports' %}
-      {% set active_sub = 'audit_analytics' %}
+    <div class="audit-shell">
       {% include 'audit_nav.html' %}
+      <main class="page-shell" id="audit-content">
+        {% include 'audit_banner.html' %}
       <section class="hero card">
         <div class="hero-top">
           <div>
             <p class="eyebrow">Serialized Audit</p>
-            <h1>Audit Analytics</h1>
+            <h1>Audit analytics</h1>
           </div>
           <a class="button tertiary" href="{{ url_for('audit.audit_dashboard') }}">&larr; Audit dashboard</a>
         </div>
@@ -357,7 +357,8 @@
         <p class="empty-state">No completed audits in this window. <a href="{{ url_for('audit.audit_dashboard') }}">Start one from the audit dashboard.</a></p>
         {% endif %}
       </section>
-    </main>
+      </main>
+    </div>
 
     <script nonce="{{ g.audit_nonce }}">
       const DATA = {{ data | tojson }};

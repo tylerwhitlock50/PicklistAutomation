@@ -1,9 +1,21 @@
-<nav class="dispatch-audit-nav" aria-label="Dispatch navigation">
-  <a href="/">Dispatch · Pick, pack &amp; ship</a>
-  <a href="{{ url_for('audit.audit_dashboard') }}">Inventory audit</a>
-  <a href="{{ url_for('audit.audit_analytics_page') }}">Analytics</a>
-  {% if g.actor.role == 'admin' %}<a href="{{ url_for('audit.audit_settings') }}">Audit settings</a>{% endif %}
-  <small>{{ g.actor.name }} · {{ audit_mode|upper }}</small>
-</nav>
-{% if audit_mode == 'demo' %}<p class="flash">Training workspace. Synthetic inventory; nothing here changes VISUAL.</p>{% endif %}
+<a class="skip-link" href="#audit-content">Skip to content</a>
+<aside class="sidebar">
+  <a class="brand" href="/">▧ Dispatch</a>
+  <p class="eyebrow">PICK · PACK · SHIP</p>
+  <nav aria-label="Dispatch navigation">
+    <a class="nav" href="/"><span>←</span> Back to Dispatch</a>
+    <a class="nav active" href="{{ url_for('audit.audit_dashboard') }}"><span>06</span> Inventory audit</a>
+    <div class="audit-subnav">
+      <a href="{{ url_for('audit.audit_dashboard') }}"{% if request.endpoint in ('audit.audit_dashboard', 'audit.audit_session_page') %} aria-current="page"{% endif %}>Locations &amp; sessions</a>
+      <a href="{{ url_for('audit.audit_analytics_page') }}"{% if request.endpoint == 'audit.audit_analytics_page' %} aria-current="page"{% endif %}>Analytics</a>
+      {% if g.actor.role == 'admin' %}<a href="{{ url_for('audit.audit_settings') }}"{% if request.endpoint == 'audit.audit_settings' %} aria-current="page"{% endif %}>Audit settings</a>{% endif %}
+    </div>
+  </nav>
+  <div class="sidebar-bottom">
+    <small>Signed in as</small>
+    <strong>{{ g.actor.name }}</strong>
+    <span>{{ g.actor.role }}</span>
+    <small class="mode">{{ audit_mode|upper }} WORKSPACE</small>
+  </div>
+</aside>
 <script src="{{ url_for('audit.static', filename='requests.js') }}"></script>
