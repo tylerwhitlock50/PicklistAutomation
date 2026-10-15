@@ -1,0 +1,15 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dispatch · Audit settings</title><link rel="stylesheet" href="{{ url_for('audit.static', filename='styles.css') }}"></head>
+<body><main class="page-shell">{% include 'audit_nav.html' %}
+<section class="card"><h1>Audit settings</h1><p>Saved in Dispatch. Changes are recorded with your identity and reason. Revision {{ config.version }}.</p>
+<form method="post" class="audit-start-form">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="request_key" value="{{ audit_request_key() }}"><input type="hidden" name="version" value="{{ config.version }}">
+<label class="audit-field">Accuracy target (%)<input name="accuracy_target_pct" type="number" min="0" max="100" value="{{ config.accuracy_target_pct }}" required></label>
+<label class="audit-field">Staging dwell target (hours)<input name="dwell_target_hours" type="number" min="1" max="8760" value="{{ config.dwell_target_hours }}" required></label>
+<label class="audit-field">Location refresh interval (minutes)<input name="sync_minutes" type="number" min="1" max="1440" value="{{ config.sync_minutes }}" required></label>
+<label class="audit-field">Watched dwell locations (comma separated)<input name="dwell_locations" value="{{ config.dwell_locations|join(', ') }}"></label>
+<label class="audit-field">Location cadence to update<select name="scope"><option value="">Keep location cadences unchanged</option>{% for loc in locations %}<option value="{{ loc.scope }}">{{ loc.scope }} · every {{ loc.cadence_days }} days</option>{% endfor %}</select></label>
+<label class="audit-field">Audit every (days)<input name="cadence_days" type="number" min="1" max="365" value="7" required></label>
+<label class="audit-field">Reason for change<input name="reason" minlength="3" maxlength="1000" required></label>
+<button class="button" type="submit">Save audit settings</button>
+</form></section></main></body></html>

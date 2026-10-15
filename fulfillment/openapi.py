@@ -90,5 +90,24 @@ def specification():
              properties={"fulfillment_id": string, "version": {"type": "integer"}, "packlist": string, "candidate": {"$ref": "#/components/schemas/Packlist"}}, required=("fulfillment_id", "version"))
     endpoint("/integrations/worldship/labels", "post", "Ingest authoritative WorldShip package evidence using the separate label credential", security="machine",
              properties=schemas["Label"]["properties"], required=schemas["Label"]["required"], mutation=True)
+    # The cloned inventory-audit API retains its established /api/audit paths.
+    audit_routes = {
+        "/audit/dashboard": ("get", "Locations, due cadence, active and recent inventory audits"),
+        "/audit/sessions": ("post", "Start an inventory snapshot; target_kind: location, warehouse, tied or all"),
+        "/audit/session/{id}": ("get", "Snapshot items, counts, unexpected scans and resolutions"),
+        "/audit/session/{id}/state": ("get", "Current audit status and counts"),
+        "/audit/analytics": ("get", "Accuracy, cadence, exceptions and current staging dwell"),
+        **{f"/audit/session/{{id}}/{name}": ("post", description) for name, description in {
+            "scan": "Classify a serial and location scan; identity comes from login",
+            "resolve": "Append a manual resolution (serial, resolution, optional note)",
+            "recheck": "Read current ERP evidence for unexpected scans; never writes ERP",
+            "complete": "Atomically mark remaining in-scope serials missing and finalize counts",
+        }.items()},
+    }
+    for path, (method, description) in audit_routes.items():
+        endpoint(path, method, description, mutation=method == "post",
+                 properties={"target_kind": string, "warehouse": string, "location": string,
+                             "serial": string, "resolution": string, "note": string} if method == "post" else None)
+        paths[path][method]["servers"] = [{"url": "/api"}]
     return {"openapi": "3.1.0", "info": {"title": "Dispatch fulfillment API", "version": "1.1.0"}, "servers": [{"url": "/api/v1"}],
             "paths": paths, "components": {"schemas": schemas, "securitySchemes": {"operatorCookie": {"type": "apiKey", "in": "cookie", "name": "fulfillment_session"}, "integrationBearer": {"type": "http", "scheme": "bearer"}}}}

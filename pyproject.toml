@@ -12,7 +12,7 @@ packages = { find = { include = ["picklist*", "fulfillment*"] } }
 dependencies = { file = ["requirements.txt"] }
 
 [tool.setuptools.package-data]
-fulfillment = ["sql/*.sql"]
+fulfillment = ["sql/*.sql", "audit/templates/*.html", "audit/static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

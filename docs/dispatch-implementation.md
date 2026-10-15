@@ -50,7 +50,7 @@ from Flask behind HTTPS; there is no production development server.
 
 Importing the new application does not initialize or migrate databases, start
 the legacy scheduler, or write ERP records. Database setup is an explicit CLI command.
-Schema version 2 uses app-owned relational tables for users, sessions, claims,
+Schema version 3 uses app-owned relational tables for users, sessions, claims,
 requests, events, labels and settings, plus versioned fulfillment JSON documents.
 Claims have database-enforced unique resource keys. All mutations share a
 transactional mutex row, with savepoints for failed actions; this deliberately
@@ -108,11 +108,61 @@ docker compose --env-file .env.fulfillment -f docker-compose.fulfillment.yml up 
    Settings can be managed in shadow mode; picking remains disabled. Activate only
    after acceptance testing and exclusive warehouse operation are confirmed.
 
-For an existing Dispatch version-1 database, back it up, stop API/worker processes,
+For an existing Dispatch version-1 or version-2 database, back it up, stop API/worker processes,
 run `python -m fulfillment.cli init`, and bootstrap an admin with the `user` command.
 The migration preserves work, claims, labels, accounts and history. It adds independent
 administration defaults that must be reviewed or imported; it does not silently read
 old settings or enable live operation. Restart all processes on the new version.
+
+## Serialized inventory audits
+
+Open **Inventory audit** from the Dispatch navigation. The original audit workflow
+has been cloned into `fulfillment/audit/`, with its own templates, static assets,
+SQL, and `dispatch_audit_*` tables in Dispatch's PostgreSQL database. There are no
+legacy imports, database connections, shared tables, or legacy service requirements.
+The screens deliberately retain the existing audit workflow and reporting layout.
+
+Available workflows include location, warehouse, tied-work-order and full audits;
+point-in-time expected-inventory snapshots; location and serial batch scanning;
+verified/misplaced/missing/unexpected classification; duplicate and near-match hints;
+append-only exception resolutions; ERP rechecks; accuracy, cadence, problem-location,
+repeat-serial and staging-dwell analytics; session Excel and daily CSV reports.
+These exports report audit findings and do not create downloadable picking workflows.
+
+Audit identity comes from the Dispatch login. Every mutation requires CSRF and an
+idempotency key and records its actor in Dispatch history. Scans, resolutions,
+completion counts and request receipts commit together under the database lock.
+Completing an audit marks remaining in-scope serials missing; later resolutions
+annotate the detection without rewriting completed accuracy. Retries cannot create
+duplicate scans or sessions. Administrator-only **Audit settings** controls accuracy
+and dwell targets, watched staging locations, refresh interval and per-location cadence.
+
+ERP reads are restricted to the configured site. An ambiguous serial snapshot is
+rejected. Where a bare bin name exists in more than one warehouse, scan
+`WAREHOUSE/LOCATION`. Tied units still use their sales order barcode as the location.
+Rechecking unexpected scans only auto-resolves fresh, unambiguous unit evidence in
+the scanned warehouse/location, and preserves the original unexpected detection.
+Auditing never adjusts ERP inventory, allocates stock, or changes Dispatch pick claims.
+It is available in shadow mode because its writes are confined to audit records.
+
+The API retains `/api/audit/...` paths and is documented in `/api/v1/openapi.json`.
+HTML screens and exports are under `/audit`. Audit records and pages are never
+cached by the service worker. The cloned screens use local assets and nonce-protected
+scripts; no external font or chart service is needed.
+
+PostgreSQL is required for this cloned module, including audit training. The ordinary
+SQLite picking demo does not include inventory audits. To run a full synthetic demo,
+set `FULFILLMENT_DEMO_DATABASE_URL` to a **dedicated training PostgreSQL database**,
+then run `python scripts/run_fulfillment_demo.py --postgres --port 5092`.
+The login remains DEMO / 123456; this mode never reads or changes VISUAL. Example
+inventory: DEMO-001 and DEMO-002 at SHIPPING/R09S02; DEMO-003 at MAIN/C2;
+DEMO-TIED staged against SO-DEMO-100.
+
+Run `python -m fulfillment.cli init` during a stopped-service upgrade to create the
+audit tables. Existing Dispatch work and settings are preserved. Historical audit
+records in the original application's PostgreSQL database are **not automatically
+copied**; retain that database for historical reporting. No production migration or
+live audit source validation has been performed by this implementation.
 
 ## Administration and rule ownership
 
@@ -332,7 +382,7 @@ cannot prevent someone bypassing Dispatch and shipping directly in VISUAL.
 ## Validation commands
 
 ```powershell
-python -m pytest tests/test_fulfillment.py tests/test_fulfillment_integrations.py tests/test_fulfillment_admin.py tests/test_dispatch_rules.py -q
+python -m pytest tests/test_fulfillment.py tests/test_fulfillment_integrations.py tests/test_fulfillment_admin.py tests/test_dispatch_rules.py tests/test_dispatch_audit.py -q
 cd operator-web
 npm test
 npm run build
@@ -357,3 +407,13 @@ the browser reported no console errors during that rehearsal.
 Real scanner/printer hardware, installed VISUAL SQL behavior, WorldShip export
 mapping, network/certificate deployment and save-hook behavior remain test-company
 acceptance items. Production cutover has not been activated.
+
+Audit extension validated on 2026-10-15: the full regression run passed 434 tests
+(11 subtests); PostgreSQL-only audit cases were checked separately. The 64 Dispatch
+workflow/admin checks and 14 audit checks passed against PostgreSQL 17. All 5
+frontend tests passed. The standalone image passed a PostgreSQL smoke test for
+schema setup, audit pages, scans, completion, analytics, settings and Excel export
+with no legacy app present. Browser testing verified snapshot creation, batch
+classification and follow-up recording; the dashboard and analytics layouts were
+inspected. The browser's native confirmation stalled during rehearsal, so completion
+now uses an in-app dialog; completion was verified through API and container tests.

@@ -13,7 +13,7 @@ from sqlalchemy import (JSON, Boolean, Column, Integer, MetaData, Numeric,
                         String, Table, Text, create_engine, select, text)
 
 metadata = MetaData()
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 mutex = Table("fulfillment_mutex", metadata, Column("id", Integer, primary_key=True))
 schema = Table("fulfillment_schema", metadata, Column("version", Integer, primary_key=True))
 users = Table("fulfillment_users", metadata,
@@ -71,13 +71,16 @@ class Database:
                 conn.execute(schema.insert().values(version=SCHEMA_VERSION))
             else:
                 current = conn.execute(select(schema.c.version)).scalar_one()
-                if current not in (1, SCHEMA_VERSION):
+                if current not in (1, 2, SCHEMA_VERSION):
                     raise RuntimeError("Unsupported Dispatch schema version; use the matching application.")
-                if current == 1:
+                if current != SCHEMA_VERSION:
                     conn.execute(schema.update().values(version=SCHEMA_VERSION))
             if get_setting(conn, "administration") is None:
                 from fulfillment.admin import initial_state
                 put_setting(conn, "administration", initial_state())
+            if self.engine.dialect.name == "postgresql":
+                from fulfillment.audit.store import initialize
+                initialize(conn)
 
     @contextmanager
     def transaction(self):

@@ -1,0 +1,682 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Audit session #{{ session.id }}</title>
+    <link rel="stylesheet" href="{{ url_for('audit.static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <main class="page-shell">
+      {% set active_nav = 'work' %}
+      {% set active_sub = 'audit' %}
+      {% include 'audit_nav.html' %}
+      <section class="hero card">
+        <div class="hero-top">
+          <div>
+            <p class="eyebrow">Serialized Audit &middot; Session #{{ session.id }}</p>
+            <h1>{{ session_scope_label }}</h1>
+          </div>
+          <a class="button tertiary" href="{{ url_for('audit.audit_dashboard') }}">&larr; All locations</a>
+        </div>
+        <p class="hero-copy">
+          {% if session.status == 'completed' %}
+          This audit is complete. Review the results below.
+          {% elif session.scope == 'TIED-WO' %}
+          Tied units are staged by sales order. Scan the <strong>sales order barcode</strong>
+          (e.g. SO-130311) first, then scan each firearm serial allocated to it. Change the
+          order when you move to the next one.
+          {% else %}
+          Scan the <strong>location barcode</strong> first, then scan each firearm serial at that
+          location. Keep scanning serials; change the location when you move to a new shelf.
+          {% endif %}
+          <span class="helper-text">Started {{ started_display }}{% if completed_display %} &middot; Completed {{ completed_display }}{% endif %}.</span>
+        </p>
+      </section>
+
+      <section class="card audit-tiles" data-tiles>
+        <div class="audit-tile"><span class="audit-tile-num" data-tile="expected">{{ counts.expected or 0 }}</span><span class="audit-tile-label">Expected</span></div>
+        <div class="audit-tile tile-verified"><span class="audit-tile-num" data-tile="verified">{{ counts.verified or 0 }}</span><span class="audit-tile-label">Verified</span></div>
+        <div class="audit-tile tile-misplaced"><span class="audit-tile-num" data-tile="misplaced">{{ counts.misplaced or 0 }}</span><span class="audit-tile-label">Misplaced</span></div>
+        <div class="audit-tile tile-pending"><span class="audit-tile-num" data-tile="pending">{{ counts.pending or 0 }}</span><span class="audit-tile-label" data-pending-label>{% if session.status == 'completed' %}Missing{% else %}Remaining{% endif %}</span></div>
+        <div class="audit-tile tile-missing"><span class="audit-tile-num" data-tile="missing">{{ counts.missing or 0 }}</span><span class="audit-tile-label">Missing</span></div>
+        <div class="audit-tile tile-unexpected"><span class="audit-tile-num" data-tile="unexpected">{{ counts.unexpected or 0 }}</span><span class="audit-tile-label">Unexpected</span></div>
+      </section>
+
+      {% set loc_term = 'sales order' if session.scope == 'TIED-WO' else 'location' %}
+      {% if session.status != 'completed' %}
+      <section class="card">
+        <h2>Scan</h2>
+        <div class="audit-scan-grid">
+          <div class="audit-field">
+            <label for="location-input">Current {{ loc_term }}</label>
+            <div class="audit-field-row">
+              <input type="text" id="location-input" placeholder="Scan {{ loc_term }} barcode" autocomplete="off" autocapitalize="characters" enterkeyhint="next" />
+              <button type="button" class="button" id="set-location">Set &rarr;</button>
+            </div>
+          </div>
+          <label class="audit-field">
+            <span>Scans</span>
+            <textarea id="scan-batch" rows="6" placeholder="Scan the {{ loc_term }} barcode, then every serial — they collect here one per line." autocomplete="off" autocapitalize="characters" spellcheck="false"></textarea>
+          </label>
+        </div>
+        <p class="helper-text" id="scan-hint">
+          Just keep scanning &mdash; {{ loc_term }} barcode first, then each serial. Scanner Tab/Enter is captured
+          automatically. Scanning another {{ loc_term }} barcode mid-batch switches the {{ loc_term }}. Press
+          <strong>Verify</strong> when the shelf is done.
+        </p>
+        <div id="scan-result" class="audit-scan-result" hidden></div>
+        <div class="actions">
+          <button type="button" class="button" id="verify-batch" disabled>Verify scans</button>
+          <button type="button" class="button tertiary" id="change-location">Change {{ loc_term }}</button>
+          <button type="button" class="button secondary" id="complete-audit">Complete audit</button>
+          <a class="button tertiary" href="{{ url_for('audit.audit_session_export', session_id=session.id) }}" data-no-loading>Export</a>
+        </div>
+        <div class="audit-log" id="scan-log" aria-live="polite"></div>
+      </section>
+      {% else %}
+      <section class="card">
+        <div class="actions">
+          <a class="button secondary" href="{{ url_for('audit.audit_session_export', session_id=session.id) }}" data-no-loading>Export results</a>
+        </div>
+      </section>
+      {% endif %}
+
+      <section class="card">
+        <div class="table-controls">
+          <h2>Expected serials</h2>
+          <input type="search" data-table-filter placeholder="Filter serials..." aria-label="Filter expected serials" />
+        </div>
+        <div class="table-wrap">
+          <table data-filterable-table>
+            <thead>
+              <tr>
+                <th>Serial</th>
+                <th>Part</th>
+                <th>Description</th>
+                <th>Location scope</th>
+                <th>Expected location</th>
+                <th>Tied WO</th>
+                <th>Status</th>
+                <th>Scanned at</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for item in items %}
+              {% set res = resolutions.get(item.serial|upper) %}
+              <tr data-serial="{{ item.serial|upper }}">
+                <td class="mono">{{ item.serial }}{% if not item.in_scope %} <span class="pill idle">elsewhere</span>{% endif %}</td>
+                <td>{{ item.part_id or '' }}</td>
+                <td>{{ item.part_description or '' }}</td>
+                <td>{{ item.scope or '' }}</td>
+                <td>{{ item.expected_location or 'Unassigned' }}</td>
+                <td>{{ 'Yes' if item.tied_wo else '' }}{% if item.tied_wo and item.cust_order_id %} ({{ item.cust_order_id }}){% endif %}</td>
+                <td data-status-cell>
+                  <span class="pill audit-status status-{{ item.status }}">{{ item.status }}</span>
+                </td>
+                <td data-scanned-cell>{{ item.scanned_location or '' }}{% if item.scanned_at_display %} &middot; {{ item.scanned_at_display }}{% endif %}</td>
+                <td data-action-cell>
+                  {% if res %}
+                  <span class="pill audit-status status-resolved{% if res.resolution in open_resolution_codes %} status-follow-up{% endif %}"{% if res.note %} title="{{ res.note }}"{% endif %}>{{ resolution_codes[res.resolution] }}</span>
+                  {% endif %}
+                  {% if item.status in ('misplaced', 'missing') and (not res or res.resolution in open_resolution_codes) %}
+                  <button type="button" class="button tertiary resolve-btn" data-serial="{{ item.serial|upper }}">Resolve</button>
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card" id="unexpected-card" {% if not unexpected %}hidden{% endif %}>
+        <div class="table-controls">
+          <h2>Unexpected scans</h2>
+          <button type="button" class="button tertiary" id="recheck-erp" data-no-loading>Re-check ERP</button>
+        </div>
+        <p class="helper-text">
+          Serials scanned that were not expected in this audit &mdash; need review.
+          <strong>Re-check ERP</strong> looks these up in VISUAL again: a gun receipted
+          after this audit started resolves itself.
+        </p>
+        <div id="recheck-result" class="audit-scan-result" hidden></div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Serial</th><th>Scanned location</th><th>First scanned</th><th>Times</th><th>Possible match</th><th></th></tr>
+            </thead>
+            <tbody id="unexpected-body">
+              {% for row in unexpected %}
+              {% set res = resolutions.get(row.scanned_serial|upper) %}
+              <tr data-serial="{{ row.scanned_serial|upper }}">
+                <td>{{ row.scanned_serial }}</td>
+                <td>{{ row.scanned_location or '' }}</td>
+                <td>{{ row.first_scanned_display or '' }}</td>
+                <td>{{ row.scan_count }}</td>
+                <td>
+                  {% for match in row.near_matches or [] %}
+                  <span class="pill idle" title="Expected {{ match.expected_warehouse or '' }}{% if match.expected_location %}/{{ match.expected_location }}{% endif %} — possible serial typo in the ERP or on the label">&asymp; {{ match.serial }}</span>
+                  {% endfor %}
+                </td>
+                <td data-action-cell>
+                  {% if res %}
+                  <span class="pill audit-status status-resolved{% if res.resolution in open_resolution_codes %} status-follow-up{% endif %}"{% if res.note %} title="{{ res.note }}"{% endif %}>{{ resolution_codes[res.resolution] }}</span>
+                  {% endif %}
+                  {% if not res or res.resolution in open_resolution_codes %}
+                  <button type="button" class="button tertiary resolve-btn" data-serial="{{ row.scanned_serial|upper }}">Resolve</button>
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <dialog id="resolve-dialog" class="resolve-dialog">
+        <h2>Resolve <span id="resolve-serial" class="mono"></span></h2>
+        <p class="helper-text">This records how the exception was handled. The original detection stays in the audit history.</p>
+        <div class="resolve-options">
+          {% for code, label in manual_resolution_codes.items() %}
+          <label class="resolve-option">
+            <input type="radio" name="resolve-status" value="{{ code }}" />
+            <span>{{ label }}</span>
+          </label>
+          {% endfor %}
+        </div>
+        <label class="audit-field">
+          <span>Note (optional)</span>
+          <textarea id="resolve-note" rows="2" placeholder="e.g. moved back to C2, label reprinted"></textarea>
+        </label>
+        <div class="actions">
+          <button type="button" class="button" id="resolve-confirm" disabled>Confirm resolution</button>
+          <button type="button" class="button tertiary" id="resolve-cancel">Cancel</button>
+        </div>
+      </dialog>
+      <dialog id="complete-dialog" aria-labelledby="complete-title">
+        <h2 id="complete-title">Complete this audit?</h2>
+        <p>Unscanned serials will be marked missing. The completed count stays in audit history.</p>
+        <p id="complete-error" role="alert"></p>
+        <div class="actions"><button type="button" class="button" id="confirm-complete">Confirm completion</button>
+        <button type="button" class="button secondary" id="cancel-complete">Keep scanning</button></div>
+      </dialog>
+    </main>
+
+    <script nonce="{{ g.audit_nonce }}">
+      const AUDIT = {
+        sessionId: {{ session.id }},
+        csrfToken: {{ csrf_token()|tojson }},
+        scanUrl: {{ url_for('audit.api_audit_scan', session_id=session.id)|tojson }},
+        completeUrl: {{ url_for('audit.api_audit_complete', session_id=session.id)|tojson }},
+        resolveUrl: {{ url_for('audit.api_audit_resolve', session_id=session.id)|tojson }},
+        recheckUrl: {{ url_for('audit.api_audit_recheck', session_id=session.id)|tojson }},
+        resolutionLabels: {{ resolution_codes|tojson }},
+        openResolutions: {{ open_resolution_codes|list|tojson }},
+        completed: {{ (session.status == 'completed')|tojson }},
+        locTerm: {{ loc_term|tojson }},
+        operator: null,
+      };
+      AUDIT.operator = {{ g.actor.id|tojson }};
+
+      // ---- audio feedback -------------------------------------------------
+      let audioCtx = null;
+      function beep(kind) {
+        try {
+          audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          osc.connect(gain); gain.connect(audioCtx.destination);
+          const now = audioCtx.currentTime;
+          if (kind === "verified") { osc.frequency.value = 880; }
+          else if (kind === "misplaced") { osc.frequency.value = 440; }
+          else { osc.frequency.value = 200; }
+          gain.gain.setValueAtTime(0.001, now);
+          gain.gain.exponentialRampToValueAtTime(0.25, now + 0.01);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+          osc.start(now); osc.stop(now + 0.24);
+        } catch (e) {}
+      }
+
+      // ---- table filter (mirrors dashboard behaviour) ---------------------
+      document.querySelectorAll("[data-table-filter]").forEach(function (input) {
+        input.addEventListener("input", function () {
+          const term = input.value.trim().toLowerCase();
+          const table = input.closest("section").querySelector("[data-filterable-table]");
+          if (!table) return;
+          table.querySelectorAll("tbody tr").forEach(function (tr) {
+            tr.hidden = term && tr.textContent.toLowerCase().indexOf(term) === -1;
+          });
+        });
+      });
+
+      // ---- exception resolution (works on in-progress AND completed pages) --
+      (function () {
+        const dialog = document.getElementById("resolve-dialog");
+        const serialEl = document.getElementById("resolve-serial");
+        const noteEl = document.getElementById("resolve-note");
+        const confirmBtn = document.getElementById("resolve-confirm");
+        const radios = dialog.querySelectorAll('input[name="resolve-status"]');
+        let resolveSerial = "";
+        let resolving = false;
+
+        function selectedResolution() {
+          const checked = dialog.querySelector('input[name="resolve-status"]:checked');
+          return checked ? checked.value : "";
+        }
+
+        document.addEventListener("click", function (e) {
+          const btn = e.target.closest(".resolve-btn");
+          if (!btn) return;
+          resolveSerial = btn.getAttribute("data-serial") || "";
+          serialEl.textContent = resolveSerial;
+          radios.forEach(function (r) { r.checked = false; });
+          noteEl.value = "";
+          confirmBtn.disabled = true;
+          dialog.showModal();
+        });
+        radios.forEach(function (r) {
+          r.addEventListener("change", function () { confirmBtn.disabled = !selectedResolution(); });
+        });
+        document.getElementById("resolve-cancel").addEventListener("click", function () { dialog.close(); });
+
+        function rowsFor(serial) {
+          const sel = 'tr[data-serial="' + serial.replace(/"/g, "") + '"]';
+          return document.querySelectorAll(sel);
+        }
+
+        function applyResolutionToRows(serial, data) {
+          rowsFor(serial).forEach(function (row) {
+            const cell = row.querySelector("[data-action-cell]");
+            if (cell) {
+              const followUp = AUDIT.openResolutions.indexOf(data.resolution) !== -1;
+              cell.innerHTML = '<span class="pill audit-status status-resolved'
+                + (followUp ? " status-follow-up" : "") + '"></span>'
+                + (followUp ? ' <button type="button" class="button tertiary resolve-btn" data-serial="' + serial + '">Resolve</button>' : "");
+              cell.querySelector(".pill").textContent = data.resolution_label;
+            }
+            // Bad-scan revert while the audit is running: the row is scannable
+            // again, so reflect pending + cleared scan info.
+            if (data.item && data.item.status === "pending") {
+              const statusCell = row.querySelector("[data-status-cell]");
+              if (statusCell) statusCell.innerHTML = '<span class="pill audit-status status-pending">pending</span>';
+              const scannedCell = row.querySelector("[data-scanned-cell]");
+              if (scannedCell) scannedCell.textContent = "";
+            }
+          });
+          if (data.counts) {
+            document.querySelectorAll("[data-tile]").forEach(function (el) {
+              const key = el.getAttribute("data-tile");
+              if (data.counts[key] !== undefined) el.textContent = data.counts[key];
+            });
+          }
+        }
+
+        confirmBtn.addEventListener("click", async function () {
+          const resolution = selectedResolution();
+          if (!resolution || resolving) return;
+          resolving = true;
+          confirmBtn.disabled = true;
+          try {
+            const resp = await auditFetch(AUDIT.resolveUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "X-CSRF-Token": AUDIT.csrfToken },
+              body: JSON.stringify({
+                serial: resolveSerial,
+                resolution: resolution,
+                note: noteEl.value.trim() || null,
+                operator: AUDIT.operator,
+              }),
+            });
+            const data = await resp.json();
+            if (!resp.ok) {
+              alert(data.message || "Could not record the resolution (" + resp.status + ").");
+              confirmBtn.disabled = false;
+              return;
+            }
+            applyResolutionToRows(resolveSerial, data);
+            dialog.close();
+          } catch (err) {
+            alert("Network error recording the resolution — nothing was saved. Try again.");
+            confirmBtn.disabled = false;
+          } finally {
+            resolving = false;
+          }
+        });
+      })();
+
+      // ---- ERP re-check of unexpected scans (in-progress AND completed) ----
+      (function () {
+        const btn = document.getElementById("recheck-erp");
+        if (!btn) return;
+        const resultEl = document.getElementById("recheck-result");
+        btn.addEventListener("click", async function () {
+          btn.disabled = true;
+          btn.textContent = "Checking ERP…";
+          try {
+            const resp = await auditFetch(AUDIT.recheckUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "X-CSRF-Token": AUDIT.csrfToken },
+              body: JSON.stringify({}),
+            });
+            const data = await resp.json();
+            if (!resp.ok) {
+              resultEl.hidden = false;
+              resultEl.className = "audit-scan-result result-unexpected";
+              resultEl.textContent = "Re-check failed: " + (data.message || resp.status);
+              return;
+            }
+            if (data.auto_resolved > 0) {
+              // Resolutions were recorded server-side; reload to show them.
+              window.location.reload();
+              return;
+            }
+            resultEl.hidden = false;
+            resultEl.className = "audit-scan-result result-misplaced";
+            const stillUnknown = (data.rows || []).filter(function (r) { return !r.erp_locations.length; });
+            const elsewhere = (data.rows || []).filter(function (r) { return r.erp_locations.length && !r.now_in_scanned_location; });
+            const caughtUp = (data.rows || []).filter(function (r) { return r.now_in_scanned_location; });
+            let msg = "Checked " + data.checked + " serial" + (data.checked === 1 ? "" : "s") + " against VISUAL — nothing new to auto-resolve.";
+            if (caughtUp.length) {
+              msg += " Already in the scanned location per VISUAL (resolved earlier): "
+                + caughtUp.map(function (r) { return r.serial; }).join(", ") + ".";
+            }
+            if (elsewhere.length) {
+              msg += " On hand elsewhere: " + elsewhere.map(function (r) { return r.serial + " (" + r.erp_locations.join(", ") + ")"; }).join("; ") + ".";
+            }
+            if (stillUnknown.length) {
+              msg += " Not on hand anywhere in VISUAL: " + stillUnknown.map(function (r) { return r.serial; }).join(", ") + " — check for a serial typo or an unreceipted return.";
+            }
+            resultEl.textContent = msg;
+          } catch (err) {
+            resultEl.hidden = false;
+            resultEl.className = "audit-scan-result result-unexpected";
+            resultEl.textContent = "Network error during the ERP re-check.";
+          } finally {
+            btn.disabled = false;
+            btn.textContent = "Re-check ERP";
+          }
+        });
+      })();
+
+      if (!AUDIT.completed) {
+        // Tokens in the scan stream that match one of these are treated as a
+        // location switch, everything else is a serial. Union of every active
+        // auditable bin (so scanning an empty bin's barcode still switches the
+        // location instead of being recorded as a serial) and this session's
+        // snapshot locations (covers tied-WO sales-order barcodes).
+        const KNOWN_LOCATIONS = new Set(
+          {{ known_location_ids|tojson }}
+            .concat({{ items|map(attribute='expected_location')|select|unique|list|tojson }})
+            .map(function (v) { return String(v).toUpperCase(); })
+        );
+
+        const locationInput = document.getElementById("location-input");
+        const batchInput = document.getElementById("scan-batch");
+        const verifyButton = document.getElementById("verify-batch");
+        const scanHint = document.getElementById("scan-hint");
+        const scanResult = document.getElementById("scan-result");
+        const scanLog = document.getElementById("scan-log");
+        let currentLocation = "";
+        let verifying = false;
+
+        function setLocation(value, opts) {
+          currentLocation = value.trim().toUpperCase();
+          if (!currentLocation) return;
+          locationInput.value = currentLocation;
+          scanHint.textContent = AUDIT.locTerm.charAt(0).toUpperCase() + AUDIT.locTerm.slice(1)
+            + " set to " + currentLocation + ". Scan serials, then press Verify.";
+          if (!opts || opts.focus !== false) batchInput.focus();
+          updateVerifyButton();
+        }
+
+        // Parse the scan stream: known-location tokens switch the location in
+        // effect for the serials that follow them.
+        function parseBatch() {
+          const tokens = batchInput.value.split(/\s+/).filter(Boolean);
+          let loc = currentLocation;
+          const queue = [];
+          tokens.forEach(function (token) {
+            const up = token.toUpperCase();
+            if (KNOWN_LOCATIONS.has(up)) { loc = up; }
+            else { queue.push({ serial: up, location: loc }); }
+          });
+          return { queue: queue, lastLocation: loc };
+        }
+
+        function updateVerifyButton() {
+          const count = parseBatch().queue.length;
+          verifyButton.textContent = count ? "Verify " + count + " scan" + (count === 1 ? "" : "s") : "Verify scans";
+          verifyButton.disabled = verifying || count === 0;
+        }
+
+        // Scanners terminate reads with Tab (or Enter): capture both inside
+        // the batch box and turn them into line breaks instead of losing focus.
+        batchInput.addEventListener("keydown", function (e) {
+          if (e.key === "Tab" || e.key === "Enter") {
+            e.preventDefault();
+            const start = batchInput.selectionStart;
+            const end = batchInput.selectionEnd;
+            batchInput.value = batchInput.value.slice(0, start) + "\n" + batchInput.value.slice(end);
+            batchInput.selectionStart = batchInput.selectionEnd = start + 1;
+            updateVerifyButton();
+          }
+        });
+        batchInput.addEventListener("input", updateVerifyButton);
+
+        locationInput.addEventListener("keydown", function (e) {
+          if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); setLocation(locationInput.value); }
+        });
+        // Touchscreen path: a visible button for manual entry (scanners never
+        // need it — their Enter/Tab suffix hits the keydown handler above).
+        document.getElementById("set-location").addEventListener("click", function () {
+          setLocation(locationInput.value);
+          if (!currentLocation) locationInput.focus();
+        });
+        // Manual-entry fallback: tapping away from the field commits a typed
+        // value. Only when nothing is set yet, so it never fights the
+        // Change-location button, and without stealing focus from the tap target.
+        locationInput.addEventListener("blur", function () {
+          if (!currentLocation && locationInput.value.trim()) {
+            setLocation(locationInput.value, { focus: false });
+          }
+        });
+        document.getElementById("change-location").addEventListener("click", function () {
+          currentLocation = "";
+          locationInput.value = "";
+          locationInput.focus();
+          scanHint.textContent = "Scan the " + AUDIT.locTerm + " barcode to continue.";
+          updateVerifyButton();
+        });
+
+        function showResult(kind, message) {
+          scanResult.hidden = false;
+          scanResult.className = "audit-scan-result result-" + kind;
+          scanResult.textContent = message;
+          const entry = document.createElement("div");
+          entry.className = "audit-log-entry result-" + kind;
+          entry.textContent = message;
+          scanLog.prepend(entry);
+          while (scanLog.children.length > 25) scanLog.removeChild(scanLog.lastChild);
+        }
+
+        function applyCounts(counts) {
+          if (!counts) return;
+          document.querySelectorAll("[data-tile]").forEach(function (el) {
+            const key = el.getAttribute("data-tile");
+            if (counts[key] !== undefined) el.textContent = counts[key];
+          });
+        }
+
+        function updateRow(serial, status, scannedLocation) {
+          const row = document.querySelector('[data-filterable-table] tr[data-serial="' + serial.toUpperCase().replace(/"/g, '') + '"]');
+          if (!row) return;
+          const cell = row.querySelector("[data-status-cell]");
+          if (cell) cell.innerHTML = '<span class="pill audit-status status-' + status + '">' + status + '</span>';
+          const scanned = row.querySelector("[data-scanned-cell]");
+          if (scanned) scanned.textContent = scannedLocation || "";
+          const action = row.querySelector("[data-action-cell]");
+          if (action) {
+            action.innerHTML = status === "misplaced"
+              ? '<button type="button" class="button tertiary resolve-btn" data-serial="' + serial.toUpperCase() + '">Resolve</button>'
+              : "";
+          }
+        }
+
+        function addUnexpectedRow(serial, location, nearMatches) {
+          const body = document.getElementById("unexpected-body");
+          document.getElementById("unexpected-card").hidden = false;
+          const existing = body.querySelector('tr[data-serial="' + serial.toUpperCase().replace(/"/g, '') + '"]');
+          if (existing) return;
+          const tr = document.createElement("tr");
+          tr.setAttribute("data-serial", serial.toUpperCase());
+          const hintCell = document.createElement("td");
+          (nearMatches || []).forEach(function (m) {
+            const pill = document.createElement("span");
+            pill.className = "pill idle";
+            pill.title = "Expected " + (m.expected_warehouse || "") + (m.expected_location ? "/" + m.expected_location : "")
+              + " — possible serial typo in the ERP or on the label";
+            pill.textContent = "≈ " + m.serial;
+            hintCell.appendChild(pill);
+            hintCell.appendChild(document.createTextNode(" "));
+          });
+          tr.innerHTML = "<td>" + serial + "</td><td>" + (location || "") + "</td><td>just now</td><td>1</td>";
+          tr.appendChild(hintCell);
+          const actionCell = document.createElement("td");
+          actionCell.setAttribute("data-action-cell", "");
+          actionCell.innerHTML = '<button type="button" class="button tertiary resolve-btn" data-serial="' + serial.toUpperCase() + '">Resolve</button>';
+          tr.appendChild(actionCell);
+          body.prepend(tr);
+        }
+
+        async function submitScan(scan) {
+          const resp = await auditFetch(AUDIT.scanUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-CSRF-Token": AUDIT.csrfToken },
+            body: JSON.stringify({ serial: scan.serial, location: scan.location, operator: AUDIT.operator }),
+          });
+          const data = await resp.json();
+          if (!resp.ok) {
+            showResult("unexpected", "Error: " + (data.message || resp.status));
+            return "error";
+          }
+          const dup = data.is_duplicate ? " (already scanned)" : "";
+          if (data.result === "verified") {
+            showResult("verified", "✔ VERIFIED " + scan.serial + " @ " + scan.location + dup);
+          } else if (data.result === "misplaced") {
+            const expLoc = data.item && data.item.expected_location ? data.item.expected_location : "another location";
+            showResult("misplaced", "⚠ MISPLACED " + scan.serial + " — belongs in " + expLoc + dup);
+          } else {
+            let msg = "✖ UNEXPECTED " + scan.serial + " — not in this audit, review" + dup;
+            if (data.near_matches && data.near_matches.length) {
+              msg += ". Did you mean " + data.near_matches.map(function (m) {
+                return m.serial + (m.expected_location ? " (expected @ " + m.expected_location + ")" : "");
+              }).join(" or ") + "? Possible serial typo in the ERP.";
+            }
+            showResult("unexpected", msg);
+            addUnexpectedRow(scan.serial, scan.location, data.near_matches);
+          }
+          if (data.item && data.result !== "unexpected") {
+            updateRow(scan.serial, data.result, scan.location);
+          }
+          applyCounts(data.counts);
+          return data.result;
+        }
+
+        async function verifyBatch() {
+          if (verifying) return;
+          // Safety net: a location typed but never committed (no Enter, no
+          // blur, no Set tap) still counts — eliminates the dead-end loop.
+          if (!currentLocation && locationInput.value.trim()) {
+            setLocation(locationInput.value, { focus: false });
+          }
+          const submittedText = batchInput.value;
+          const parsed = parseBatch();
+          if (!parsed.queue.length) return;
+          const missing = parsed.queue.filter(function (q) { return !q.location; });
+          if (missing.length) {
+            showResult("unexpected", "Scan the " + AUDIT.locTerm + " barcode first — no " + AUDIT.locTerm
+              + " set for " + missing.map(function (m) { return m.serial; }).join(", "));
+            beep("unexpected");
+            locationInput.focus();
+            return;
+          }
+          verifying = true;
+          updateVerifyButton();
+          const tally = { verified: 0, misplaced: 0, unexpected: 0, error: 0 };
+          let aborted = false;
+          for (const scan of parsed.queue) {
+            try {
+              const result = await submitScan(scan);
+              tally[result] = (tally[result] || 0) + 1;
+              if (result === "error") { aborted = true; break; }
+            } catch (err) {
+              showResult("unexpected", "Network error scanning " + scan.serial + " — batch stopped, nothing lost. Press Verify to retry.");
+              tally.error += 1;
+              aborted = true;
+              break;
+            }
+          }
+          verifying = false;
+          if (!aborted) {
+            // The scanner may have kept typing into the box while the batch
+            // was in flight — remove only what this batch submitted. If the
+            // operator edited mid-flight the prefix no longer matches; leave
+            // the box alone (re-verifying just marks duplicates, loses nothing).
+            if (batchInput.value.startsWith(submittedText)) {
+              batchInput.value = batchInput.value.slice(submittedText.length).replace(/^\s+/, "");
+            }
+            currentLocation = parsed.lastLocation;
+            locationInput.value = currentLocation;
+            const problems = tally.misplaced + tally.unexpected;
+            const summary = "Batch done: " + tally.verified + " verified"
+              + (tally.misplaced ? ", " + tally.misplaced + " misplaced" : "")
+              + (tally.unexpected ? ", " + tally.unexpected + " unexpected" : "") + ".";
+            showResult(problems ? (tally.unexpected ? "unexpected" : "misplaced") : "verified", summary);
+            beep(problems ? (tally.unexpected ? "unexpected" : "misplaced") : "verified");
+          } else {
+            beep("unexpected");
+          }
+          updateVerifyButton();
+          batchInput.focus();
+        }
+
+        verifyButton.addEventListener("click", verifyBatch);
+
+        document.getElementById("complete-audit").addEventListener("click", async function () {
+          // Completion is permanent (pending serials become missing), so never
+          // let scans that were collected but not yet verified fall through.
+          if (batchInput.value.trim()) {
+            showResult("unexpected", "There are unverified scans in the box — press Verify (or clear the box) before completing the audit.");
+            beep("unexpected");
+            verifyButton.focus();
+            return;
+          }
+          if (verifying) {
+            showResult("unexpected", "A batch is still verifying — wait for it to finish before completing the audit.");
+            return;
+          }
+          document.getElementById("complete-dialog").showModal();
+        });
+        document.getElementById("cancel-complete").addEventListener("click", () => document.getElementById("complete-dialog").close());
+        document.getElementById("confirm-complete").addEventListener("click", async function () {
+          this.disabled = true;
+          try {
+            const resp = await auditFetch(AUDIT.completeUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "X-CSRF-Token": AUDIT.csrfToken },
+              body: JSON.stringify({}),
+            });
+            const data = await resp.json();
+            if (resp.ok && data.redirect) { window.location.href = data.redirect; }
+            else { document.getElementById("complete-error").textContent = data.message || "Could not complete the audit."; }
+          } catch (err) { document.getElementById("complete-error").textContent = "Confirmation is uncertain. Press Confirm completion again to retry the same request."; }
+          finally { this.disabled = false; }
+        });
+
+        batchInput.focus();
+      }
+    </script>
+  </body>
+</html>

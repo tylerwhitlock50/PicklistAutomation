@@ -60,7 +60,10 @@ def create_app(config=None, erp=None):
                     .where(m.users.c.enabled.is_(True))).first()
             require(row is not None, "Sign in to continue.", "unauthorized", 401)
             if request.method not in ("GET", "HEAD", "OPTIONS"):
-                require(hmac.compare_digest(request.headers.get("X-CSRF-Token", ""), m.digest([token, "csrf"])), "Session validation failed. Reload and try again.", "csrf", 403)
+                csrf = request.headers.get("X-CSRF-Token", "")
+                if not csrf and request.blueprint == "audit":
+                    csrf = request.form.get("csrf_token", "")
+                require(hmac.compare_digest(csrf, m.digest([token, "csrf"])), "Session validation failed. Reload and try again.", "csrf", 403)
             g.actor = {"id": row.user_id, "name": row.name, "role": row.role}
             g.csrf = m.digest([token, "csrf"])
             return fn(*args, **kwargs)
@@ -95,6 +98,10 @@ def create_app(config=None, erp=None):
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "same-origin"
         response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+        if request.blueprint == "audit":
+            response.headers["Cache-Control"] = "no-store"
+            nonce = getattr(g, "audit_nonce", "")
+            response.headers["Content-Security-Policy"] = f"default-src 'self'; script-src 'self' 'nonce-{nonce}'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
         if request.path.startswith("/api/") or request.path in ("/", "/sw.js", "/index.html"):
             response.headers["Cache-Control"] = "no-store"
         if mode != "demo":
@@ -288,4 +295,6 @@ def create_app(config=None, erp=None):
         require(not path.startswith("api/"), "Endpoint not found.", "not_found", 404)
         return send_from_directory(app.config["DIST"], path)
 
+    from fulfillment.audit.runtime import register
+    register(app, authenticated)
     return app

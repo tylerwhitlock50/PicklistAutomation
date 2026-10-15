@@ -1,0 +1,9 @@
+<nav class="dispatch-audit-nav" aria-label="Dispatch navigation">
+  <a href="/">Dispatch · Pick, pack &amp; ship</a>
+  <a href="{{ url_for('audit.audit_dashboard') }}">Inventory audit</a>
+  <a href="{{ url_for('audit.audit_analytics_page') }}">Analytics</a>
+  {% if g.actor.role == 'admin' %}<a href="{{ url_for('audit.audit_settings') }}">Audit settings</a>{% endif %}
+  <small>{{ g.actor.name }} · {{ audit_mode|upper }}</small>
+</nav>
+{% if audit_mode == 'demo' %}<p class="flash">Training workspace. Synthetic inventory; nothing here changes VISUAL.</p>{% endif %}
+<script src="{{ url_for('audit.static', filename='requests.js') }}"></script>

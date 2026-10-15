@@ -314,6 +314,15 @@ function App() {
                 {name}
               </button>
             ))}
+            <button
+              className="nav"
+              disabled={busy || !!pending || adminLocked}
+              onClick={() => {
+                window.location.href = "/audit";
+              }}
+            >
+              <span>06</span>Inventory audit
+            </button>
           </nav>
           <div className="sidebar-bottom">
             <small>Signed in as</small>

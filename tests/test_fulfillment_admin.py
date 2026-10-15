@@ -217,7 +217,7 @@ def test_schema_one_upgrade_preserves_work_and_requires_configuration_review(set
     db.initialize()
     with db.engine.connect() as conn:
         assert service.get(conn, work["id"]) == work
-        assert conn.execute(select(m.schema.c.version)).scalar() == 2
+        assert conn.execute(select(m.schema.c.version)).scalar() == m.SCHEMA_VERSION
         assert not admin.load(conn)["configured"]
 
 
