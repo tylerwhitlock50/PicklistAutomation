@@ -75,6 +75,19 @@ def log_request_start() -> None:
     request.environ["request_start_time"] = time.perf_counter()
 
 
+@app.before_request
+def enforce_operator_cutover():
+    from picklist.cutover import operator_cutover_enabled
+    if not operator_cutover_enabled():
+        return None
+    operator_mutation = request.blueprint in {"pick", "verify"} and request.method not in {"GET", "HEAD", "OPTIONS"}
+    export = request.path.startswith("/export") or (request.blueprint in {"pick", "verify"} and request.path.endswith("/export"))
+    generation = request.endpoint in {"runs.run_picklist", "runs.run_both_picklists", "runs.api_run_picklist"}
+    if operator_mutation or export or generation:
+        return jsonify(error="operator_cutover", message="Picking and packing have moved to Dispatch. Use the new operator app."), 410
+    return None
+
+
 @app.after_request
 def log_request_complete(response):
     if request.path.startswith("/static/"):

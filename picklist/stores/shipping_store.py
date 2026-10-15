@@ -431,6 +431,8 @@ def sync_serial_reservations(
     the serial is selected again, at which point the row becomes active with a new
     ``first_assigned_at`` while the order's original accumulation clock is preserved.
     """
+    from picklist.cutover import require_legacy_operator_workflow
+    require_legacy_operator_workflow()
     live_by_serial: dict[str, dict[str, Any]] = {}
     for raw in live_serials:
         serial = str(raw.get("serial_no") or raw.get("SERIAL_NO") or "").strip().upper()

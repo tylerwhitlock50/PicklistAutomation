@@ -96,6 +96,8 @@ def fetch_picklist_from_mssql(
     query_type: str,
     query_options: Optional[dict[str, Any]] = None,
 ) -> pd.DataFrame:
+    from picklist.cutover import require_legacy_operator_workflow
+    require_legacy_operator_workflow()
     query = load_query(query_type, query_options=query_options)
     gate_payload = None
     gate_mode = get_release_gate_mode()

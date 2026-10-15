@@ -1,5 +1,9 @@
 # Picklist Automation (Flask)
 
+The new **Dispatch** operator PWA and dedicated API live alongside this application.
+See [Dispatch setup, training, integration and cutover](docs/dispatch-implementation.md).
+The existing operator workflow remains enabled until the explicit cutover switch is set.
+
 Simple Python app that:
 - Reads SQL queries from files (`sql/query_guns.sql` and `sql/query_components.sql`)
 - Runs against Microsoft SQL Server

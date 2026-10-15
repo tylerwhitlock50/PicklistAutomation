@@ -239,7 +239,8 @@ class RequestServiceTests(unittest.TestCase):
         self.assertEqual(self.exceptions, {})
 
     def test_hold_request_becomes_manual_hold_and_releases_on_close(self):
-        req = request_service.create(request_type="hold_exception", actor="Harmony", actor_team="sales", cust_order_id="SO-5", fields={"exception_kind": "marketing", "expires_at": "2026-10-08"})
+        future = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+        req = request_service.create(request_type="hold_exception", actor="Harmony", actor_team="sales", cust_order_id="SO-5", fields={"exception_kind": "marketing", "expires_at": future})
         self.assertEqual(request_store.active_manual_holds(), [])
         approved = request_service.transition(req["id"], "acknowledged", actor="Robert", actor_team="shipping")
         holds = request_store.active_manual_holds(datetime(2026, 10, 1, tzinfo=timezone.utc))

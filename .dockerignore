@@ -7,3 +7,8 @@ __pycache__/
 logs/
 exports/
 data/
+.env.fulfillment
+.test-tmp/
+operator-web/node_modules/
+operator-web/dist/
+artifacts/

@@ -15,3 +15,8 @@ exports/*.xlsx
 exports/*.png
 logs/*.log
 ui-validation/
+operator-web/node_modules/
+operator-web/dist/
+.test-tmp/
+.env.fulfillment
+artifacts/fulfillment-demo/

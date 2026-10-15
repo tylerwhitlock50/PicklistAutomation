@@ -314,15 +314,22 @@ def _allocate(
     remaining: dict[str, float],
     require_complete: bool,
     reserved: Optional[dict[str, float]] = None,
+    reserved_lines: Optional[dict[tuple[str, str], float]] = None,
 ) -> dict:
     trial = deepcopy(remaining)
-    reserved = reserved or {}
+    reserved = deepcopy(reserved or {})
+    reserved_lines = reserved_lines or {}
+    # Explicit line reservations must never migrate merely because a SKU repeats.
+    unbound = deepcopy(reserved)
+    for (part_id, _), qty in reserved_lines.items():
+        unbound[part_id] = max(0.0, unbound.get(part_id, 0.0) - qty)
     allocations = []
     for line in order["lines"]:
         available = max(0.0, trial.get(line["part_id"], 0.0))
-        reserved_qty = min(
-            line["open_qty"], max(0.0, reserved.get(line["part_id"], 0.0))
-        )
+        bound_qty = reserved_lines.get((line["part_id"], str(line["line_no"])), 0.0)
+        loose_qty = min(max(0.0, line["open_qty"] - bound_qty), unbound.get(line["part_id"], 0.0))
+        reserved_qty = min(line["open_qty"], bound_qty + loose_qty)
+        unbound[line["part_id"]] = max(0.0, unbound.get(line["part_id"], 0.0) - loose_qty)
         new_qty = min(max(0.0, line["open_qty"] - reserved_qty), available)
         qty = reserved_qty + new_qty
         if require_complete and qty < line["open_qty"] - EPSILON:
@@ -552,11 +559,17 @@ def evaluate_release_gate(
             remaining[part_id] = max(0.0, remaining.get(part_id, 0.0) - qty)
 
     def allocate(order: dict, current: dict[str, float], require_complete: bool) -> dict:
+        line_reservations = {}
+        for row in valid_reservations:
+            if row["cust_order_id"] == order["order_id"].upper() and row.get("line_no") is not None:
+                identity = (row["part_id"], str(row["line_no"]))
+                line_reservations[identity] = line_reservations.get(identity, 0.0) + 1.0
         return _allocate(
             order,
             current,
             require_complete,
             reserved=reserved_by_order_part.get(order["order_id"].upper(), {}),
+            reserved_lines=line_reservations,
         )
 
     active_exceptions = _active_exception_map(exceptions, today)
@@ -1097,7 +1110,12 @@ def evaluate_release_gate(
                 (order_id, part_id), []
             )
             existing_needed = max(0, int(round(float(allocation.get("reserved_qty") or 0))))
-            selected_existing = existing_candidates[:existing_needed]
+            eligible_existing = [r for r in existing_candidates
+                                 if r.get("line_no") is None or str(r["line_no"]) == str(allocation.get("line_no"))]
+            eligible_existing.sort(key=lambda r: r.get("line_no") is None)
+            selected_existing = eligible_existing[:existing_needed]
+            for existing in selected_existing:
+                existing_candidates.remove(existing)
             new_needed = max(0, int(round(float(allocation.get("new_qty") or 0))))
             selected_new = available_serials_by_part.get(part_id, [])[:new_needed]
             if selected_new:

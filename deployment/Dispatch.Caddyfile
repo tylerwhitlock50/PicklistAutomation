@@ -1,0 +1,4 @@
+{$FULFILLMENT_HOST} {
+    tls internal
+    reverse_proxy dispatch-api:5090
+}

@@ -454,6 +454,33 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertEqual({item["serial_no"] for item in row["serial_assignments"]}, {"SER-1", "SER-2"})
         self.assertEqual(result["summary"]["tracked_serials"], 2)
 
+    def test_repeated_sku_keeps_reserved_serial_on_second_order_line(self):
+        args = dict(
+            customer_policies={"MAJOR": {"account_type": "major", "accumulate": True, "target_guns": 42, "mix_orders": False}},
+            serial_inventory=[{"SERIAL_NO": "SER-1", "PART_ID": "GUN-A"}, {"SERIAL_NO": "SER-2", "PART_ID": "GUN-A"}],
+            reservations=[{"serial_no": "SER-1", "part_id": "GUN-A", "cust_order_id": "SO-MAJOR", "line_no": 2,
+                           "first_assigned_at": "2026-08-26T12:00:00+00:00", "accumulation_started_at": "2026-08-26T12:00:00+00:00"}],
+        )
+        rows = [candidate("SO-MAJOR", available=2, customer="MAJOR", line=n) for n in (1, 2)]
+        first = self.build(rows, **args)
+        assignments = decision(first, "SO-MAJOR")["serial_assignments"]
+        self.assertEqual({str(a["line_no"]): a["serial_no"] for a in assignments}, {"1": "SER-2", "2": "SER-1"})
+        args["reservations"] = first["reservation_updates"]
+        second = decision(self.build(rows, **args), "SO-MAJOR")["serial_assignments"]
+        self.assertEqual({str(a["line_no"]): a["serial_no"] for a in second}, {"1": "SER-2", "2": "SER-1"})
+
+    def test_unbound_reservation_cannot_supply_two_repeated_lines(self):
+        result = self.build(
+            [candidate("SO-MAJOR", available=1, customer="MAJOR", line=n) for n in (1, 2)],
+            customer_policies={"MAJOR": {"account_type": "major", "accumulate": True, "target_guns": 42, "mix_orders": False}},
+            serial_inventory=[{"SERIAL_NO": "SER-1", "PART_ID": "GUN-A"}],
+            reservations=[{"serial_no": "SER-1", "part_id": "GUN-A", "cust_order_id": "SO-MAJOR",
+                           "first_assigned_at": "2026-08-26T12:00:00+00:00", "accumulation_started_at": "2026-08-26T12:00:00+00:00"}],
+        )
+        row = decision(result, "SO-MAJOR")
+        self.assertEqual(sum(a["qty"] for a in row["allocations"]), 1)
+        self.assertEqual(len(row["serial_assignments"]), 1)
+
     def test_ship_to_history_row_without_customer_is_ignored(self):
         for bad_customer in (None, "", float("nan")):
             result = self.build(

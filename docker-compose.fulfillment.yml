@@ -1,0 +1,48 @@
+services:
+  dispatch-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: dispatch
+      POSTGRES_USER: dispatch
+      POSTGRES_PASSWORD: ${FULFILLMENT_DB_PASSWORD:?Set FULFILLMENT_DB_PASSWORD}
+    volumes:
+      - dispatch-db:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U dispatch -d dispatch"]
+      interval: 5s
+      retries: 12
+    restart: unless-stopped
+  dispatch-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.fulfillment
+    env_file: .env.fulfillment
+    environment:
+      FULFILLMENT_LEGACY_DB: /legacy/picklist_history.db
+    volumes:
+      - ./data:/legacy:ro
+    depends_on:
+      dispatch-db:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5090/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+  dispatch-web:
+    image: caddy:2-alpine
+    environment:
+      FULFILLMENT_HOST: ${FULFILLMENT_HOST:-dispatch.local}
+    ports:
+      - "8443:443"
+    volumes:
+      - ./deployment/Dispatch.Caddyfile:/etc/caddy/Caddyfile:ro
+      - dispatch-caddy:/data
+    depends_on:
+      dispatch-api:
+        condition: service_healthy
+    restart: unless-stopped
+volumes:
+  dispatch-db:
+  dispatch-caddy:
