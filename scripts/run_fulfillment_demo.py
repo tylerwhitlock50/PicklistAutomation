@@ -30,6 +30,6 @@ if __name__ == "__main__":
     db.initialize()
     with db.transaction() as conn:
         if not conn.execute(select(users.c.id).where(users.c.id == "DEMO")).first():
-            conn.execute(users.insert().values(id="DEMO", name="Demo operator", role="supervisor", pin_hash=generate_password_hash("123456"), enabled=True))
+            conn.execute(users.insert().values(id="DEMO", name="Demo administrator", role="admin", pin_hash=generate_password_hash("123456"), enabled=True))
     print(f"TRAINING ONLY: http://127.0.0.1:{args.port} | Operator DEMO | PIN 123456 | Database {path.name}", flush=True)
     app.run(host="127.0.0.1", port=args.port, debug=False)

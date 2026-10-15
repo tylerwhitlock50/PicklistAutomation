@@ -4,6 +4,7 @@ import JsBarcode from "jsbarcode";
 import { api, ApiError, packedQuantity } from "./api";
 import type { Order, Work, Session, Line } from "./types";
 import "./style.css";
+import { Admin } from "./Admin";
 
 function Barcode({ value }: { value: string }) {
   const ref = useRef<SVGSVGElement>(null);
@@ -30,6 +31,7 @@ const stateName = (s: string) =>
   })[s] || s;
 
 function App() {
+  const [adminLocked, setAdminLocked] = useState(false);
   const [session, setSession] = useState<Session | null>(null),
     [loading, setLoading] = useState(true);
   const [orders, setOrders] = useState<Order[]>([]),
@@ -108,7 +110,11 @@ function App() {
     setError("");
     setNotice("");
   }
-  async function send(path: string, body: unknown, id: string = crypto.randomUUID()) {
+  async function send(
+    path: string,
+    body: unknown,
+    id: string = crypto.randomUUID(),
+  ) {
     setBusy(true);
     setError("");
     setNotice("");
@@ -290,10 +296,14 @@ function App() {
               ["cart", "02", "My work"],
               ["packing", "03", "Packing station"],
               ["exceptions", "04", "Exceptions"],
+              ...(session.operator.role === "admin"
+                ? [["admin", "05", "Administration"]]
+                : []),
             ].map(([id, no, name]) => (
               <button
                 className={tab === id ? "nav active" : "nav"}
                 key={id}
+                disabled={busy || !!pending || adminLocked}
                 onClick={() => {
                   setTab(id);
                   setWork(null);
@@ -320,7 +330,7 @@ function App() {
                   setError((e as Error).message);
                 }
               }}
-              disabled={busy || !!pending}
+              disabled={busy || !!pending || adminLocked}
             >
               Sign out
             </button>
@@ -339,7 +349,9 @@ function App() {
                       ? "Your work."
                       : tab === "packing"
                         ? "Every box, verified."
-                        : "Resolve and continue."}
+                        : tab === "admin"
+                          ? "Warehouse administration."
+                          : "Resolve and continue."}
               </h1>
               <p>
                 {work
@@ -400,7 +412,18 @@ function App() {
               </button>
             </div>
           )}
-          {!work ? (
+          {tab === "admin" && session.operator.role === "admin" ? (
+            <Admin
+              session={session}
+              online={online}
+              onLock={setAdminLocked}
+              onAuthLost={() => setSession(null)}
+              onOpenWork={(selected) => {
+                setTab("cart");
+                void select(selected).catch((e) => setError(e.message));
+              }}
+            />
+          ) : !work ? (
             <>
               <div className="section-title">
                 <h2>
@@ -1013,7 +1036,9 @@ function App() {
                     >
                       Report exception
                     </button>
-                    {session.operator.role === "supervisor" && (
+                    {["supervisor", "admin"].includes(
+                      session.operator.role,
+                    ) && (
                       <>
                         <button
                           className="secondary"
@@ -1032,7 +1057,7 @@ function App() {
                       </>
                     )}
                   </div>
-                  {session.operator.role === "supervisor" && (
+                  {["supervisor", "admin"].includes(session.operator.role) && (
                     <>
                       <form
                         className="inline-form"

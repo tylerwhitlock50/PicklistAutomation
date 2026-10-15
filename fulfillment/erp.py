@@ -7,22 +7,21 @@ from copy import deepcopy
 from collections import Counter
 from datetime import datetime, timezone
 from decimal import Decimal
-import json
-import os
 from pathlib import Path
 import re
-import sqlite3
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import create_engine, text
 
 from fulfillment.domain import address, complete_address, identifier, key, quantity, require, Conflict
 from fulfillment.model import now
-from picklist.domain.release_gate import evaluate_release_gate
-from picklist.domain.readiness import evaluate_readiness, STOCK_REASONS
-from picklist.domain.pick_path import pick_line_sort_key
+from fulfillment.rules.release_gate import evaluate_release_gate
+from fulfillment.rules.readiness import evaluate_readiness, STOCK_REASONS
+from fulfillment.rules.pick_path import pick_line_sort_key
+from fulfillment import admin
+from fulfillment.model import digest
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent
 COMPONENTS = "FG-COMP,FG-STOCK,FG-APPAREL,COMPONENT,FG-BASE,FG-RING,FG-BARREL,FG-MUZZLE"
 
 
@@ -51,15 +50,53 @@ class DemoERP:
                                        serialized=False, serials=[], warehouse="DISTRIBUTION", location="BIN-04")]}]
         self.packlists = {}
 
-    def available(self, works, reservations):
+    def context(self):
+        with self.database.engine.connect() as conn:
+            return admin.context(conn)
+
+    def inspect_order(self, order):
+        result = next((deepcopy(o) for o in self.orders if o["order"] == order), None)
+        require(result is not None, "Training order not found.", "not_found", 404)
+        result["document_fingerprint"] = digest([result["order"], address(result["destination"])])
+        result["document_context"] = {"training": "Synthetic order; no real documents"}
+        return result
+
+    def available(self, works, reservations, context=None):
+        context = context or (self.context() if hasattr(self, "database") else admin.context(state=admin.initial_state()))
         active = {w["order"] for w in works if w["state"] != "cancelled"}
-        return {"orders": [deepcopy(o) for o in self.orders if o["order"] not in active], "reservations": reservations, "as_of": now()}
+        candidates = []
+        for order in self.orders:
+            if order["order"] in active:
+                continue
+            supply = {}
+            for line in order["lines"]:
+                supply[line["part"]] = supply.get(line["part"], Decimal(0)) + quantity(line["quantity"])
+            for line in order["lines"]:
+                candidates.append(dict(CUST_ORDER_ID=order["order"], CUSTOMER_ID=order.get("customer_id", "DEMO-SUPPLY"), CUSTOMER_NAME=order["customer"],
+                    SHIP_TO_ID=order["ship_to"], LINE_NO=line["order_line"], PART_ID=line["part"], ITEM_TYPE="guns" if line["serialized"] else "components",
+                    OPEN_QTY=line["quantity"], AVAILABLE_QTY=supply[line["part"]], ORDER_RELEASED=1, LINE_AVAILABLE=1, CREDIT_APPROVED=1, SHIP_TO_PRESENT=1))
+        gate = evaluate_release_gate(candidates, today=datetime.now(ZoneInfo(context["timezone"])).date(), mode="enforced",
+            customer_policies=context["policies"], due_override_days=context["due_days"], exceptions=context["exceptions"],
+            manual_holds=context["holds"], min_ship_to_cooldown_days=context["cooldown"], local_now=datetime.now(ZoneInfo(context["timezone"])))
+        eligible = []
+        for decision in gate["decisions"]:
+            order = self.inspect_order(decision["order_id"])
+            reasons = admin.order_blocks(context, order["order"], order["document_fingerprint"])
+            if reasons:
+                decision.update(decision="BLOCKED", label=", ".join(reasons))
+            if decision["decision"] == "RELEASE":
+                order["policy"] = clean(decision)
+                order["policy_version"] = context["version"]
+                eligible.append(order)
+        return {"orders": eligible, "reservations": reservations, "decisions": clean(gate["decisions"]), "as_of": now()}
 
     def check_pick(self, work, line, payload):
-        return None
+        self.check_order(work)
 
     def check_order(self, work, final=False):
-        return None
+        if hasattr(self, "database"):
+            reasons = admin.order_blocks(self.context(), work["order"], self.inspect_order(work["order"])["document_fingerprint"])
+            require(not reasons, "Order is blocked: " + ", ".join(reasons), "hold")
 
     def packlist(self, packlist, work):
         require(packlist in self.packlists, "Packlist not found. In training, load the sample packlist first.", "not_found", 404)
@@ -67,29 +104,14 @@ class DemoERP:
 
 
 class VisualERP:
-    def __init__(self, connection, site, legacy_path, *, timezone_name="America/Denver"):
-        require(bool(connection) and bool(site) and bool(legacy_path), "VISUAL connection, site and legacy context database are required.")
+    def __init__(self, connection, site, database):
+        require(bool(connection) and bool(site) and database is not None, "VISUAL connection, site and Dispatch database are required.")
         self.engine = create_engine(connection, pool_pre_ping=True, isolation_level="SERIALIZABLE")
-        self.site, self.legacy_path, self.timezone = site.upper(), Path(legacy_path), ZoneInfo(timezone_name)
+        self.site, self.database = site.upper(), database
 
     def context(self):
-        # Opening mode=ro both prevents accidental writes and refuses a missing file.
-        with sqlite3.connect(self.legacy_path.resolve().as_uri() + "?mode=ro", uri=True) as conn:
-            conn.row_factory = sqlite3.Row
-            stamp = now()
-            settings = {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM settings")}
-            def configured(name, default):
-                return settings.get(name) or os.getenv(name.upper(), default)
-            policy = json.loads(configured("release_gate_customer_policies_json", "{}"))
-            require(isinstance(policy, dict), "Release policy configuration is invalid.")
-            return {"policies": policy,
-                    "due_days": int(configured("release_gate_due_override_days", "1")),
-                    "cooldown": int(configured("release_gate_min_ship_to_cooldown_days", "1")),
-                    "exceptions": [dict(r) for r in conn.execute("SELECT * FROM release_gate_exceptions WHERE revoked_at IS NULL AND expires_at > ?", (stamp,))],
-                    "holds": [dict(r) for r in conn.execute("SELECT * FROM manual_order_holds WHERE released_at IS NULL AND expires_at > ?", (stamp,))],
-                    "doc_holds": [dict(r) for r in conn.execute("SELECT * FROM readiness_holds WHERE cleared_at IS NULL AND blocking = 1 AND reason_code IN ('ship_to_vs_ffl_name_mismatch','ship_to_vs_ffl_premise_mismatch')")],
-                    "ocr_enabled": str(configured("readiness_ocr_enabled", "false")).lower() == "true",
-                    "readiness_at": (conn.execute("SELECT evaluated_at FROM readiness_snapshots WHERE error IS NULL ORDER BY id DESC LIMIT 1").fetchone() or [None])[0]}
+        with self.database.engine.connect() as conn:
+            return admin.context(conn)
 
     @staticmethod
     def read(conn, query, **params):
@@ -98,25 +120,28 @@ class VisualERP:
         return [dict(r) for r in rows]
 
     @staticmethod
-    def render(filename):
+    def render(filename, rules=None):
+        rules = rules or admin.DEFAULT_RULES
         query = (ROOT / "sql" / filename).read_text(encoding="utf-8")
         query = re.sub(r"\s+WITH\s*\(NOLOCK\)", "", query, flags=re.I)
         def literals(values, alias):
-            return " UNION ALL ".join("SELECT '" + v.replace("'", "''") + "' AS " + alias for v in values)
-        return (query.replace("__RELEASE_LOOKAHEAD_DAYS__", str(int(os.getenv("GUNS_LOOKAHEAD_DAYS", "10"))))
-                .replace("__COMPONENT_PRODUCT_CODES__", literals(os.getenv("SHORTAGE_PRODUCT_CODES", COMPONENTS).split(","), "PRODUCT_CODE"))
-                .replace("__RELEASE_EXCLUDED_CUSTOMERS__", literals(["CA MARK"], "CUSTOMER_TERM"))
+            return " UNION ALL ".join("SELECT '" + v.replace("'", "''") + "' AS " + alias for v in values) if values else "SELECT CAST(NULL AS varchar(80)) AS " + alias + " WHERE 1=0"
+        return (query.replace("__RELEASE_LOOKAHEAD_DAYS__", str(rules["lookahead_days"]))
+                .replace("__COMPONENT_PRODUCT_CODES__", literals(rules["component_codes"], "PRODUCT_CODE"))
+                .replace("__RELEASE_EXCLUDED_CUSTOMERS__", literals(rules["excluded_customers"], "CUSTOMER_TERM"))
                 .replace("__RELEASE_SERIAL_PART_FILTER__", "AND it.SITE_ID = :site"))
 
-    def candidate_query(self):
-        query = self.render("release_candidates.sql")
+    def candidate_query(self, rules=None):
+        query = self.render("release_candidates.sql", rules)
         query = query.replace("WHERE col.PART_ID IS NOT NULL", "WHERE co.SITE_ID = :site AND col.PART_ID IS NOT NULL")
         # Site-aware bin supply even when part IDs are shared between sites.
         query = query.replace("WHERE pl.QTY > 0", "WHERE pl.QTY > 0 AND EXISTS (SELECT 1 FROM dbo.WAREHOUSE wh WHERE wh.ID = pl.WAREHOUSE_ID AND wh.SITE_ID = :site)")
         return query
 
-    def detail(self, conn, order):
-        query = self.render("order_detail.sql")
+    def detail(self, conn, order, rules=None):
+        if rules is None and hasattr(self, "database"):
+            rules = self.context()
+        query = self.render("order_detail.sql", rules)
         query = query.replace("co.ID                                                   AS CUST_ORDER_ID,", "co.ID AS CUST_ORDER_ID, co.SITE_ID, p.STOCK_UM,")
         query = query.replace("WHERE co.ID = :so", "WHERE co.ID = :so AND co.SITE_ID = :site")
         rows = self.read(conn, query, so=order, site=self.site)
@@ -144,20 +169,28 @@ class VisualERP:
                             postal=h.get("SHIPTO_ZIP"), country=h.get("SHIPTO_COUNTRY")))
 
     def blocking(self, rows, context):
-        if context["ocr_enabled"]:
-            stamp = context["readiness_at"]
-            require(stamp is not None, "Document checks are unavailable.", "unavailable", 503)
-            dt = datetime.fromisoformat(stamp).replace(tzinfo=timezone.utc) if datetime.fromisoformat(stamp).tzinfo is None else datetime.fromisoformat(stamp)
-            require((datetime.now(timezone.utc) - dt).total_seconds() < 900, "Document checks are stale. Refresh readiness in the management app.", "unavailable", 503)
-        assessed = evaluate_readiness(rows, today=datetime.now(self.timezone).date(), manual_holds=context["holds"])
+        assessed = evaluate_readiness(rows, today=datetime.now(ZoneInfo(context["timezone"])).date(), manual_holds=context["holds"])
         reasons = [h["reason_code"] for h in assessed["holds"] if h["blocking"] and h["reason_code"] not in STOCK_REASONS]
-        reasons += [h["reason_code"] for h in context["doc_holds"] if h["cust_order_id"] == rows[0]["CUST_ORDER_ID"]]
+        reasons += admin.order_blocks(context, rows[0]["CUST_ORDER_ID"], self.document_fingerprint(rows))
         return reasons
 
-    def available(self, works, reservations):
-        context = self.context()
+    def document_fingerprint(self, rows):
+        fields = {k: clean(v) for k, v in rows[0].items() if "FFL" in k or "DOC" in k or "ATTACH" in k}
+        return digest([self.site, rows[0]["CUST_ORDER_ID"], self.destination(rows), fields])
+
+    def inspect_order(self, order):
         with self.engine.begin() as conn:
-            candidates = self.read(conn, self.candidate_query(), site=self.site)
+            rows = self.detail(conn, order)
+        return dict(order=order, site=self.site, customer=rows[0]["CUSTOMER_NAME"], destination=self.destination(rows),
+                    document_fingerprint=self.document_fingerprint(rows),
+                    document_context={k: clean(v) for k, v in rows[0].items() if "FFL" in k or "DOC" in k or "ATTACH" in k})
+
+    def available(self, works, reservations, context=None):
+        context = context or self.context()
+        require(context.get("configured"), "Review and publish Dispatch settings, or import them before starting live work.", "configuration", 503)
+        local_timezone = ZoneInfo(context["timezone"])
+        with self.engine.begin() as conn:
+            candidates = self.read(conn, self.candidate_query(context), site=self.site)
             serials = self.read(conn, self.render("release_serial_supply.sql"), site=self.site)
             identities = Counter((s["PART_ID"], s["SERIAL_NO"]) for s in serials)
             require(all(quantity(s["NET_QTY"]) == 1 and identities[(s["PART_ID"], s["SERIAL_NO"])] == 1 for s in serials),
@@ -169,7 +202,7 @@ class VisualERP:
             # A released order remains unavailable until ERP confirms its quantities.
             for work in works:
                 if work["state"] == "released":
-                    rows = self.detail(conn, work["order"])
+                    rows = self.detail(conn, work["order"], context)
                     totals = {str(r["LINE_NO"]): quantity(r["SHIPPED_QTY"], zero=True) for r in rows}
                     expected = {}
                     for l in work["lines"]:
@@ -196,10 +229,10 @@ class VisualERP:
             serial_map = {key(self.site, s["PART_ID"], s["SERIAL_NO"]).upper(): s for s in serials}
             gate_serials = [{**s, "SERIAL_NO": alias} for alias, s in serial_map.items()]
             gate_reservations = [{**r, "serial_no": key(self.site, r["part_id"], r["serial_no"]).upper()} for r in reservations if r["cust_order_id"] not in occupied_ids]
-            local = datetime.now(self.timezone)
+            local = datetime.now(local_timezone)
             for w in works:
                 if w["state"] != "cancelled":
-                    history.append({"CUSTOMER_ID": w.get("customer_id"), "SHIP_TO_ID": w["ship_to"], "LAST_SHIPPED_DATE": datetime.fromisoformat(w["created_at"]).astimezone(self.timezone).date()})
+                    history.append({"CUSTOMER_ID": w.get("customer_id"), "SHIP_TO_ID": w["ship_to"], "LAST_SHIPPED_DATE": datetime.fromisoformat(w["created_at"]).astimezone(local_timezone).date()})
             gate = evaluate_release_gate(candidates, today=local.date(), mode="enforced", customer_policies=context["policies"],
                                          due_override_days=context["due_days"], exceptions=context["exceptions"], serial_inventory=gate_serials,
                                          reservations=gate_reservations, ship_to_history=history, local_now=local,
@@ -214,8 +247,10 @@ class VisualERP:
             for decision in gate["decisions"]:
                 if decision["decision"] != "RELEASE":
                     continue
-                rows = self.detail(conn, decision["order_id"])
-                if self.blocking(rows, context) or not complete_address(self.destination(rows)):
+                rows = self.detail(conn, decision["order_id"], context)
+                blocked = self.blocking(rows, context)
+                if blocked or not complete_address(self.destination(rows)):
+                    decision.update(decision="BLOCKED", label=", ".join(blocked) or "Incomplete destination")
                     continue
                 details = {str(r["LINE_NO"]): r for r in rows}
                 lines = []
@@ -253,9 +288,9 @@ class VisualERP:
                 baseline = {n: {"ordered": str(r["ORDER_QTY"]), "shipped": str(r["SHIPPED_QTY"]), "part": r["PART_ID"], "uom": r["STOCK_UM"]} for n, r in details.items()}
                 orders.append(dict(site=self.site, order=decision["order_id"], customer=rows[0]["CUSTOMER_NAME"],
                                    customer_id=rows[0]["CUSTOMER_ID"], ship_to=rows[0]["SHIP_TO_ID"], destination=self.destination(rows),
-                                   lines=lines, baseline=baseline, policy=clean(decision)))
+                                   lines=lines, baseline=baseline, policy=clean(decision), policy_version=context["version"]))
             saved = [{**r, "serial_no": serial_map[r["serial_no"]]["SERIAL_NO"]} for r in gate["reservation_updates"]]
-            return {"orders": clean(orders), "reservations": clean(saved), "as_of": now()}
+            return {"orders": clean(orders), "reservations": clean(saved), "decisions": clean(gate["decisions"]), "as_of": now()}
 
     def check_order(self, work, final=False):
         context = self.context()

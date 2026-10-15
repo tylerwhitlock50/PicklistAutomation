@@ -1,74 +1,83 @@
-"""Explicit database setup and account management: python -m fulfillment.cli --help."""
+"""Independent Dispatch setup: python -m fulfillment.cli --help."""
 import argparse
 import getpass
 import json
 import os
-from pathlib import Path
-import sqlite3
-
 from sqlalchemy import select
 from werkzeug.security import generate_password_hash
-
-from fulfillment.model import Database, users, works, put_setting, now
+from fulfillment import admin, model as m
 from fulfillment.domain import identifier, require
+from fulfillment.service import event
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["init", "user", "disable-user", "import-reservations", "activate"])
+    parser.add_argument("command", choices=["init", "user", "disable-user", "import-legacy", "activate"])
     parser.add_argument("--operator")
     parser.add_argument("--name")
-    parser.add_argument("--role", choices=["operator", "supervisor"], default="operator")
-    parser.add_argument("--legacy-db")
-    parser.add_argument("--legacy-stopped", action="store_true", help="Attest legacy pick endpoints and scheduler have been disabled")
+    parser.add_argument("--role", choices=["operator", "supervisor", "admin"], default="operator")
+    parser.add_argument("--legacy-db", help="Used only for the optional one-time import")
+    parser.add_argument("--legacy-stopped", action="store_true")
+    parser.add_argument("--apply", action="store_true", help="Apply the reviewed import; default is preview only")
+    parser.add_argument("--exclusive-operation", action="store_true", help="Attest no other picking/allocation system operates on this site's stock")
     args = parser.parse_args()
     url = os.environ.get("FULFILLMENT_DATABASE_URL")
     require(bool(url), "Set FULFILLMENT_DATABASE_URL first.")
-    db = Database(url)
+    db = m.Database(url)
     if args.command == "init":
         db.initialize()
-        print("Database schema is ready (version 1).")
+        print(f"Dispatch schema ready (version {m.SCHEMA_VERSION}). Existing work is preserved.")
+        return
+    if args.command == "import-legacy":
+        from fulfillment.migration import legacy_snapshot, import_legacy
+        require(bool(args.legacy_db), "Provide --legacy-db for this optional import.")
+        data = legacy_snapshot(args.legacy_db)
+        print(json.dumps({"rules": data["rules"], "controls": len(data["controls"]), "reservations": len(data["reservations"]), "unfinished": data["unfinished"]}, indent=2))
+        if not args.apply:
+            print("Preview only. Review configuration formerly supplied by environment variables separately.")
+            return
+        require(args.legacy_stopped, "Stop legacy picking and scheduled allocation before applying the import; use --legacy-stopped.")
+        from fulfillment.erp import VisualERP
+        erp = VisualERP(os.getenv("FULFILLMENT_MSSQL_CONNECTION_STRING"), os.getenv("FULFILLMENT_SITE"), db)
+        with db.transaction() as conn:
+            import_legacy(conn, data, erp, getpass.getuser())
+        print("Imported into Dispatch. Review and publish settings in Admin; the source was not changed.")
         return
     with db.transaction() as conn:
         if args.command in ("user", "disable-user"):
             user_id = identifier(args.operator, "Operator")
-            existing = conn.execute(select(users).where(users.c.id == user_id)).first()
-            if args.command == "disable-user":
-                require(existing is not None, "Operator not found.")
-                conn.execute(users.update().where(users.c.id == user_id).values(enabled=False))
+            old = conn.execute(select(m.users).where(m.users.c.id == user_id)).first()
+            disabling = args.command == "disable-user"
+            if old and old.role == "admin" and old.enabled and (disabling or args.role != "admin"):
+                require(conn.execute(select(m.users.c.id).where(m.users.c.role == "admin").where(m.users.c.enabled.is_(True)).where(m.users.c.id != user_id)).first(), "Keep at least one enabled admin.")
+            if disabling:
+                require(old is not None, "Operator not found.")
+                require(not any(r.document["operator"] == user_id and r.state not in ("cancelled", "released") for r in conn.execute(select(m.works))), "Transfer active work before disabling the account.")
+                conn.execute(m.users.update().where(m.users.c.id == user_id).values(enabled=False))
             else:
-                pin = getpass.getpass("New PIN (at least 6 digits): ")
-                require(pin.isdigit() and 6 <= len(pin) <= 32 and pin == getpass.getpass("Repeat PIN: "), "PINs must match and contain at least 6 digits.")
+                pin = getpass.getpass("New PIN (6–32 digits): ")
+                require(pin.isascii() and pin.isdigit() and 6 <= len(pin) <= 32 and pin == getpass.getpass("Repeat PIN: "), "PINs must match and contain 6–32 digits.")
                 values = dict(name=args.name or user_id, pin_hash=generate_password_hash(pin), role=args.role, enabled=True)
-                if existing:
-                    conn.execute(users.update().where(users.c.id == user_id).values(**values))
+                if old:
+                    conn.execute(m.users.update().where(m.users.c.id == user_id).values(**values))
                 else:
-                    conn.execute(users.insert().values(id=user_id, **values))
-            print("Operator updated.")
+                    conn.execute(m.users.insert().values(id=user_id, **values))
+            conn.execute(m.sessions.delete().where(m.sessions.c.user_id == user_id))
+            event(conn, getpass.getuser(), "admin:cli-account", {"operator": user_id, "disabled": disabling, "role": args.role if not disabling else old.role})
+            state = admin.load(conn)
+            state["version"] += 1
+            m.put_setting(conn, "administration", state)
+            print("Operator updated; existing sessions revoked.")
         else:
-            require(args.legacy_db and args.legacy_stopped, "Provide --legacy-db and --legacy-stopped after disabling legacy picking and scheduled runs.")
-            require(not conn.execute(select(works.c.id)).first(), "Migration/activation requires an empty fulfillment database.")
-            with sqlite3.connect(Path(args.legacy_db).resolve().as_uri() + "?mode=ro", uri=True) as legacy:
-                legacy.row_factory = sqlite3.Row
-                unfinished = legacy.execute("SELECT COUNT(*) FROM pick_orders WHERE status IN ('picking','ready_for_pack','packing')").fetchone()[0]
-                unfinished += legacy.execute("SELECT COUNT(*) FROM verify_sessions WHERE status='active'").fetchone()[0]
-                require(unfinished == 0, "Finish or reconcile all legacy picks and verification sessions first.")
-                reservations = [dict(r) for r in legacy.execute("SELECT * FROM release_gate_serial_reservations WHERE status='active'")]
-            require(all(r.get("line_no") for r in reservations), "Some reservations lack order-line identity; reconcile them before import.")
-            # Validate against the live adapter before preserving sticky assignments.
-            from fulfillment.erp import VisualERP
-            adapter = VisualERP(os.getenv("FULFILLMENT_MSSQL_CONNECTION_STRING"), os.getenv("FULFILLMENT_SITE"), args.legacy_db)
-            with adapter.engine.begin() as source:
-                supply = adapter.read(source, adapter.render("release_serial_supply.sql"), site=adapter.site)
-                identities = {(s["PART_ID"], s["SERIAL_NO"]) for s in supply}
-                for r in reservations:
-                    require((r["part_id"], r["serial_no"]) in identities, "A reservation no longer exists in eligible ERP stock.")
-                    rows = adapter.detail(source, r["cust_order_id"])
-                    require(any(str(row["LINE_NO"]) == str(r["line_no"]) and row["PART_ID"] == r["part_id"] for row in rows), "A reservation references a changed order line.")
-            put_setting(conn, "reservations", reservations)
-            if args.command == "activate":
-                put_setting(conn, "cutover", dict(site=adapter.site, activated=True, at=now(), operator=getpass.getuser()))
-            print("Validated reservations imported." + (" Live cutover activated." if args.command == "activate" else ""))
+            require(args.exclusive_operation, "Confirm exclusive warehouse operation with --exclusive-operation.")
+            state = admin.load(conn)
+            require(state["configured"], "Review and publish Dispatch rules before activation.")
+            require(conn.execute(select(m.users.c.id).where(m.users.c.role == "admin").where(m.users.c.enabled.is_(True))).first(), "Create an enabled administrator first.")
+            site = identifier(os.getenv("FULFILLMENT_SITE"), "Site")
+            require(not conn.execute(select(m.works.c.id).where(m.works.c.state.notin_(["cancelled", "released"]))).first(), "Resolve active work before activation.")
+            m.put_setting(conn, "cutover", dict(site=site, activated=True, at=m.now(), operator=getpass.getuser()))
+            event(conn, getpass.getuser(), "admin:activate", {"site": site, "policy_version": state["version"]})
+            print("Dispatch activated for exclusive operation at this site.")
 
 
 if __name__ == "__main__":

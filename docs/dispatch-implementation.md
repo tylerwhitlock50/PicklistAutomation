@@ -3,13 +3,16 @@
 Dispatch is a separate React/TypeScript PWA and Flask API. It preserves exact
 sales-order-line and trace identities through checkout, picking, package scans,
 VISUAL reconciliation and UPS label verification. The old application's production
-configuration has not been switched over.
+configuration has not been switched over. Dispatch owns its rules, settings,
+accounts, holds, exceptions, reservations and audit history. It has no runtime
+dependency on the old app, its database, its scheduler or its Python package.
 
 ## Run the training workspace
 
-From the repository root, with the existing Python dependencies installed:
+From the repository root, install only Dispatch's Python dependencies:
 
 ```powershell
+python -m pip install -r requirements.fulfillment.txt
 cd operator-web
 npm ci
 npm run build
@@ -17,7 +20,7 @@ cd ..
 python scripts/run_fulfillment_demo.py
 ```
 
-Open `http://127.0.0.1:5090`. Training-only login: operator **DEMO**, PIN **123456**.
+Open `http://127.0.0.1:5090`. Training-only login: administrator **DEMO**, PIN **123456**.
 This uses `data/fulfillment-demo.db` and synthetic records. It never connects to VISUAL.
 The sample order has two serials (`DEMO-001`, `DEMO-002`) at `R09S02` and six
 `ACCESSORY-B` units (UPC `100002`) at `BIN-04`. Scan any cart barcode to check out.
@@ -27,6 +30,9 @@ must still verify the packlist, scan each tracking number and release the shipme
 Sample ERP documents are in process memory; prepare them again after restarting.
 For another rehearsal, use `python scripts/run_fulfillment_demo.py --fresh --port 5091`.
 This creates a separate training database and preserves the previous run.
+Use a fresh session to get the administrator account when upgrading an older demo.
+The demo now evaluates saved Dispatch rules, so holds and early-release actions
+can be rehearsed against the sample order. Its customer ID is `DEMO-SUPPLY`.
 
 For UI development run the API on 5090 and `npm run dev` in `operator-web`.
 Vite proxies `/api` to the backend. Production serves the compiled files directly
@@ -35,14 +41,16 @@ from Flask behind HTTPS; there is no production development server.
 ## Production structure
 
 - `fulfillment/`: independent API, state machine, database schema and read-only ERP adapter.
+- `fulfillment/rules/` and `fulfillment/sql/`: Dispatch-owned rule code and SQL assets.
+- `fulfillment/worker.py`: independent queued-reservation refresh every 60 seconds.
 - `operator-web/`: typed React client, scanner workflow, package barcode printing,
   manifest and asset-only service worker.
 - `scripts/worldship_uploader.py`: authenticated Windows-side shipment evidence ingestion.
-- `Dockerfile.fulfillment` / `docker-compose.fulfillment.yml`: dedicated API, PostgreSQL and HTTPS proxy.
+- `Dockerfile.fulfillment` / `docker-compose.fulfillment.yml`: dedicated API, allocation worker, PostgreSQL and HTTPS proxy.
 
 Importing the new application does not initialize or migrate databases, start
 the legacy scheduler, or write ERP records. Database setup is an explicit CLI command.
-Schema version 1 uses app-owned relational tables for users, sessions, claims,
+Schema version 2 uses app-owned relational tables for users, sessions, claims,
 requests, events, labels and settings, plus versioned fulfillment JSON documents.
 Claims have database-enforced unique resource keys. All mutations share a
 transactional mutex row, with savepoints for failed actions; this deliberately
@@ -65,28 +73,27 @@ Use a dedicated SQL Server login with SELECT permissions only.
 ## Deployment and first accounts
 
 1. Copy `.env.fulfillment.example` to `.env.fulfillment`. Supply a dedicated
-   PostgreSQL password/URL, VISUAL read connection, site, timezone, HTTPS origin,
+   PostgreSQL password/URL, VISUAL read connection, site, HTTPS origin,
    and two different randomly generated integration tokens of at least 32 characters.
    Keep `FULFILLMENT_MODE=shadow` initially. SQL Server reads are SERIALIZABLE and
    never use `NOLOCK`; assess query latency and locking in the test company first.
-2. Confirm the legacy database is readable at the mounted path. Current policies,
-   manual holds, exceptions and document-check holds are read from it in SQLite
-   read-only mode. Invalid or missing context fails closed. Document-check freshness
-   is required when legacy OCR is enabled. The legacy management/readiness service
-   remains responsible for those administrative facts, not fulfillment reservations.
+2. No legacy database mount or legacy service is needed. Configure release rules,
+   timezone and document-review requirements in Dispatch Admin. An optional import
+   is described below; the running API never opens the legacy database.
 3. Start only the database, then initialize the app schema:
 
 ```powershell
 docker compose --env-file .env.fulfillment -f docker-compose.fulfillment.yml up -d dispatch-db
 docker compose --env-file .env.fulfillment -f docker-compose.fulfillment.yml run --rm dispatch-api python -m fulfillment.cli init
-docker compose --env-file .env.fulfillment -f docker-compose.fulfillment.yml run --rm dispatch-api python -m fulfillment.cli user --operator SUPERVISOR --name "Shipping supervisor" --role supervisor
+docker compose --env-file .env.fulfillment -f docker-compose.fulfillment.yml run --rm dispatch-api python -m fulfillment.cli user --operator ADMIN --name "Warehouse administrator" --role admin
 ```
 
-4. Add individual operators with the same `user` command and `--role operator`.
+4. Add operators with the CLI and `--role operator` / `--role supervisor`, or manage
+   people in **Administration → People** after starting the services below.
    PINs are prompted without echo, hashed with Werkzeug scrypt, and never passed on
    the command line. Account and source-address sign-in budgets are persisted.
    Run `disable-user --operator ID` to revoke access, including existing sessions.
-5. Start the API and proxy. Configure internal DNS for `FULFILLMENT_HOST`, trust
+5. Start the API, allocation worker and proxy. Configure internal DNS for `FULFILLMENT_HOST`, trust
    the Caddy internal CA on tablets/workstations, and use the configured HTTPS
    port (8443 by default). For an existing company TLS proxy, route it to the API
    instead and set `FULFILLMENT_PUBLIC_ORIGIN` to the actual external origin.
@@ -95,6 +102,57 @@ docker compose --env-file .env.fulfillment -f docker-compose.fulfillment.yml run
 ```powershell
 docker compose --env-file .env.fulfillment -f docker-compose.fulfillment.yml up -d --build
 ```
+
+6. Review settings in **Administration → Release rules**, preview their impact,
+   enter a reason and publish. New/upgraded databases intentionally start unconfigured.
+   Settings can be managed in shadow mode; picking remains disabled. Activate only
+   after acceptance testing and exclusive warehouse operation are confirmed.
+
+For an existing Dispatch version-1 database, back it up, stop API/worker processes,
+run `python -m fulfillment.cli init`, and bootstrap an admin with the `user` command.
+The migration preserves work, claims, labels, accounts and history. It adds independent
+administration defaults that must be reviewed or imported; it does not silently read
+old settings or enable live operation. Restart all processes on the new version.
+
+## Administration and rule ownership
+
+- **Release rules:** global urgency/lookahead windows, destination cooldown,
+  warehouse timezone, component codes, exclusions, and customer/default policies.
+  Customer policies support accumulation, serialized-unit thresholds, daily release
+  time, sweep day, maximum hold age and order mixing. Preview lists newly eligible,
+  no-longer-eligible and changed queued prescriptions before publishing.
+- **Orders & assignments:** current decision reasons, holds, early-release exceptions,
+  document reviews, queued serial reservations and active work. Early release needs
+  an expiry and is consumed by the next successful checkout. It cannot bypass stock,
+  credit/order holds, documents, exact packlist reconciliation or label checks.
+- **Clear queued assignments & hold:** frees queued reservations and places the order
+  on hold in one transaction. It refuses active picks/carts/putaway. Use the existing
+  correction/cancellation workflow for checked-out stock; claims stay until scanned return.
+- **People:** add accounts, change roles, reset PINs and disable users. Changes that
+  affect authentication revoke sessions. Transfer active work before disabling a user.
+  The last enabled administrator cannot be disabled or demoted. PINs and hashes are
+  omitted from audit and API responses; idempotent PIN requests use salted verification.
+- **Change history:** actor, reason, before/after settings and order controls. Admin
+  writes use CSRF, server-side role checks, optimistic revision checks, and the same
+  database transaction lock as checkout. A stale edit must be reviewed again.
+
+Publishing rules never rewrites checked-out prescriptions. New holds and document
+requirements are enforced on subsequent pick/order checks and final release. Queued
+allocations are recalculated; the worker maintains sticky reservations independently
+of the original application. Failed source reads roll back and retain reservations.
+The worker does not reserve stock in shadow mode or before live activation. Its last
+successful reconciliation appears in Administration. It can also run as a scheduled
+`python -m fulfillment.worker --once` task without Docker.
+
+Document checks now belong to Dispatch. If required, an administrator inspects the
+actual documents, loads the order, and records a matching/blocked review with a
+reference and expiry. Approval is tied to the destination and ERP document facts;
+changed or expired approval cannot pass. Existing ERP readiness checks still run.
+The legacy OCR service is **not** run or depended upon. Imported blocking document
+findings remain explicit holds, and importing an OCR-enabled configuration requires
+new reviews. This release does not read/hash document-file contents; replacing a file
+in place without changing its ERP facts requires explicitly revoking and renewing
+the review. Do not treat this manual workflow as automatic OCR verification.
 
 `/health` checks schema availability, not ERP readiness. Fresh queue reads expose
 ERP failures instead of presenting stale eligibility. Secure cookies, same-origin
@@ -206,19 +264,33 @@ the identical body/key. Clear 4xx rejections require a new corrected request.
    Its operator mutations, picklist exports and scheduled allocation generation
    are then rejected; the reservation writer also refuses to run. Disable its
    picklist scheduler to avoid repeated intentional failure notifications.
-4. Back up both databases. Import and validate legacy serial reservations and
-   activate the new database while it has no fulfillments:
+4. Back up both databases. Optionally import into a fresh, unconfigured Dispatch
+   database. Preview first; apply only after legacy operations are stopped:
 
 ```powershell
-python -m fulfillment.cli activate --legacy-db data/picklist_history.db --legacy-stopped
+python -m fulfillment.cli import-legacy --legacy-db data/picklist_history.db
+python -m fulfillment.cli import-legacy --legacy-db data/picklist_history.db --apply --legacy-stopped
 ```
 
 Run this with the new database URL, site and SELECT-only VISUAL connection in the
-environment. The command refuses active legacy work, missing order-line identity,
-missing serial stock and changed line references. `--legacy-stopped` is an explicit
-operator attestation, not automatic remote proof of deployment configuration.
-5. Set the new service to `FULFILLMENT_MODE=live` and restart. Maintain legacy
-   readiness/holds administration and read-only reporting; Dispatch owns new work.
+environment. Import includes saved release rules, unexpired exceptions, active holds,
+blocking document findings and line-specific reservations. It refuses active legacy
+work, missing order-line identity, duplicate/missing serial stock, changed line references
+or overwriting existing Dispatch configuration. It never writes the source database.
+Review settings formerly supplied only by the legacy environment; they cannot be
+recovered from the database. In Docker, mount the backup read-only for this one CLI
+invocation; do not add it to the production API/worker mounts.
+5. Preview and publish the imported/new rules in Dispatch Admin. Set the required
+   document reviews, then activate with:
+
+```powershell
+python -m fulfillment.cli activate --exclusive-operation
+```
+
+This attests that no other system allocates this site's stock. A legacy installation
+is not required for a clean deployment. Set `FULFILLMENT_MODE=live` and restart API
+and worker. The old application may remain available for historical reporting;
+all current fulfillment administration is now in Dispatch.
 
 For rollback, pause new checkouts by switching Dispatch to shadow. Reconcile or
 complete every in-flight cart/package and ERP document. Restore/transfer current
@@ -229,7 +301,10 @@ Back up PostgreSQL using `pg_dump -Fc` to durable storage; restore into a separa
 database with `pg_restore` and validate schema, active claims, work and audit counts
 before promoting it. Keep the legacy database/history backup. No audit pruning is
 automatic in this initial release. Monitor API 503s, aged `updated_at` values,
-open exceptions, uncompleted putaway and WorldShip export freshness.
+open exceptions, uncompleted putaway, the allocation worker timestamp and WorldShip
+export freshness. Returning to version 1 requires the pre-upgrade backup and an
+explicit reconciliation of work since the upgrade; do not run the old API against
+the new database.
 
 ## Phase-two research result and boundary
 
@@ -257,7 +332,7 @@ cannot prevent someone bypassing Dispatch and shipping directly in VISUAL.
 ## Validation commands
 
 ```powershell
-python -m pytest tests/test_fulfillment.py tests/test_fulfillment_integrations.py -q
+python -m pytest tests/test_fulfillment.py tests/test_fulfillment_integrations.py tests/test_fulfillment_admin.py tests/test_dispatch_rules.py -q
 cd operator-web
 npm test
 npm run build
@@ -268,10 +343,13 @@ disposable PostgreSQL database**. The fixture drops/recreates its app tables bef
 each test. Never point this variable at production. Then run the same Python suite.
 The tests use synthetic ERP fixtures and do not write or call live ERP systems.
 
-Validated on 2026-10-14: 364 Python tests (plus 11 subtests), 37 tests against
-PostgreSQL 17, and 3 frontend API tests passed. The production frontend and Docker
-image build passed, including container health, frontend hosting, OpenAPI and
-ODBC Driver 18 import checks. A browser rehearsal completed checkout, prescribed
+Validated on 2026-10-14: 432 Python tests (plus 11 subtests), 64 Dispatch tests against
+PostgreSQL 17, and 5 frontend tests passed. The production frontend and standalone
+Docker image build passed, including schema initialization, admin preview/publish,
+allocation worker, container health, frontend hosting, OpenAPI and ODBC Driver 18
+checks with no legacy app files or mounts. The admin browser rehearsal covered
+publishing settings, clearing assignments with a hold, revoking it, and history.
+The earlier operator browser rehearsal completed checkout, prescribed
 serial and quantity picks, handoff, package rescans, synthetic VISUAL reconciliation,
 label verification and release. Desktop and tablet-sized layouts were inspected;
 the browser reported no console errors during that rehearsal.

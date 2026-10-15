@@ -11,6 +11,9 @@ packages = { find = { include = ["picklist*", "fulfillment*"] } }
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements.txt"] }
 
+[tool.setuptools.package-data]
+fulfillment = ["sql/*.sql"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

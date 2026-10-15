@@ -16,9 +16,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends unixodbc curl g
 COPY requirements.fulfillment.txt ./
 RUN pip install --no-cache-dir -r requirements.fulfillment.txt
 COPY fulfillment ./fulfillment
-COPY picklist/domain ./picklist/domain
-COPY picklist/__init__.py ./picklist/__init__.py
-COPY sql ./sql
 COPY --from=web /web/dist ./operator-web/dist
 RUN useradd --uid 10001 --create-home dispatch
 USER dispatch

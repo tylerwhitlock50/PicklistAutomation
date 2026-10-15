@@ -17,10 +17,6 @@ services:
       context: .
       dockerfile: Dockerfile.fulfillment
     env_file: .env.fulfillment
-    environment:
-      FULFILLMENT_LEGACY_DB: /legacy/picklist_history.db
-    volumes:
-      - ./data:/legacy:ro
     depends_on:
       dispatch-db:
         condition: service_healthy
@@ -29,6 +25,16 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+    restart: unless-stopped
+  dispatch-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.fulfillment
+    env_file: .env.fulfillment
+    command: [python, -m, fulfillment.worker]
+    depends_on:
+      dispatch-api:
+        condition: service_healthy
     restart: unless-stopped
   dispatch-web:
     image: caddy:2-alpine

@@ -12,6 +12,7 @@ from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash
 
 from fulfillment import model as m
+from fulfillment import admin
 from fulfillment.domain import Conflict, identifier, reconcile, require
 from fulfillment.erp import DemoERP, VisualERP
 from fulfillment.service import Service, event
@@ -44,7 +45,7 @@ def create_app(config=None, erp=None):
     database = m.Database(app.config["DATABASE_URL"])
     if erp is None:
         erp = DemoERP() if mode == "demo" else VisualERP(os.getenv("FULFILLMENT_MSSQL_CONNECTION_STRING"),
-                   app.config["SITE"], os.getenv("FULFILLMENT_LEGACY_DB"), timezone_name=os.getenv("SCHEDULE_TIMEZONE", "America/Denver"))
+                   app.config["SITE"], database)
     service = Service(database, erp, live=mode == "live")
     app.extensions.update(fulfillment=service, fulfillment_db=database)
 
@@ -82,10 +83,12 @@ def create_app(config=None, erp=None):
         if request.method not in ("GET", "HEAD", "OPTIONS") and origin:
             expected = os.getenv("FULFILLMENT_PUBLIC_ORIGIN", request.host_url.rstrip("/"))
             require(origin == expected, "Cross-origin requests are not allowed.", "origin", 403)
-        if mode == "live" and request.path.startswith("/api/v1") and request.method == "POST" and "/auth/" not in request.path:
+        if mode == "live" and request.path.startswith("/api/v1") and request.method == "POST" and "/auth/" not in request.path and "/admin/" not in request.path:
             with database.engine.connect() as conn:
                 receipt = m.get_setting(conn, "cutover")
+                configured = admin.load(conn)["configured"]
             require(receipt and receipt.get("site") == app.config["SITE"] and receipt.get("activated"), "Live checkout requires the documented cutover procedure.", "cutover", 503)
+            require(configured, "Review and publish Dispatch settings before live work.", "configuration", 503)
 
     @app.after_request
     def headers(response):
@@ -114,7 +117,7 @@ def create_app(config=None, erp=None):
     @app.get("/health")
     def health():
         with database.engine.connect() as conn:
-            require(conn.execute(select(m.schema.c.version)).scalar() == 1, "Database migration required.", "schema", 503)
+            require(conn.execute(select(m.schema.c.version)).scalar() == m.SCHEMA_VERSION, "Database migration required.", "schema", 503)
         return jsonify(status="ok", mode=mode)
 
     @app.post("/api/v1/auth/login")
@@ -196,6 +199,40 @@ def create_app(config=None, erp=None):
     def action(work_id, action):
         require(action in ACTIONS, "Unknown action.", "not_found", 404)
         return mutation(action, work_id)
+
+    @app.get("/api/v1/admin/state")
+    @authenticated
+    def admin_state():
+        require(g.actor["role"] == "admin", "Administrator access required.", "role", 403)
+        with database.engine.connect() as conn:
+            return jsonify(admin.snapshot(service, conn))
+
+    @app.get("/api/v1/admin/orders")
+    @authenticated
+    def admin_orders():
+        require(g.actor["role"] == "admin", "Administrator access required.", "role", 403)
+        with database.engine.connect() as conn:
+            return jsonify(service.orders(conn))
+
+    @app.get("/api/v1/admin/order/<order_id>")
+    @authenticated
+    def admin_order(order_id):
+        require(g.actor["role"] == "admin", "Administrator access required.", "role", 403)
+        return jsonify(erp.inspect_order(identifier(order_id, "Order")))
+
+    @app.post("/api/v1/admin/<action>")
+    @authenticated
+    def admin_action(action):
+        require(g.actor["role"] == "admin", "Administrator access required.", "role", 403)
+        require(action in ("preview", "rules", "control", "unassign", "revoke", "account", "reconcile"), "Unknown admin action.", "not_found", 404)
+        if action == "reconcile":
+            require(mode != "shadow", "Shadow mode previews allocations without reserving stock.", "shadow", 403)
+            if mode == "live":
+                with database.engine.connect() as conn:
+                    receipt = m.get_setting(conn, "cutover", {})
+                require(receipt.get("activated") and receipt.get("site") == app.config["SITE"], "Activate exclusive Dispatch operation first.", "cutover", 503)
+        result, status = service.command(g.actor, "admin:" + action, request.get_json(), request.headers.get("Idempotency-Key"))
+        return jsonify(result), status
 
     @app.get("/api/v1/integrations/visual/fulfillments/<work_id>/manifest")
     @machine("VALIDATE")

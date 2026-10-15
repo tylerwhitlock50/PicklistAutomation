@@ -9,6 +9,7 @@ import pytest
 
 from fulfillment.domain import Conflict
 from fulfillment.erp import VisualERP
+from fulfillment import admin
 from scripts.worldship_uploader import upload, REQUIRED
 
 
@@ -27,8 +28,8 @@ def source_fixture():
     from zoneinfo import ZoneInfo
     adapter.timezone = ZoneInfo("America/Denver")
     adapter.engine = SourceEngine()
-    context = dict(policies={"DEFAULT": {"account_type": "standard", "accumulate": False}}, due_days=1, cooldown=0,
-                   exceptions=[], holds=[], doc_holds=[], ocr_enabled=False, readiness_at=None)
+    context = admin.context(state={**admin.initial_state(), "configured": True})
+    context.update(policies={"DEFAULT": {"account_type": "standard", "accumulate": False}}, cooldown=0)
     adapter.context = lambda: deepcopy(context)
     candidate = dict(CUST_ORDER_ID="SO-1", LINE_NO="1", PART_ID="PART-1", CUSTOMER_ID="CUSTOMER", CUSTOMER_NAME="Customer", SHIP_TO_ID="MAIN",
                      ITEM_TYPE="guns", OPEN_QTY=2, AVAILABLE_QTY=2, ORDER_RELEASED=1, LINE_AVAILABLE=1, CREDIT_APPROVED=1, SHIP_TO_PRESENT=1,
@@ -37,7 +38,7 @@ def source_fixture():
               "SHIPTO_ADDR_1": "100 Example", "SHIPTO_CITY": "Denver", "SHIPTO_STATE": "CO", "SHIPTO_ZIP": "80202", "SHIPTO_COUNTRY": "US"}
     stocks = [dict(PART_ID="PART-1", WAREHOUSE_ID="SHIPPING", LOCATION_ID="R09S02", QTY=Decimal(2), STOCK_UM="EA", UPC="100")]
     serials = [dict(PART_ID="PART-1", SERIAL_NO=s, WAREHOUSE_ID="SHIPPING", LOCATION_ID="R09S02", NET_QTY=1, LAST_TRANSACTION_AT="2026-01-01") for s in ("SN-1", "SN-2")]
-    adapter.detail = lambda conn, order: [deepcopy(detail)]
+    adapter.detail = lambda conn, order, rules=None: [deepcopy(detail)]
     adapter.stocks = lambda conn: deepcopy(stocks)
     adapter.blocking = lambda rows, context: []
     def read(conn, query, **kwargs):

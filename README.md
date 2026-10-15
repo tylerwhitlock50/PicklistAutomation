@@ -1,6 +1,8 @@
 # Picklist Automation (Flask)
 
 The new **Dispatch** operator PWA and dedicated API live alongside this application.
+Dispatch has its own administration, policy modules, PostgreSQL database and allocation
+worker; it runs without this legacy app or its database.
 See [Dispatch setup, training, integration and cutover](docs/dispatch-implementation.md).
 The existing operator workflow remains enabled until the explicit cutover switch is set.
 

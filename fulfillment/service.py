@@ -5,8 +5,10 @@ from decimal import Decimal
 from uuid import uuid4
 
 from sqlalchemy import select
+from werkzeug.security import check_password_hash, generate_password_hash
 
 from fulfillment import model as m
+from fulfillment import admin
 from fulfillment.domain import (Conflict, address, complete_address, digest, identifier,
                                 key, packed_complete, quantity, reconcile, require, trace_key)
 
@@ -28,6 +30,7 @@ def claim(conn, resource, work_id):
 class Service:
     def __init__(self, database, erp, *, live=False, label_fresh_seconds=300):
         self.db, self.erp, self.live = database, erp, live
+        self.erp.database = database
         self.label_fresh_seconds = label_fresh_seconds
 
     def list_work(self, conn):
@@ -39,23 +42,42 @@ class Service:
         return deepcopy(row[0])
 
     def orders(self, conn):
-        return self.erp.available(self.list_work(conn), m.get_setting(conn, "reservations", []))
+        return self.erp.available(self.list_work(conn), m.get_setting(conn, "reservations", []), admin.context(conn))
+
+    def reconcile_allocations(self, conn, actor):
+        result = self.orders(conn)
+        previous = m.get_setting(conn, "reservations", [])
+        updated = result.get("reservations", [])
+        if digest(previous) != digest(updated):
+            m.put_setting(conn, "reservations", updated)
+            state = admin.load(conn)
+            state["version"] += 1
+            m.put_setting(conn, "administration", state)
+            event(conn, actor, "admin:allocation-refresh", {"before": previous, "after": updated})
+        m.put_setting(conn, "allocation_worker", {"at": m.now(), "eligible_orders": len(result["orders"]), "reservations": len(updated)})
+        return result
 
     def command(self, actor, action, payload, request_id, work_id=None):
         require(isinstance(payload, dict), "A JSON object is required.", "invalid", 400)
         require(bool(request_id) and len(request_id) <= 100, "An Idempotency-Key is required.", "invalid", 400)
         request_key = f"{actor['id']}:{request_id}"
-        fingerprint = digest([action, work_id, payload])
+        audit_payload = {**payload, **({"pin": "[redacted]"} if "pin" in payload else {})}
+        fingerprint = digest([action, work_id, audit_payload])
         # Failed domain commands also commit their audit and response. The savepoint
         # rolls back every partial write before the rejection is recorded.
         with self.db.transaction() as conn:
             previous = conn.execute(select(m.requests).where(m.requests.c.key == request_key)).first()
             if previous:
                 require(previous.digest == fingerprint, "Request ID was reused with different contents.", "idempotency")
+                pin_hash = m.get_setting(conn, "request-pin:" + digest(request_key))
+                if pin_hash:
+                    require(isinstance(payload.get("pin"), str) and check_password_hash(pin_hash, payload["pin"]), "Request ID was reused with different contents.", "idempotency")
                 return previous.response, previous.status
             try:
                 with conn.begin_nested():
-                    if action == "checkout":
+                    if action.startswith("admin:"):
+                        result = admin.execute(self, conn, actor, action.removeprefix("admin:"), payload)
+                    elif action == "checkout":
                         result = self.checkout(conn, actor, payload)
                     elif action == "labels":
                         result = self.ingest_label(conn, payload)
@@ -69,14 +91,16 @@ class Service:
                         conn.execute(m.works.update().where(m.works.c.id == work_id).values(
                             state=work["state"], version=work["version"], document=work, updated_at=work["updated_at"]))
                         result = work
-                    event(conn, actor["id"], action, payload, work_id or result.get("id"))
+                    event(conn, actor["id"], action, audit_payload, work_id or result.get("id"))
                 status = 200
             except Conflict as exc:
                 result = {"error": exc.code, "message": exc.message, "details": exc.details}
                 status = exc.status
-                event(conn, actor["id"], "rejected:" + action, {"request": payload, **result}, work_id)
+                event(conn, actor["id"], "rejected:" + action, {"request": audit_payload, **result}, work_id)
             if status < 500:
                 conn.execute(m.requests.insert().values(key=request_key, digest=fingerprint, response=result, status=status))
+                if isinstance(payload.get("pin"), str):
+                    m.put_setting(conn, "request-pin:" + digest(request_key), generate_password_hash(payload["pin"]))
             return result, status
 
     def checkout(self, conn, actor, payload):
@@ -109,11 +133,20 @@ class Service:
         work = {**order, "id": work_id, "cart": cart, "operator": actor["id"], "state": "picking", "version": 1,
                 "lines": lines, "packages": [], "verification": None, "packlist": None,
                 "exception": None, "created_at": stamp, "updated_at": stamp, "station": None}
+        administration = admin.load(conn)
+        consumed = False
+        for control in administration["controls"]:
+            if control["kind"] == "early_release" and control["order"] == order_id and admin.active(control):
+                control["consumed_by"] = work_id
+                consumed = True
+        if consumed:
+            administration["version"] += 1
+            m.put_setting(conn, "administration", administration)
         conn.execute(m.works.insert().values(id=work_id, state=work["state"], version=1, document=work, updated_at=stamp))
         return work
 
     def apply(self, conn, actor, action, work, payload):
-        supervisor = actor.get("role") == "supervisor"
+        supervisor = actor.get("role") in ("supervisor", "admin")
         # Handoff is the sole operator action permitted to a different signed-in person.
         require(action == "handoff" or work["operator"] == actor["id"] or supervisor,
                 "Only the assigned operator or a supervisor can change this work.", "owner", 403)

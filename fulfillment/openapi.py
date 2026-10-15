@@ -47,6 +47,29 @@ def specification():
     endpoint("/auth/me", "get", "Current identity, CSRF token and operating mode")
     endpoint("/auth/logout", "post", "Revoke current session", properties={})
     endpoint("/orders", "get", "Fresh eligible orders under enforced release policies")
+    rules = {"type": "object", "additionalProperties": False,
+             "required": ["policies", "due_days", "cooldown", "lookahead_days", "timezone", "document_checks_required", "component_codes", "excluded_customers"],
+             "properties": {"policies": {"type": "object", "additionalProperties": {"type": "object"}},
+                            **{n: {"type": "integer", "minimum": 0, "maximum": 30 if n == "cooldown" else 365} for n in ("due_days", "cooldown", "lookahead_days")},
+                            "timezone": string, "document_checks_required": {"type": "boolean"},
+                            **{n: {"type": "array", "items": string} for n in ("component_codes", "excluded_customers")}}}
+    schemas["AdminRules"] = rules
+    endpoint("/admin/state", "get", "Administrator only: saved rules, controls, reservations, accounts and recent audit. PIN hashes are never returned.")
+    endpoint("/admin/orders", "get", "Administrator only: current release decisions and eligible prescriptions")
+    endpoint("/admin/order/{id}", "get", "Administrator only: inspect an order and its document-review fingerprint")
+    admin_fields = {"version": {"type": "integer", "minimum": 1}, "reason": string, "rules": rules, "preview": string,
+                    "order": string, "kind": {"enum": ["hold", "early_release", "document_review"]},
+                    "expires_at": {"type": ["string", "null"], "format": "date-time"}, "fingerprint": string,
+                    "decision": {"enum": ["pass", "blocked"]}, "reference": string, "id": string,
+                    "operator": string, "name": string, "role": {"enum": ["operator", "supervisor", "admin"]},
+                    "enabled": {"type": "boolean"}, "pin": {"type": "string", "writeOnly": True, "pattern": "^[0-9]{6,32}$"}}
+    for action, required in {
+        "preview": ["rules"], "rules": ["rules", "preview", "reason"], "control": ["order", "kind", "reason"],
+        "revoke": ["id", "reason"], "unassign": ["order", "reason"], "reconcile": ["reason"],
+        "account": ["operator", "name", "role", "enabled", "reason"],
+    }.items():
+        endpoint("/admin/" + action, "post", "Administrator only: " + action + ". Exact administration revision and idempotency key required. Early release and document reviews require expiration; reviews also require fingerprint, reference and decision.",
+                 properties=admin_fields, required=["version", *required], mutation=True)
     endpoint("/fulfillments", "get", "Fulfillment queue and history")
     for path in ("/fulfillments/{id}", "/fulfillments/{id}/manifest"):
         endpoint(path, "get", "Exact line, serial, location and package manifest", response={"$ref": "#/components/schemas/Fulfillment"})
@@ -67,5 +90,5 @@ def specification():
              properties={"fulfillment_id": string, "version": {"type": "integer"}, "packlist": string, "candidate": {"$ref": "#/components/schemas/Packlist"}}, required=("fulfillment_id", "version"))
     endpoint("/integrations/worldship/labels", "post", "Ingest authoritative WorldShip package evidence using the separate label credential", security="machine",
              properties=schemas["Label"]["properties"], required=schemas["Label"]["required"], mutation=True)
-    return {"openapi": "3.1.0", "info": {"title": "Dispatch fulfillment API", "version": "1.0.0"}, "servers": [{"url": "/api/v1"}],
+    return {"openapi": "3.1.0", "info": {"title": "Dispatch fulfillment API", "version": "1.1.0"}, "servers": [{"url": "/api/v1"}],
             "paths": paths, "components": {"schemas": schemas, "securitySchemes": {"operatorCookie": {"type": "apiKey", "in": "cookie", "name": "fulfillment_session"}, "integrationBearer": {"type": "http", "scheme": "bearer"}}}}
