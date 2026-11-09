@@ -11,7 +11,7 @@ export type Destination = {
 export type Operator = {
   id: string;
   name: string;
-  role: "operator" | "supervisor" | "admin";
+  role: "operator" | "sales" | "supervisor" | "admin";
 };
 export type Line = {
   id: string;

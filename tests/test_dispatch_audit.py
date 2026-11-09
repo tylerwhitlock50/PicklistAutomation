@@ -193,7 +193,7 @@ def test_qualified_location_and_schema_upgrade_preserve_audit_history(audit):
     db.initialize()
     with db.engine.connect() as conn:
         assert conn.execute(text("SELECT count(*) FROM dispatch_audit_scans")).scalar() == 2
-        assert conn.execute(text("SELECT version FROM fulfillment_schema")).scalar() == 3
+        assert conn.execute(text("SELECT version FROM fulfillment_schema")).scalar() == m.SCHEMA_VERSION
 
 
 def test_site_scoping_and_legacy_independence():

@@ -13,7 +13,7 @@ from sqlalchemy import (JSON, Boolean, Column, Integer, MetaData, Numeric,
                         String, Table, Text, create_engine, select, text)
 
 metadata = MetaData()
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 mutex = Table("fulfillment_mutex", metadata, Column("id", Integer, primary_key=True))
 schema = Table("fulfillment_schema", metadata, Column("version", Integer, primary_key=True))
 users = Table("fulfillment_users", metadata,
@@ -46,6 +46,27 @@ labels = Table("fulfillment_labels", metadata,
 settings = Table("fulfillment_settings", metadata,
                  Column("key", String(100), primary_key=True), Column("value", JSON, nullable=False))
 
+# Decimal quantities are serialized as strings in these versioned documents.
+# The warehouse transaction mutex protects stock, commitments and work together.
+def inventory_table(name):
+    return Table(name, metadata, Column("id", String(80), primary_key=True),
+                 Column("document", JSON, nullable=False))
+
+inventory_stock = inventory_table("dispatch_inventory_stock")
+inventory_supplies = inventory_table("dispatch_inventory_supplies")
+inventory_allocations = inventory_table("dispatch_inventory_allocations")
+inventory_ledger = inventory_table("dispatch_inventory_ledger")
+inventory_inbox = inventory_table("dispatch_inventory_inbox")
+inventory_locks = inventory_table("dispatch_inventory_locks")
+inventory_reconciliations = inventory_table("dispatch_inventory_reconciliations")
+order_book = inventory_table("dispatch_order_book")
+planning_runs = inventory_table("dispatch_planning_runs")
+planning_triggers = inventory_table("dispatch_planning_triggers")
+sales_requests = inventory_table("dispatch_sales_requests")
+approval_requests = inventory_table("dispatch_approval_requests")
+daily_closes = inventory_table("dispatch_daily_closes")
+inventory_source_movements = inventory_table("dispatch_inventory_source_movements")
+
 
 def now():
     return datetime.now(timezone.utc).isoformat()
@@ -71,7 +92,7 @@ class Database:
                 conn.execute(schema.insert().values(version=SCHEMA_VERSION))
             else:
                 current = conn.execute(select(schema.c.version)).scalar_one()
-                if current not in (1, 2, SCHEMA_VERSION):
+                if current not in (1, 2, 3, 4, SCHEMA_VERSION):
                     raise RuntimeError("Unsupported Dispatch schema version; use the matching application.")
                 if current != SCHEMA_VERSION:
                     conn.execute(schema.update().values(version=SCHEMA_VERSION))

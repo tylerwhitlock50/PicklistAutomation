@@ -57,9 +57,40 @@ class DemoERP:
     def inspect_order(self, order):
         result = next((deepcopy(o) for o in self.orders if o["order"] == order), None)
         require(result is not None, "Training order not found.", "not_found", 404)
+        result.setdefault("customer_id", "DEMO-SUPPLY")
         result["document_fingerprint"] = digest([result["order"], address(result["destination"])])
         result["document_context"] = {"training": "Synthetic order; no real documents"}
         return result
+
+    def order_snapshot(self, context=None):
+        context = context or self.context()
+        demand = self.demand([], context)
+        for order in demand["orders"]:
+            order.setdefault("status", "R")
+            order["credit_approved"] = True
+        return {**demand, "complete": True, "site": "DEMO", "observed_at": now()}
+
+    def demand(self, works, context=None):
+        """Order facts only; local inventory supplies every physical prescription."""
+        occupied = {w["order"] for w in works if w["state"] != "cancelled"}
+        orders, candidates = [], []
+        context = context or self.context()
+        for original in self.orders:
+            if original["order"] in occupied:
+                continue
+            order = self.inspect_order(original["order"])
+            order.setdefault("customer_id", "DEMO-SUPPLY")
+            order["blocks"] = admin.order_blocks(context, order["order"], order["document_fingerprint"])
+            order["lines"] = [{k: line[k] for k in ("order_line", "part", "quantity", "uom", "serialized", "upc") if k in line}
+                              for line in order["lines"]]
+            orders.append(order)
+            for line in order["lines"]:
+                candidates.append(dict(CUST_ORDER_ID=order["order"], CUSTOMER_ID=order["customer_id"],
+                    CUSTOMER_NAME=order["customer"], SHIP_TO_ID=order["ship_to"], LINE_NO=line["order_line"],
+                    PART_ID=line["part"], ITEM_TYPE="guns" if line["serialized"] else "components",
+                    OPEN_QTY=line["quantity"], AVAILABLE_QTY=0, ORDER_RELEASED=1, LINE_AVAILABLE=1,
+                    CREDIT_APPROVED=1, SHIP_TO_PRESENT=1))
+        return {"orders": orders, "candidates": candidates, "history": []}
 
     def available(self, works, reservations, context=None):
         context = context or (self.context() if hasattr(self, "database") else admin.context(state=admin.initial_state()))
@@ -138,12 +169,102 @@ class VisualERP:
         query = query.replace("WHERE pl.QTY > 0", "WHERE pl.QTY > 0 AND EXISTS (SELECT 1 FROM dbo.WAREHOUSE wh WHERE wh.ID = pl.WAREHOUSE_ID AND wh.SITE_ID = :site)")
         return query
 
+    @staticmethod
+    def without_supply(query):
+        """Keep the shared order-fact SQL contract without reading PART_LOCATION.
+
+        Both owned SQL assets use this named CTE. Fail closed if their shape is
+        changed, rather than quietly reconnecting local stock to ERP quantities.
+        """
+        query, count = re.subn(r",\s*(?:/\*[\s\S]*?\*/\s*)?EligibleSupply AS \([\s\S]*?\n\)\s*\nSELECT",
+                              "\nSELECT", query, count=1)
+        require(count == 1, "Order query stock boundary changed; review the local inventory adapter.", "configuration", 503)
+        query = re.sub(r"CAST\(ISNULL\(es\.AVAILABLE_QTY, 0\) AS decimal\(18, 4\)\)", "CAST(0 AS decimal(18, 4))", query)
+        query = re.sub(r"LEFT JOIN EligibleSupply es\s+ON es\.PART_ID = col\.PART_ID", "", query)
+        require("EligibleSupply" not in query and "dbo.PART_LOCATION" not in query and "es.AVAILABLE_QTY" not in query,
+                "Order query still reads ERP inventory.", "configuration", 503)
+        return query
+
+    def order_snapshot(self, context=None):
+        """Complete open physical demand, independently of the shipping horizon.
+
+        Source flags remain visible, including cancelled/unavailable lines. The
+        original bounded read guard rejects truncation; absence is only accepted
+        after this entire SERIALIZABLE source transaction succeeds.
+        """
+        context = context or self.context()
+        query = self.without_supply(self.candidate_query(context))
+        query, removed = re.subn(r"\s+AND COALESCE\(\s*CAST\(COALESCE\(col\.PROMISE_DEL_DATE[\s\S]*?\) <= prm\.THROUGH_DATE", "", query, count=1)
+        require(removed == 1, "Order snapshot horizon boundary changed; review the adapter.", "configuration", 503)
+        query = query.replace("AND ISNULL(col.LINE_STATUS, '') <> 'X'", "")
+        orders = []
+        with self.engine.begin() as conn:
+            candidates = self.read(conn, query, site=self.site)
+            history_sql = self.render("release_shipto_history.sql").replace("WHERE s.SHIPPED_DATE >=", "WHERE s.SITE_ID=:site AND s.SHIPPED_DATE >=")
+            history = self.read(conn, history_sql, site=self.site)
+            for order_id in dict.fromkeys(row["CUST_ORDER_ID"] for row in candidates):
+                rows = self.detail(conn, order_id, context)
+                h = rows[0]
+                orders.append(dict(site=self.site, order=order_id, customer=h["CUSTOMER_NAME"], customer_id=h["CUSTOMER_ID"],
+                    ship_to=h["SHIP_TO_ID"], destination=self.destination(rows), status=h["ORDER_STATUS"], customer_reference=h.get("CUSTOMER_PO_REF"),
+                    document_fingerprint=self.document_fingerprint(rows),
+                    credit_approved=h.get("CREDIT_STATUS") == "A", order_date=h.get("ORDER_DATE"),
+                    desired_ship_date=h.get("DESIRED_SHIP_DATE"),
+                    # Business order/document gates are evaluated from retained source
+                    # facts plus current Dispatch controls on each planning run.
+                    blocks=self.blocking(rows, {**context, "holds": [], "document_reviews": {}, "document_checks_required": False}),
+                    lines=[dict(order_line=str(r["LINE_NO"]), part=r["PART_ID"], quantity=str(max(Decimal(0), Decimal(str(r["OPEN_QTY"])))),
+                        ordered=str(r["ORDER_QTY"]), shipped=str(r["SHIPPED_QTY"]), uom=r["STOCK_UM"],
+                        status=r.get("LINE_STATUS", "A"), serialized=r["ITEM_TYPE"] == "guns",
+                        promise_ship_date=r.get("PROMISE_SHIP_DATE"), promise_del_date=r.get("PROMISE_DEL_DATE")) for r in rows if r.get("PART_ID")],
+                    baseline={str(r["LINE_NO"]): dict(ordered=str(r["ORDER_QTY"]), shipped=str(r["SHIPPED_QTY"]),
+                        part=r["PART_ID"], uom=r["STOCK_UM"]) for r in rows}))
+        return clean(dict(orders=orders, candidates=candidates, history=history, complete=True, site=self.site, observed_at=now()))
+
+    def demand(self, works, context=None):
+        """Read demand, hard order controls and shipment history, never ERP stock."""
+        context = context or self.context()
+        require(context.get("configured"), "Review and publish Dispatch settings before starting live work.", "configuration", 503)
+        with self.engine.begin() as conn:
+            candidates = self.read(conn, self.without_supply(self.candidate_query(context)), site=self.site)
+            history_sql = self.render("release_shipto_history.sql").replace("WHERE s.SHIPPED_DATE >=", "WHERE s.SITE_ID=:site AND s.SHIPPED_DATE >=")
+            history = self.read(conn, history_sql, site=self.site)
+            occupied = {w["order"] for w in works if w["state"] not in ("cancelled", "released")}
+            for work in works:
+                if work["state"] == "released":
+                    rows = self.detail(conn, work["order"], context)
+                    totals = {str(r["LINE_NO"]): quantity(r["SHIPPED_QTY"], zero=True) for r in rows}
+                    expected = {}
+                    for line in work["lines"]:
+                        expected[line["order_line"]] = expected.get(line["order_line"], Decimal(0)) + quantity(line["quantity"])
+                    if any(totals.get(n, Decimal(0)) < quantity(work["baseline"][n]["shipped"], zero=True) + q for n, q in expected.items()):
+                        occupied.add(work["order"])
+            candidates = [r for r in candidates if r["CUST_ORDER_ID"] not in occupied]
+            orders = []
+            by_order = {}
+            for row in candidates:
+                by_order.setdefault(row["CUST_ORDER_ID"], []).append(row)
+            for order_id, order_rows in by_order.items():
+                rows = self.detail(conn, order_id, context)
+                details = {str(r["LINE_NO"]): r for r in rows}
+                lines = [dict(order_line=str(r["LINE_NO"]), part=r["PART_ID"], quantity=str(r["OPEN_QTY"]),
+                              uom=details[str(r["LINE_NO"])]["STOCK_UM"], serialized=r["ITEM_TYPE"] == "guns") for r in order_rows]
+                baseline = {n: {"ordered": str(r["ORDER_QTY"]), "shipped": str(r["SHIPPED_QTY"]), "part": r["PART_ID"], "uom": r["STOCK_UM"]}
+                            for n, r in details.items()}
+                orders.append(dict(site=self.site, order=order_id, customer=rows[0]["CUSTOMER_NAME"],
+                    customer_id=rows[0]["CUSTOMER_ID"], ship_to=rows[0]["SHIP_TO_ID"], destination=self.destination(rows),
+                    lines=lines, baseline=baseline, blocks=self.blocking(rows, context)))
+        return clean({"orders": orders, "candidates": candidates, "history": history})
+
     def detail(self, conn, order, rules=None):
         if rules is None and hasattr(self, "database"):
             rules = self.context()
         query = self.render("order_detail.sql", rules)
         query = query.replace("co.ID                                                   AS CUST_ORDER_ID,", "co.ID AS CUST_ORDER_ID, co.SITE_ID, p.STOCK_UM,")
         query = query.replace("WHERE co.ID = :so", "WHERE co.ID = :so AND co.SITE_ID = :site")
+        # Readiness checks below explicitly exclude stock reasons. Order facts
+        # therefore never need the old ERP supply join, even in legacy mode.
+        query = self.without_supply(query)
         rows = self.read(conn, query, so=order, site=self.site)
         require(rows and all(r.get("SITE_ID") == self.site for r in rows), "Order is missing or belongs to another site.")
         return rows
@@ -181,7 +302,11 @@ class VisualERP:
     def inspect_order(self, order):
         with self.engine.begin() as conn:
             rows = self.detail(conn, order)
-        return dict(order=order, site=self.site, customer=rows[0]["CUSTOMER_NAME"], destination=self.destination(rows),
+        return dict(order=order, site=self.site, status=rows[0]["ORDER_STATUS"], customer=rows[0]["CUSTOMER_NAME"], customer_id=rows[0]["CUSTOMER_ID"],
+                    destination=self.destination(rows), customer_reference=rows[0].get("CUSTOMER_PO_REF"),
+                    lines=[dict(order_line=str(r["LINE_NO"]), part=r["PART_ID"], uom=r["STOCK_UM"],
+                                quantity=str(r["OPEN_QTY"]), ordered=str(r["ORDER_QTY"]), shipped=str(r["SHIPPED_QTY"]), status=r.get("LINE_STATUS", "A"), line_available=r.get("LINE_STATUS", "A") == "A", serialized=r["ITEM_TYPE"] == "guns") for r in rows],
+                    baseline={str(r["LINE_NO"]): dict(ordered=str(r["ORDER_QTY"]), shipped=str(r["SHIPPED_QTY"]), part=r["PART_ID"], uom=r["STOCK_UM"]) for r in rows},
                     document_fingerprint=self.document_fingerprint(rows),
                     document_context={k: clean(v) for k, v in rows[0].items() if "FFL" in k or "DOC" in k or "ATTACH" in k})
 
@@ -296,6 +421,8 @@ class VisualERP:
         context = self.context()
         with self.engine.begin() as conn:
             rows = self.detail(conn, work["order"])
+        require(all(r.get("ORDER_STATUS") in (("R", "C") if final else ("R",)) for r in rows),
+                "Order is no longer released for shipping.", "hold")
         require(self.destination(rows) == address(work["destination"]), "Order destination changed. Resolve the order before continuing.")
         by_line = {str(r["LINE_NO"]): r for r in rows}
         for n, original in work["baseline"].items():
@@ -304,6 +431,9 @@ class VisualERP:
             assigned = sum((quantity(l["quantity"]) for l in work["lines"] if l["order_line"] == n), Decimal(0))
             delta = quantity(row["SHIPPED_QTY"], zero=True) - quantity(original["shipped"], zero=True)
             require(delta == (assigned if final else 0), "ERP shipped quantities changed or the saved shipment is not fully posted.")
+            if assigned:
+                require(row.get("LINE_STATUS", "A") in (("A", "C") if final else ("A",)),
+                        "An assigned order line is no longer available for shipping.", "hold")
         require(set(by_line) == set(work["baseline"]), "Order lines were added after checkout.")
         # Reevaluate hard holds even when this packlist consumed the last open unit.
         check_rows = deepcopy(rows)
@@ -312,6 +442,12 @@ class VisualERP:
             row["OPEN_QTY"] = sum((quantity(l["quantity"]) for l in work["lines"] if l["order_line"] == n), Decimal(0))
             if final and row["ORDER_STATUS"] == "C":
                 row["ORDER_STATUS"] = "R"
+            # A posted line may close after its last shipment. Exact cumulative
+            # quantities above distinguish that from closure before fulfillment.
+            # Restore only assigned, posted closed lines for credit/document checks;
+            # readiness must not skip their hard gates as inactive demand.
+            if final and row["OPEN_QTY"] > 0 and row.get("LINE_STATUS") == "C":
+                row["LINE_STATUS"] = "A"
         reasons = self.blocking(check_rows, context)
         require(not reasons, "Order is blocked: " + ", ".join(reasons), "hold")
 

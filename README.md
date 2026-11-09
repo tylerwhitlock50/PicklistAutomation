@@ -6,7 +6,28 @@ worker; it runs without this legacy app or its database.
 Its **Inventory audit** module also owns serialized counts, exceptions, analytics,
 audit settings and reports in the Dispatch PostgreSQL database.
 See [Dispatch setup, training, integration and cutover](docs/dispatch-implementation.md).
-The existing operator workflow remains enabled until the explicit cutover switch is set.
+The [shipping inventory specification](docs/shipping-inventory-spec.md) defines
+Dispatch-owned stock, receipt POSTs, future work-order promises, customer holds
+and VISUAL reconciliation. The new **Inventory** workspace implements these
+engines behind an explicit, reconciled inventory-ownership switch. The durable
+read-only VISUAL connector (`python -m fulfillment.inventory_connector`) imports
+opening stock and subsequent receipts, updates future supply, and surfaces
+source discrepancies. See the specification for bootstrap and recovery steps.
+The **Operations** workspace adds Sales intake, independent approval, order
+decisions, saved planning history and daily close. Schema **5** retains the VISUAL
+order mirror, request/review history, movement evidence and signed close packets.
+Sales drafts await an existing VISUAL order; the separate `FULFILLMENT_ORDER_TOKEN`
+accepts existing-order updates without writing ERP records. Planning callbacks
+queue work for the periodic worker; future receipts promote their exact promises
+immediately, while ordinary ready suggestions remain tentative until checkout.
+
+The accepted shipping warehouse is **SHIPPING**, with site and one location
+configured explicitly. Expired Sales holds stay reserved and flagged for review.
+Close requires complete modern opening evidence, confirmed delivery, two-way
+movement coverage and independent sign-off; accepted exceptions stay visible.
+See the [operating runbook](docs/dispatch-implementation.md#order-intake-approvals-planning-and-daily-close).
+Production migration, connector deployment and cutover have not been performed
+by this change. The existing production process remains in place until authorized cutover.
 
 Simple Python app that:
 - Reads SQL queries from files (`sql/query_guns.sql` and `sql/query_components.sql`)

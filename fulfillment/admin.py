@@ -12,7 +12,7 @@ import re
 from sqlalchemy import select
 from werkzeug.security import generate_password_hash
 
-from fulfillment import model as m
+from fulfillment import model as m, inventory
 from fulfillment.domain import digest, identifier, require
 
 DEFAULT_RULES = {
@@ -143,8 +143,8 @@ def execute(service, conn, actor, action, payload):
     before = deepcopy(state)
     if action == "preview":
         rules = validate_rules(payload.get("rules"))
-        current = service.erp.available(service.list_work(conn), m.get_setting(conn, "reservations", []), context(conn, state={**state, "configured": True}))
-        proposed = service.erp.available(service.list_work(conn), m.get_setting(conn, "reservations", []), context(state={**state, "configured": True, "rules": rules}))
+        current = service.orders(conn, context(conn, state={**state, "configured": True}))
+        proposed = service.orders(conn, context(state={**state, "configured": True, "rules": rules}))
         token = str(uuid4())
         m.put_setting(conn, "preview:" + actor["id"], {"token": token, "rules": digest(rules), "version": state["version"],
                       "expires": (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()})
@@ -169,7 +169,7 @@ def execute(service, conn, actor, action, payload):
         state.update(rules=rules, configured=True)
         # Preview cannot change reservations. Publishing atomically reconciles only
         # queued allocations; checked-out documents and claims remain unchanged.
-        result = service.erp.available(service.list_work(conn), m.get_setting(conn, "reservations", []), context(state=state))
+        result = service.orders(conn, context(state=state))
         m.put_setting(conn, "reservations", result.get("reservations", []))
     elif action in ("control", "unassign"):
         order = identifier(payload.get("order"), "Order")
@@ -189,6 +189,15 @@ def execute(service, conn, actor, action, payload):
         state["controls"].append(control)
         if kind == "hold":
             m.put_setting(conn, "reservations", [r for r in m.get_setting(conn, "reservations", []) if r["cust_order_id"] != order])
+        if action == "unassign" and inventory.config(conn)["enabled"]:
+            # This explicit action releases the rule engine's promises only.
+            # Inside Sales commitments require their own inventory review.
+            from fulfillment.service import event
+            for allocation in inventory.active_allocations(conn):
+                if allocation.get("policy_managed") and allocation.get("order") == order:
+                    change = dict(id=allocation["id"], version=allocation["version"], status="released", reason=reason)
+                    inventory.update_allocation(conn, actor, change)
+                    event(conn, actor["id"], "inventory:allocation-update", {**change, "source": "admin-unassign"})
     elif action == "revoke":
         control = next((c for c in state["controls"] if c["id"] == payload.get("id")), None)
         require(control is not None and not control.get("revoked_at"), "Control is missing or already revoked.")
@@ -196,7 +205,7 @@ def execute(service, conn, actor, action, payload):
     elif action == "account":
         user_id = identifier(payload.get("operator"), "Operator")
         role, enabled = payload.get("role"), payload.get("enabled")
-        require(role in ("operator", "supervisor", "admin") and type(enabled) is bool, "Choose a valid role and enabled state.", "invalid", 400)
+        require(role in ("operator", "sales", "supervisor", "admin") and type(enabled) is bool, "Choose a valid role and enabled state.", "invalid", 400)
         old = conn.execute(select(m.users).where(m.users.c.id == user_id)).first()
         if old and old.role == "admin" and old.enabled and (not enabled or role != "admin"):
             require(conn.execute(select(m.users.c.id).where(m.users.c.role == "admin").where(m.users.c.enabled.is_(True)).where(m.users.c.id != user_id)).first(),

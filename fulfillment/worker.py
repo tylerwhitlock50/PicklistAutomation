@@ -3,7 +3,7 @@ import argparse
 import logging
 import os
 import time
-from fulfillment import admin, model as m
+from fulfillment import admin, model as m, planning
 from fulfillment.domain import require
 from fulfillment.erp import VisualERP, DemoERP
 from fulfillment.service import Service
@@ -16,8 +16,9 @@ def tick(service, site, mode):
         if mode == "live":
             receipt = m.get_setting(conn, "cutover", {})
             require(receipt.get("activated") and receipt.get("site") == site, "Worker requires exclusive Dispatch activation.")
-        service.reconcile_allocations(conn, "dispatch-worker")
-        return True
+    result = planning.execute(service, "dispatch-worker")
+    require(result["planning_run"]["status"] == "succeeded", "Planning failed; see the retained run details.", "planning_failed", 503)
+    return True
 
 
 def main():

@@ -15,7 +15,7 @@ def main():
     parser.add_argument("command", choices=["init", "user", "disable-user", "import-legacy", "activate"])
     parser.add_argument("--operator")
     parser.add_argument("--name")
-    parser.add_argument("--role", choices=["operator", "supervisor", "admin"], default="operator")
+    parser.add_argument("--role", choices=["operator", "sales", "supervisor", "admin"], default="operator")
     parser.add_argument("--legacy-db", help="Used only for the optional one-time import")
     parser.add_argument("--legacy-stopped", action="store_true")
     parser.add_argument("--apply", action="store_true", help="Apply the reviewed import; default is preview only")

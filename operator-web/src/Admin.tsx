@@ -749,13 +749,15 @@ export function Admin({
                           command("unassign", { order: inspection.order })
                         }
                       >
-                        Clear queued assignments & hold
+                        Clear policy assignments & hold
                       </button>
                     </div>
                     <p className="hint">
-                      Clearing assignments is allowed only when there is no
+                      Clearing policy assignments is allowed only when there is no
                       active work. The hold prevents the allocator from
                       immediately assigning the same stock again.
+                      Manual customer promises remain protected; manage those
+                      commitments in Inventory.
                     </p>
                     <details>
                       <summary>Review supporting documents</summary>
@@ -1031,6 +1033,7 @@ export function Admin({
                     }
                   >
                     <option value="operator">Operator</option>
+                    <option value="sales">Inside Sales</option>
                     <option value="supervisor">Supervisor</option>
                     <option value="admin">Administrator</option>
                   </select>

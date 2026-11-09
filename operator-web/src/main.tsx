@@ -5,6 +5,8 @@ import { api, ApiError, packedQuantity } from "./api";
 import type { Order, Work, Session, Line } from "./types";
 import "./style.css";
 import { Admin } from "./Admin";
+import { Inventory } from "./Inventory";
+import { Operations } from "./Operations";
 
 function Barcode({ value }: { value: string }) {
   const ref = useRef<SVGSVGElement>(null);
@@ -82,6 +84,7 @@ function App() {
     api<Session>("/auth/me")
       .then((s) => {
         setSession(s);
+        if (s.operator.role === "sales") setTab("operations");
         return refresh();
       })
       .catch((e) => {
@@ -170,7 +173,9 @@ function App() {
     try {
       await api("/auth/login", { operator, pin });
       setPin("");
-      setSession(await api<Session>("/auth/me"));
+      const signedIn = await api<Session>("/auth/me");
+      setSession(signedIn);
+      setTab(signedIn.operator.role === "sales" ? "operations" : "orders");
       await refresh();
     } catch (e) {
       setError((e as Error).message);
@@ -286,18 +291,29 @@ function App() {
     <>
       <div className="shell">
         <aside className="sidebar">
-          <a className="brand" href="/">
+          <a
+            className="brand"
+            href="/"
+            aria-disabled={busy || !!pending || adminLocked}
+            onClick={(event) => {
+              if (busy || pending || adminLocked) event.preventDefault();
+            }}
+          >
             ▧ Dispatch
           </a>
           <p className="eyebrow">PICK · PACK · SHIP</p>
           <nav>
             {[
-              ["orders", "01", "Available orders"],
-              ["cart", "02", "My work"],
-              ["packing", "03", "Packing station"],
-              ["exceptions", "04", "Exceptions"],
+              ...(session.operator.role !== "sales" ? [
+                ["orders", "01", "Available orders"],
+                ["cart", "02", "My work"],
+                ["packing", "03", "Packing station"],
+                ["exceptions", "04", "Exceptions"],
+              ] : []),
+              ["operations", "08", "Orders, approvals & close"],
+              ["inventory", "05", "Inventory & allocations"],
               ...(session.operator.role === "admin"
-                ? [["admin", "05", "Administration"]]
+                ? [["admin", "06", "Administration"]]
                 : []),
             ].map(([id, no, name]) => (
               <button
@@ -316,12 +332,13 @@ function App() {
             ))}
             <button
               className="nav"
+              hidden={session.operator.role === "sales"}
               disabled={busy || !!pending || adminLocked}
               onClick={() => {
                 window.location.href = "/audit";
               }}
             >
-              <span>06</span>Inventory audit
+              <span>07</span>Inventory audit
             </button>
           </nav>
           <div className="sidebar-bottom">
@@ -358,14 +375,22 @@ function App() {
                       ? "Your work."
                       : tab === "packing"
                         ? "Every box, verified."
-                        : tab === "admin"
-                          ? "Warehouse administration."
-                          : "Resolve and continue."}
+                        : tab === "inventory"
+                          ? "Every unit, accounted for."
+                          : tab === "operations"
+                            ? "Every decision, explained."
+                          : tab === "admin"
+                            ? "Warehouse administration."
+                            : "Resolve and continue."}
               </h1>
               <p>
                 {work
                   ? `${work.customer} · Cart ${work.cart}`
-                  : "One order. One cart. Every item accounted for."}
+                  : tab === "inventory"
+                    ? "Shipping stock, future supply, and customer commitments."
+                    : tab === "operations"
+                      ? "Sales intake, protected promises, approvals and daily reconciliation."
+                    : "One order. One cart. Every item accounted for."}
               </p>
             </div>
             <div className="header-actions">
@@ -379,7 +404,8 @@ function App() {
               </span>
               <button
                 className="secondary"
-                disabled={busy || !online || !!pending}
+                disabled={busy || !online || !!pending || adminLocked}
+                hidden={tab === "inventory" || tab === "admin" || tab === "operations"}
                 onClick={() => refresh().catch((e) => setError(e.message))}
               >
                 Refresh
@@ -390,7 +416,7 @@ function App() {
             <div className="banner">
               {session.mode === "demo"
                 ? "Training workspace · Synthetic orders and labels. Nothing here changes VISUAL."
-                : "Shadow workspace · Live information, read-only. Checkout is disabled until cutover."}
+                : "Shadow workspace · Live order information. Picking is disabled until cutover; supervisors can prepare inventory."}
             </div>
           )}
           {!online && (
@@ -421,7 +447,16 @@ function App() {
               </button>
             </div>
           )}
-          {tab === "admin" && session.operator.role === "admin" ? (
+          {tab === "operations" ? (
+            <Operations session={session} online={online} onLock={setAdminLocked} onAuthLost={() => setSession(null)} />
+          ) : tab === "inventory" ? (
+            <Inventory
+              session={session}
+              online={online}
+              onLock={setAdminLocked}
+              onAuthLost={() => setSession(null)}
+            />
+          ) : tab === "admin" && session.operator.role === "admin" ? (
             <Admin
               session={session}
               online={online}

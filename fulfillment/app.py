@@ -6,13 +6,13 @@ import os
 from pathlib import Path
 import secrets
 
-from flask import Flask, g, jsonify, request, send_from_directory
+from flask import Flask, Request, g, jsonify, request, send_from_directory
 from sqlalchemy import select
 from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash
 
 from fulfillment import model as m
-from fulfillment import admin
+from fulfillment import admin, inventory
 from fulfillment.domain import Conflict, identifier, reconcile, require
 from fulfillment.erp import DemoERP, VisualERP
 from fulfillment.service import Service, event
@@ -22,14 +22,26 @@ ACTIONS = ("pick", "finish-pick", "handoff", "package", "pack", "reset-package",
            "verify", "label", "release", "exception", "resolve", "transfer", "substitute", "cancel", "putaway")
 
 
+class DispatchRequest(Request):
+    @property
+    def max_content_length(self):
+        # Complete source lineage has a bounded, larger envelope than browser commands.
+        if self.path == "/api/v1/integrations/inventory/batches":
+            return 16 * 1024 * 1024
+        return super().max_content_length
+
+
 def create_app(config=None, erp=None):
     app = Flask(__name__, static_folder=None)
+    app.request_class = DispatchRequest
     app.config.update(MODE=os.getenv("FULFILLMENT_MODE", "shadow"),
                       DATABASE_URL=os.getenv("FULFILLMENT_DATABASE_URL", ""),
                       SITE=os.getenv("FULFILLMENT_SITE", ""),
-                      MAX_CONTENT_LENGTH=128 * 1024,
+                      MAX_CONTENT_LENGTH=2 * 1024 * 1024,
                       LABEL_TOKEN=os.getenv("FULFILLMENT_LABEL_TOKEN", ""),
                       VALIDATE_TOKEN=os.getenv("FULFILLMENT_VALIDATE_TOKEN", ""),
+                      INVENTORY_TOKEN=os.getenv("FULFILLMENT_INVENTORY_TOKEN", ""),
+                      ORDER_TOKEN=os.getenv("FULFILLMENT_ORDER_TOKEN", ""),
                       COOKIE_SECURE=True,
                       DIST=str(ROOT / "operator-web" / "dist"))
     if config:
@@ -66,6 +78,9 @@ def create_app(config=None, erp=None):
                 require(hmac.compare_digest(csrf, m.digest([token, "csrf"])), "Session validation failed. Reload and try again.", "csrf", 403)
             g.actor = {"id": row.user_id, "name": row.name, "role": row.role}
             g.csrf = m.digest([token, "csrf"])
+            if row.role == "sales" and request.method not in ("GET", "HEAD", "OPTIONS"):
+                require(request.path.startswith("/api/v1/workflow/") or request.path == "/api/v1/auth/logout",
+                        "Inside Sales can submit requests; shipping and inventory commands require warehouse access.", "role", 403)
             return fn(*args, **kwargs)
         return wrapper
 
@@ -86,7 +101,8 @@ def create_app(config=None, erp=None):
         if request.method not in ("GET", "HEAD", "OPTIONS") and origin:
             expected = os.getenv("FULFILLMENT_PUBLIC_ORIGIN", request.host_url.rstrip("/"))
             require(origin == expected, "Cross-origin requests are not allowed.", "origin", 403)
-        if mode == "live" and request.path.startswith("/api/v1") and request.method == "POST" and "/auth/" not in request.path and "/admin/" not in request.path:
+        preparation = request.path.startswith(("/api/v1/workflow/", "/api/v1/daily-close/", "/api/v1/integrations/orders"))
+        if mode == "live" and not preparation and request.path.startswith("/api/v1") and request.method == "POST" and "/auth/" not in request.path and "/admin/" not in request.path and "/inventory/" not in request.path:
             with database.engine.connect() as conn:
                 receipt = m.get_setting(conn, "cutover")
                 configured = admin.load(conn)["configured"]
@@ -174,6 +190,113 @@ def create_app(config=None, erp=None):
     def orders():
         with database.engine.connect() as conn:
             return jsonify(service.orders(conn))
+
+    @app.get("/api/v1/inventory")
+    @authenticated
+    def inventory_state():
+        with database.transaction() as conn:
+            return jsonify(inventory.snapshot(conn))
+
+    @app.get("/api/v1/planning/board")
+    @authenticated
+    def planning_board():
+        from fulfillment import planning
+        with database.transaction() as conn:
+            return jsonify(planning.board(service, conn))
+
+    @app.get("/api/v1/planning/runs")
+    @app.get("/api/v1/planning/runs/<run_id>")
+    @authenticated
+    def planning_history(run_id=None):
+        from fulfillment import planning
+        with database.engine.connect() as conn:
+            return jsonify(planning.history(conn, run_id))
+
+    @app.post("/api/v1/planning/run")
+    @authenticated
+    def planning_run():
+        require(mode != "shadow", "Shadow mode previews planning without changing commitments.", "shadow", 403)
+        result, status = service.command(g.actor, "planning:run", request.get_json(), request.headers.get("Idempotency-Key"))
+        return jsonify(result), status
+
+    @app.post("/api/v1/integrations/orders")
+    @machine("ORDER")
+    def order_feed():
+        result, status = service.command({"id": "visual-orders", "role": "order_integration"},
+            "orders:upsert", request.get_json(), request.headers.get("Idempotency-Key"))
+        return jsonify(result), status
+
+    @app.get("/api/v1/workflow")
+    @authenticated
+    def workflow_state():
+        from fulfillment import workflow_requests
+        with database.transaction() as conn:
+            return jsonify(workflow_requests.snapshot(conn))
+
+    @app.post("/api/v1/workflow/<action>")
+    @authenticated
+    def workflow_command(action):
+        result, status = service.command(g.actor, "workflow:" + action, request.get_json(), request.headers.get("Idempotency-Key"))
+        return jsonify(result), status
+
+    @app.get("/api/v1/daily-close")
+    @authenticated
+    def daily_close_state():
+        from fulfillment import daily_close
+        with database.transaction() as conn:
+            return jsonify(daily_close.snapshot(conn))
+
+    @app.get("/api/v1/daily-close/<close_id>/packet")
+    @authenticated
+    def daily_close_packet(close_id):
+        from fulfillment import daily_close
+        with database.transaction() as conn:
+            result = daily_close.packet(conn, close_id)
+        response = jsonify(result)
+        # Attachment name uses the server's stored UUID, never the request path.
+        response.headers["Content-Disposition"] = 'attachment; filename="dispatch-close-' + result["id"] + '.json"'
+        return response
+
+    @app.post("/api/v1/daily-close/<action>")
+    @authenticated
+    def daily_close_command(action):
+        result, status = service.command(g.actor, "close:" + action, request.get_json(), request.headers.get("Idempotency-Key"))
+        return jsonify(result), status
+
+    @app.get("/api/v1/inventory/demand")
+    @authenticated
+    def inventory_demand():
+        with database.engine.connect() as conn:
+            context = admin.context(conn)
+        # Planning future promises needs a wider demand horizon than today's
+        # operational release queue. This read does not change release policy.
+        context = {**context, "lookahead_days": 365}
+        demand = erp.demand([], context)
+        return jsonify(orders=demand["orders"], horizon_days=365, as_of=m.now())
+
+    @app.post("/api/v1/inventory/<action>")
+    @authenticated
+    def inventory_command(action):
+        result, status = service.command(g.actor, "inventory:" + action, request.get_json(), request.headers.get("Idempotency-Key"))
+        return jsonify(result), status
+
+    @app.post("/api/v1/integrations/inventory/<kind>")
+    @machine("INVENTORY")
+    def inventory_feed(kind):
+        actions = {"receipts": "receive", "work-orders": "sync-supply", "reconcile": "reconcile", "batches": "sync-batch", "health": "sync-health"}
+        require(kind in actions, "Unknown inventory feed.", "not_found", 404)
+        payload = request.get_json()
+        require(isinstance(payload, dict) and payload.get("source") == "visual", "Inventory feed requires source=visual and a JSON object.", "invalid", 400)
+        result, status = service.command({"id": "visual-inventory", "role": "inventory_integration"},
+                                         "inventory:" + actions[kind], payload, request.headers.get("Idempotency-Key"))
+        return jsonify(result), status
+
+    @app.get("/api/v1/integrations/inventory/state")
+    @machine("INVENTORY")
+    def inventory_feed_state():
+        from fulfillment import inventory_sync
+        with database.transaction() as conn:
+            return jsonify(inventory_sync.status(conn))
 
     @app.get("/api/v1/fulfillments")
     @authenticated
@@ -271,6 +394,7 @@ def create_app(config=None, erp=None):
         @app.post("/api/v1/demo/<work_id>/documents")
         @authenticated
         def demo_documents(work_id):
+            require(g.actor["role"] in ("operator", "supervisor", "admin"), "Shipping access required.", "role", 403)
             with database.transaction() as conn:
                 work = service.get(conn, work_id)
                 packlist = "PL-DEMO-" + work_id[:8].upper()

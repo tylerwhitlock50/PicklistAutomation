@@ -9,6 +9,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from fulfillment import model as m
 from fulfillment import admin
+from fulfillment import inventory
 from fulfillment.domain import (Conflict, address, complete_address, digest, identifier,
                                 key, packed_complete, quantity, reconcile, require, trace_key)
 
@@ -41,21 +42,20 @@ class Service:
         require(row is not None, "Fulfillment not found.", "not_found", 404)
         return deepcopy(row[0])
 
-    def orders(self, conn):
-        return self.erp.available(self.list_work(conn), m.get_setting(conn, "reservations", []), admin.context(conn))
+    def orders(self, conn, context=None):
+        context = context or admin.context(conn)
+        if inventory.config(conn)["enabled"]:
+            from fulfillment.local_planning import orders
+            from fulfillment import order_book
+            require(not self.live or bool(m.get_setting(conn, "order_book_state")),
+                    "Import the complete VISUAL order book before live planning and checkout.", "order_source_unavailable", 503)
+            demand = order_book.demand(self, conn, context) if m.get_setting(conn, "order_book_state") else None
+            return orders(self, conn, context, demand=demand)
+        return self.erp.available(self.list_work(conn), m.get_setting(conn, "reservations", []), context)
 
     def reconcile_allocations(self, conn, actor):
-        result = self.orders(conn)
-        previous = m.get_setting(conn, "reservations", [])
-        updated = result.get("reservations", [])
-        if digest(previous) != digest(updated):
-            m.put_setting(conn, "reservations", updated)
-            state = admin.load(conn)
-            state["version"] += 1
-            m.put_setting(conn, "administration", state)
-            event(conn, actor, "admin:allocation-refresh", {"before": previous, "after": updated})
-        m.put_setting(conn, "allocation_worker", {"at": m.now(), "eligible_orders": len(result["orders"]), "reservations": len(updated)})
-        return result
+        from fulfillment import planning
+        return planning.run(self, conn, actor)
 
     def command(self, actor, action, payload, request_id, work_id=None):
         require(isinstance(payload, dict), "A JSON object is required.", "invalid", 400)
@@ -75,13 +75,33 @@ class Service:
                 return previous.response, previous.status
             try:
                 with conn.begin_nested():
-                    if action.startswith("admin:"):
+                    if action.startswith("inventory:"):
+                        result = inventory.execute(self, conn, actor, action.removeprefix("inventory:"), payload)
+                    elif action.startswith("admin:"):
                         result = admin.execute(self, conn, actor, action.removeprefix("admin:"), payload)
+                    elif action.startswith("workflow:"):
+                        from fulfillment import workflow_requests
+                        result = workflow_requests.execute(self, conn, actor, action.removeprefix("workflow:"), payload)
+                    elif action.startswith("close:"):
+                        from fulfillment import daily_close
+                        result = daily_close.execute(self, conn, actor, action.removeprefix("close:"), payload)
+                    elif action == "planning:run":
+                        from fulfillment import planning
+                        require(actor.get("role") in ("supervisor", "admin"), "Supervisor access required.", "role", 403)
+                        require(inventory.reason(payload), "A planning reason is required.", "invalid", 400)
+                        planning.enqueue(conn, actor["id"], "manual", payload.get("reason"))
+                        result = planning.run(self, conn, actor["id"])
+                    elif action == "orders:upsert":
+                        from fulfillment import order_book
+                        require(actor.get("role") == "order_integration", "Order integration access required.", "role", 403)
+                        result = order_book.upsert(self, conn, actor, payload)
                     elif action == "checkout":
+                        require(actor.get("role") in ("operator", "supervisor", "admin"), "Shipping access required.", "role", 403)
                         result = self.checkout(conn, actor, payload)
                     elif action == "labels":
                         result = self.ingest_label(conn, payload)
                     else:
+                        require(actor.get("role") in ("operator", "supervisor", "admin"), "Shipping access required.", "role", 403)
                         work = self.get(conn, work_id)
                         require(payload.get("version") == work["version"], "This work changed. Reload before continuing.", "revision")
                         require(work["state"] not in TERMINAL, "This fulfillment is closed.", "closed")
@@ -91,8 +111,27 @@ class Service:
                         conn.execute(m.works.update().where(m.works.c.id == work_id).values(
                             state=work["state"], version=work["version"], document=work, updated_at=work["updated_at"]))
                         result = work
-                    event(conn, actor["id"], action, audit_payload, work_id or result.get("id"))
+                    # Inventory resources use their own identities (including
+                    # 64-character hashes), not the fulfillment work-ID column.
+                    event_work_id = work_id or (result.get("id") if action == "checkout" else None)
+                    event_detail = audit_payload
+                    if action.startswith("inventory:"):
+                        resource_id = result.get("id") or result.get("allocation", {}).get("id")
+                        if resource_id:
+                            event_detail = {**audit_payload, "inventory_resource_id": resource_id}
+                    elif action.startswith(("workflow:", "close:", "orders:", "planning:")):
+                        resource_id = result.get("id") or result.get("planning_run", {}).get("id")
+                        if resource_id:
+                            event_detail = {**audit_payload, "resource_type": action.split(":")[0], "resource_id": resource_id}
+                    event(conn, actor["id"], action, event_detail, event_work_id)
+                    if action.startswith(("inventory:", "workflow:", "admin:")) or action in ("checkout", "release", "cancel", "putaway", "resolve"):
+                        from fulfillment import planning
+                        if action not in ("inventory:sync-health", "inventory:sync-ack", "inventory:reconcile", "admin:preview", "admin:account", "admin:reconcile"):
+                            planning.enqueue(conn, actor["id"], action, result.get("id") or event_work_id)
                 status = 200
+                if action == "planning:run" and result.get("planning_run", {}).get("status") == "failed":
+                    result["message"] = "Planning failed. Previous commitments are preserved; review the saved run and retry."
+                    status = 503
             except Conflict as exc:
                 result = {"error": exc.code, "message": exc.message, "details": exc.details}
                 status = exc.status
@@ -133,6 +172,11 @@ class Service:
         work = {**order, "id": work_id, "cart": cart, "operator": actor["id"], "state": "picking", "version": 1,
                 "lines": lines, "packages": [], "verification": None, "packlist": None,
                 "exception": None, "created_at": stamp, "updated_at": stamp, "station": None}
+        # The mirror is planning evidence. A new credit hold, changed destination
+        # or cancelled line must stop checkout before stock custody is committed.
+        self.erp.check_order(work)
+        from fulfillment import planning
+        work["planning_evidence"] = planning.provenance(conn, order)
         administration = admin.load(conn)
         consumed = False
         for control in administration["controls"]:
@@ -143,6 +187,9 @@ class Service:
             administration["version"] += 1
             m.put_setting(conn, "administration", administration)
         conn.execute(m.works.insert().values(id=work_id, state=work["state"], version=1, document=work, updated_at=stamp))
+        if inventory.config(conn)["enabled"]:
+            inventory.checkout(conn, work)
+            conn.execute(m.works.update().where(m.works.c.id == work_id).values(document=work))
         return work
 
     def apply(self, conn, actor, action, work, payload):
@@ -156,7 +203,11 @@ class Service:
             require(work["state"] == "picking", "Picking is already finished.")
             line = self.line(work, payload)
             require(identifier(payload.get("location"), "Location") == line["location"], "Scan the prescribed location.")
-            self.erp.check_pick(work, line, payload)
+            if work.get("inventory_owned"):
+                self.erp.check_order(work)
+                inventory.check_pick(conn, work, line, payload)
+            else:
+                self.erp.check_pick(work, line, payload)
             amount, serial = self.scan_amount(line, payload)
             require(quantity(line["picked"], zero=True) + amount <= quantity(line["quantity"]), "Quantity exceeds the prescribed pick.")
             if serial:
@@ -240,6 +291,8 @@ class Service:
             for package in work["packages"]:
                 require(bool(package["tracking"]), "Every package needs a scanned label.")
                 self.check_label(conn, work, package, package["tracking"])
+            if work.get("inventory_owned"):
+                inventory.release(conn, actor, work)
             work["state"], work["released_at"] = "released", m.now()
             # Keep trace/order/label history protected. Queue excludes released work
             # until ERP cumulative shipment quantities confirm consumption.
@@ -265,6 +318,7 @@ class Service:
             work["operator"] = target
         elif action == "substitute":
             require(supervisor and work["state"] == "picking", "A supervisor can substitute only during picking.", "role", 403)
+            require(not work.get("inventory_owned"), "Return this work to stock and replan to change a locally reserved serial.", "inventory_substitution")
             line = self.line(work, payload)
             old, new = identifier(payload.get("old_serial")), identifier(payload.get("serial"))
             require(bool(str(payload.get("reason", "")).strip()), "A substitution reason is required.")
@@ -306,6 +360,8 @@ class Service:
     def finish_putaway(conn, work):
         if all(quantity(l["picked"], zero=True) == 0 for l in work["lines"]):
             work["state"] = "cancelled"
+            if work.get("inventory_owned"):
+                inventory.cancel(conn, work)
             conn.execute(m.claims.delete().where(m.claims.c.work_id == work["id"]))
             m.put_setting(conn, "reservations", [r for r in m.get_setting(conn, "reservations", []) if r.get("cust_order_id") != work["order"]])
 
