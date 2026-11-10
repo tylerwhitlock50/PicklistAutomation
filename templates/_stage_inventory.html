@@ -1,0 +1,76 @@
+{# Stage inventory building blocks, shared by the Today panel and the Staged
+   shipments report. `si` is shipping_service.build_stage_inventory(). #}
+
+{% macro bin_chips(si) -%}
+  {% for row in si.by_location %}<span class="stage-bin-chip">{{ row.location.split('/')[-1] }} <strong>{{ row.on_hand }}</strong></span>{% endfor %}
+{%- endmacro %}
+
+{% macro flow_stat(label, day) -%}
+  <div class="stage-flow-stat">
+    <span class="stage-flow-label">{{ label }}</span>
+    <span class="stage-flow-nums"><span class="stage-in">+{{ day.arrived }} into stage</span> <span class="stage-out">{{ day.shipped }} shipped from stage</span></span>
+    <span class="stage-flow-sub">{{ day.shipped_all }} guns shipped company-wide{% if day.moved_out %} &middot; {{ day.moved_out }} pulled back out{% endif %}{% if day.unshipped %} &middot; {{ day.unshipped }} unshipped back in{% endif %}</span>
+  </div>
+{%- endmacro %}
+
+{% macro flow_strip(si) -%}
+  {% if si.flow_error %}
+  <p class="helper-text">In/out history unavailable: {{ si.flow_error }}</p>
+  {% elif si.flow %}
+  <div class="stage-flow-row">
+    {{ flow_stat('Today so far', si.flow.today) }}
+    {{ flow_stat(si.flow.previous.label, si.flow.previous) }}
+    {{ flow_stat('Last 7 days', si.flow.last_7) }}
+  </div>
+  {% endif %}
+{%- endmacro %}
+
+{% macro why_bar(si) -%}
+  {% set why = si.why %}
+  {% if why and why.total %}
+  <div class="stage-bar" role="img" aria-label="Why staged guns are still here: {% for b in why.buckets %}{{ b.qty }} {{ b.label }}{{ ', ' if not loop.last }}{% endfor %}">
+    {% for b in why.buckets %}<span class="stage-seg tone-{{ b.tone }}" style="flex-grow: {{ b.qty }}" title="{{ b.qty }} {{ b.label }}"></span>{% endfor %}
+  </div>
+  {% endif %}
+{%- endmacro %}
+
+{% macro why_legend(si, detailed=false) -%}
+  {% set why = si.why %}
+  <ul class="stage-legend">
+    {% for b in why.buckets %}
+    <li>
+      <span class="stage-dot tone-{{ b.tone }}" aria-hidden="true"></span>
+      <span class="stage-legend-qty">{{ b.qty }}</span>
+      <span class="stage-legend-text">
+        <strong>{{ b.label }}</strong>{% if b.orders %} <span class="helper-text">&middot; {{ b.orders }} order{{ 's' if b.orders != 1 }}</span>{% endif %}
+        {% if b.reasons %}<small>{% for r in b.reasons[:(6 if detailed else 2)] %}{{ r.label }}{% if b.reasons|length > 1 %} ({{ r.qty }}){% endif %}{{ '; ' if not loop.last }}{% endfor %}</small>
+        {% elif detailed %}<small>{{ b.help }}</small>{% endif %}
+      </span>
+    </li>
+    {% endfor %}
+  </ul>
+{%- endmacro %}
+
+{% macro headline(si) -%}
+  {% set why = si.why %}
+  {% if why and why.total %}
+  <p class="stage-headline">
+    {% if why.on_schedule %}<span class="is-good"><strong>{{ why.on_schedule }}</strong> releasing on schedule</span>{% endif %}
+    {% if why.early %}<span><strong>{{ why.early }}</strong> staged before due</span>{% endif %}
+    {% if why.stuck %}<span class="is-bad"><strong>{{ why.stuck }}</strong> stuck until a hold is fixed</span>{% endif %}
+    {% if why.outside %}<span><strong>{{ why.outside }}</strong> RMA / excluded, worked off-picklist</span>{% endif %}
+    {% if why.no_decision %}<span><strong>{{ why.no_decision }}</strong> no release decision</span>{% endif %}
+    {% if why.unmatched %}<span><strong>{{ why.unmatched }}</strong> not needed by an open order</span>{% endif %}
+  </p>
+  {% endif %}
+{%- endmacro %}
+
+{% macro why_block(si, detailed=false) -%}
+  {% if si.why_warning %}<p class="flash warning" role="status">{{ si.why_warning }}</p>{% endif %}
+  {% if si.why_error %}
+  <p class="helper-text">Why they are here is unavailable: {{ si.why_error }}</p>
+  {% elif si.why and si.why.total %}
+  {{ why_bar(si) }}
+  {{ why_legend(si, detailed) }}
+  {% endif %}
+{%- endmacro %}

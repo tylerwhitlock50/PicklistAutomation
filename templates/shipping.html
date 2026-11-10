@@ -750,12 +750,116 @@
       {% endif %}
 
       {% if view == 'stage' %}
+      {% import '_stage_inventory.html' as stage_ui %}
+      {% set si = stage_inventory %}
+      {% if si and not si.error %}
+      <section class="card stage-panel">
+        <div class="stage-panel-head">
+          <div>
+            <h2><span class="stage-count">{{ si.on_hand or 0 }}</span> guns in stage</h2>
+            <p class="stage-bins">{{ stage_ui.bin_chips(si) }}</p>
+          </div>
+          {{ stage_ui.headline(si) }}
+        </div>
+        {{ stage_ui.flow_strip(si) }}
+
+        <h3>Why they are still here</h3>
+        <p class="helper-text">
+          VISUAL does not tie a serial to a sales order, so each staged gun is matched by part to the open orders
+          that need it{% if si.readiness_window_days %} (due in the next {{ si.readiness_window_days }} days){% endif %}.
+          Orders the release gate will let go on their own claim guns first; the rest go oldest-due first.
+          Stock holds are ignored, because readiness and the gate leave stage bins out of supply on purpose.
+          A gun can sit on an order with more than one reason, so reason counts within a group can add up to more than the group.
+        </p>
+        {{ stage_ui.why_block(si, detailed=true) }}
+
+        {% if si.flow and si.flow.days %}
+        <h3>In and out by day</h3>
+        <p class="helper-text">
+          Into stage = put into a stage bin from outside stage (transfer or work-order receipt). Shipped from stage = issued on a
+          customer order out of a stage bin. Company-wide = every serialized unit shipped that day from any location, racks included.
+          Pulled out = moved back to a rack or the cage. Unshipped = a shipment reversed back into stage. Moves between stage bins
+          are listed but never counted as in or out.
+        </p>
+        <div class="table-wrap">
+          <table class="stage-flow-table">
+            <thead><tr><th>Day</th><th>Into stage</th><th>Shipped from stage</th><th>Shipped company-wide</th><th>Pulled out / unshipped</th><th>Stage change</th><th>Bin-to-bin</th></tr></thead>
+            <tbody>
+              {% for d in si.flow.days|reverse %}
+              <tr{% if d.is_today %} class="is-today"{% endif %}>
+                <td><strong>{{ d.label }}</strong>{% if d.is_today %} <span class="helper-text">so far</span>{% endif %}</td>
+                <td>{% if d.arrived %}<span class="stage-mini-bar stage-in-bar" style="width: {{ [3, (120 * d.arrived / si.flow.max_daily)|round|int]|max }}px"></span>{% endif %}{{ d.arrived }}</td>
+                <td>{% if d.shipped %}<span class="stage-mini-bar stage-out-bar" style="width: {{ [3, (120 * d.shipped / si.flow.max_daily)|round|int]|max }}px"></span>{% endif %}{{ d.shipped }}{% if d.shipped_orders %} <span class="helper-text">({{ d.shipped_orders }} order{{ 's' if d.shipped_orders != 1 }})</span>{% endif %}</td>
+                <td>{{ d.shipped_all }}{% if d.shipped_all_orders %} <span class="helper-text">({{ d.shipped_all_orders }} order{{ 's' if d.shipped_all_orders != 1 }})</span>{% endif %}</td>
+                <td>{{ d.moved_out or '' }}{% if d.unshipped %}{{ ' / ' if d.moved_out }}<span class="helper-text">{{ d.unshipped }} unshipped</span>{% endif %}</td>
+                <td class="{{ 'is-bad' if d.net > 0 else ('is-good' if d.net < 0 else '') }}">{{ '%+d'|format(d.net) if d.net else '0' }}</td>
+                <td class="helper-text">{{ d.reshuffled or '' }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% endif %}
+
+        {% if si.why and si.why.orders %}
+        <h3>Orders holding staged guns</h3>
+        <div class="table-wrap">
+          <table id="stage-orders-table">
+            <thead><tr><th>Order</th><th>Customer</th><th>Staged</th><th>Group</th><th>Why</th><th>Due</th></tr></thead>
+            <tbody>
+              {% for o in si.why.orders %}
+              <tr{% if loop.index > row_cap %} class="row-capped"{% endif %}>
+                <td><a href="{{ url_for('orders.order_detail_page', order_id=o.order_id) }}"><strong>{{ o.order_id }}</strong></a></td>
+                <td>{{ o.customer_name or o.customer_id or '' }}</td>
+                <td>{{ o.staged_qty }}</td>
+                <td><span class="stage-dot tone-{{ o.tone }}" aria-hidden="true"></span> {{ o.bucket_label }}</td>
+                <td>{{ o.reasons|join('; ') }}{% if o.next_release_date %} <span class="helper-text">&middot; next release {{ o.next_release_date }}</span>{% endif %}</td>
+                <td>{{ o.due or '' }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% if si.why.orders|length > row_cap %}
+        <button type="button" class="button tertiary show-all-button" data-show-all="stage-orders-table">Show all {{ si.why.orders|length }} orders</button>
+        {% endif %}
+        {% endif %}
+
+        {% if si.why and si.why.parts %}
+        <h3>Staged parts</h3>
+        <div class="table-wrap">
+          <table id="stage-parts-table">
+            <thead><tr><th>Part</th><th>Staged</th><th>Open on orders</th><th>Matched</th><th>Beyond open orders</th></tr></thead>
+            <tbody>
+              {% for p in si.why.parts %}
+              <tr{% if loop.index > row_cap %} class="row-capped"{% endif %}>
+                <td><strong>{{ p.part_id }}</strong>{% if p.description %} &middot; {{ p.description }}{% endif %}</td>
+                <td>{{ p.staged }}</td>
+                <td>{{ p.open_qty }}</td>
+                <td>{{ p.matched }}</td>
+                <td>{% if p.unmatched %}<span class="pill audit-status status-missing">{{ p.unmatched }}{{ ' (no open order)' if not p.open_qty }}</span>{% endif %}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% if si.why.parts|length > row_cap %}
+        <button type="button" class="button tertiary show-all-button" data-show-all="stage-parts-table">Show all {{ si.why.parts|length }} parts</button>
+        {% endif %}
+        {% endif %}
+        <p class="helper-text stage-foot">
+          Live ERP{% if si.as_of_display %} as of {{ si.as_of_display }} (ERP clock){% endif %}.
+          {% if si.readiness_evaluated_at %}Order holds and release-gate decisions from readiness evaluated {{ si.readiness_evaluated_at|local_dt }}.{% endif %}
+        </p>
+      </section>
+      {% endif %}
+
       <section class="card">
         <h2>Stage aging</h2>
         <p class="helper-text">
           Serialized units sitting in SHIPPING <strong>{{ stage.term }}</strong> bins &mdash; staged goods
-          should be gone within {{ '%.0f'|format(stage.target_hours) }} hours. Live ERP snapshot{% if stage.as_of %}
-          as of {{ stage.as_of|local_dt }}{% endif %}.
+          should be gone within {{ '%.0f'|format(stage.target_hours) }} hours. Live ERP snapshot{% if stage.as_of_display %}
+          as of {{ stage.as_of_display }} (ERP clock){% endif %}.
         </p>
         {% if stage.error %}
         <p class="empty-state">Stage data unavailable &mdash; the ERP query failed: {{ stage.error }}</p>

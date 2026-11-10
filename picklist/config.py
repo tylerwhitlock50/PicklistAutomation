@@ -153,6 +153,15 @@ STAGE_AGING_TARGET_HOURS = STAGING_TARGET_HOURS  # compatibility alias for the s
 STAGE_LOCATION_TERM = os.getenv("STAGE_LOCATION_TERM", "STAGE").strip().upper()
 
 
+# Stage flow: daily serialized units into / out of the SHIPPING stage bins
+# (Today tile + Staged shipments report), and how long to cache the ERP pull.
+STAGE_FLOW_FILE = resolve_path_setting(
+    os.getenv("STAGE_FLOW_FILE", "sql/stage_flow.sql")
+)
+STAGE_FLOW_DAYS = int(os.getenv("STAGE_FLOW_DAYS", "14"))
+STAGE_FLOW_CACHE_MINUTES = float(os.getenv("STAGE_FLOW_CACHE_MINUTES", "5"))
+
+
 # Component shortage report: which product codes count as shippable
 # components, how far out to look, and how long to cache the ERP pull.
 SHORTAGE_QUERY_FILE = resolve_path_setting(

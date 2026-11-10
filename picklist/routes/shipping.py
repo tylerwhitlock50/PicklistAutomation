@@ -26,6 +26,7 @@ from picklist.services.shipping_service import (
     build_shipping_scorecard_payload,
     build_shortage_payload,
     build_stage_aging,
+    build_stage_inventory,
     build_verify_daily_payload,
     parse_scorecard_days,
 )
@@ -104,6 +105,15 @@ def work_page():
     )
 
 
+@bp.get("/work/stage-panel")
+@require_trusted_client
+def work_stage_panel():
+    """Today's stage panel body, fetched after the page renders (ERP-backed)."""
+    if not get_feature_flags()["shipping"]:
+        return "", 404
+    return render_template("_stage_panel.html", si=_audit_json_safe(build_stage_inventory()))
+
+
 def paginate_decisions(rows, query=None, page=None, page_size=100):
     """Search the complete saved decision set before taking a display page."""
     term = str(query or "").strip()
@@ -130,6 +140,7 @@ def shipping_page():
 
     recon_payload = None
     stage = None
+    stage_inventory = None
     shortages = None
     excess_payload = None
     verify_daily = None
@@ -168,7 +179,9 @@ def shipping_page():
     elif view == "excess":
         excess_payload = _audit_json_safe(build_excess_packlist_payload())
     elif view == "stage":
-        stage = _audit_json_safe(build_stage_aging())
+        stage_raw = build_stage_aging()
+        stage = _audit_json_safe(stage_raw)
+        stage_inventory = _audit_json_safe(build_stage_inventory(aging=stage_raw))
     elif view == "verify":
         verify_daily = _audit_json_safe(
             build_verify_daily_payload(request.args.get("date"))
@@ -207,6 +220,7 @@ def shipping_page():
         view_options=SHIPPING_VIEWS,
         recon=recon_payload,
         stage=stage,
+        stage_inventory=stage_inventory,
         shortages=shortages,
         excess=excess_payload,
         verify_daily=verify_daily,

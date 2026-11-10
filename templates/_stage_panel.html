@@ -1,0 +1,22 @@
+{# Today screen stage panel body. Fetched by work.html from /work/stage-panel
+   so the ERP queries never hold up the Today page itself. #}
+{% import '_stage_inventory.html' as stage_ui %}
+{% if si.error %}
+<p class="flash warning" role="status">Stage counts are unavailable: the ERP query failed. <a href="{{ url_for('shipping.shipping_page', view='stage') }}">Open the stage report</a> to retry.</p>
+{% else %}
+<div class="stage-panel-head">
+  <div>
+    <p class="eyebrow">Stage</p>
+    <h2><span class="stage-count">{{ si.on_hand or 0 }}</span> guns in stage</h2>
+    <p class="stage-bins">{{ stage_ui.bin_chips(si) }}</p>
+  </div>
+  {{ stage_ui.headline(si) }}
+</div>
+{{ stage_ui.flow_strip(si) }}
+{{ stage_ui.why_block(si) }}
+<p class="helper-text stage-foot">
+  Live ERP{% if si.as_of_display %} as of {{ si.as_of_display }} (ERP clock){% endif %}.
+  {% if si.readiness_evaluated_at %}Matched to orders from readiness evaluated {{ si.readiness_evaluated_at|local_dt }}.{% endif %}
+  <a href="{{ url_for('shipping.shipping_page', view='stage') }}">Open the stage report &rarr;</a>
+</p>
+{% endif %}

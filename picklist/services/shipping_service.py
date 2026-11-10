@@ -13,6 +13,7 @@ from picklist.config import (
     logger,
     PACKLIST_DAILY_FILE,
     QUERY_FILES,
+    READINESS_LOOKAHEAD_DAYS,
     RECON_SHIPMENTS_FILE,
     RELEASE_CANDIDATES_FILE,
     RELEASE_COMPONENT_CODES_TOKEN,
@@ -30,10 +31,13 @@ from picklist.config import (
     SHORTAGE_PRODUCT_CODES_TOKEN,
     SHORTAGE_QUERY_FILE,
     STAGING_TARGET_HOURS,
+    STAGE_FLOW_CACHE_MINUTES,
+    STAGE_FLOW_DAYS,
+    STAGE_FLOW_FILE,
     STAGE_LOCATION_TERM,
     VERIFY_DAILY_CACHE_SECONDS,
 )
-from picklist.domain import excess, recon, release_gate, shipping_metrics, shortage
+from picklist.domain import excess, recon, release_gate, shipping_metrics, shortage, stage_inventory
 from picklist.erp import get_erp_engine, run_erp_query_file
 from picklist.services.audit_service import _dwell_age_display, _fetch_dwell_raw
 from picklist.services.query_options import get_default_guns_query_options
@@ -103,6 +107,9 @@ def build_stage_aging() -> dict[str, Any]:
     result["as_of"] = (
         raw["ERP_NOW"].max().to_pydatetime() if len(raw) else datetime.now()
     )
+    # ERP_NOW is the ERP server's own local clock with no zone attached; the
+    # local_dt filter would treat it as UTC and shift it, so pre-format it.
+    result["as_of_display"] = f"{result['as_of']:%Y-%m-%d %H:%M}"
 
     total = int(len(df))
     over = df[df["dwell_hours"] > target].sort_values("ARRIVED_AT")
@@ -146,6 +153,127 @@ def build_stage_aging() -> dict[str, Any]:
         }
         for _, row in over.iterrows()
     ]
+    return result
+
+
+_stage_flow_cache: dict[str, Any] = {"rows": None, "fetched_at": None}
+
+
+def _fetch_stage_flow_rows(force: bool = False) -> list[dict]:
+    """Daily stage in/out rows from sql/stage_flow.sql, cached briefly."""
+    cached_at = _stage_flow_cache["fetched_at"]
+    if (
+        not force
+        and _stage_flow_cache["rows"] is not None
+        and cached_at is not None
+        and datetime.now() - cached_at < timedelta(minutes=STAGE_FLOW_CACHE_MINUTES)
+    ):
+        return _stage_flow_cache["rows"]
+    df = run_erp_query_file(
+        STAGE_FLOW_FILE,
+        {"days": STAGE_FLOW_DAYS, "stage_term": STAGE_LOCATION_TERM},
+        "stage flow query",
+    )
+    rows = df.to_dict(orient="records")
+    _stage_flow_cache.update({"rows": rows, "fetched_at": datetime.now()})
+    return rows
+
+
+def build_stage_inventory(aging: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """Guns in stage right now, how the pile moved, and why it is still there.
+
+    Composes three sources, each of which can fail on its own without taking
+    the others down:
+      * the cached dwell snapshot (what is in each stage bin, how long);
+      * sql/stage_flow.sql (daily arrivals vs shipments);
+      * the latest readiness snapshot (which open orders those parts are for
+        and what is holding each one), via stage_inventory.attribute_staged.
+    Pass ``aging`` when the caller already built it (the stage report), so a
+    down ERP is not waited on twice.
+    """
+    from picklist.services import readiness_service  # local: avoid import cycle
+
+    if aging is None:
+        aging = build_stage_aging()
+    result: dict[str, Any] = {
+        "term": STAGE_LOCATION_TERM,
+        "target_hours": aging.get("target_hours"),
+        "as_of": aging.get("as_of"),
+        "as_of_display": aging.get("as_of_display"),
+        "error": aging.get("error"),
+        "on_hand": (aging.get("summary") or {}).get("on_hand"),
+        "aging": aging.get("summary"),
+        "by_location": aging.get("by_location") or [],
+        "flow": None,
+        "flow_error": None,
+        "why": None,
+        "why_error": None,
+        "readiness_evaluated_at": None,
+        "readiness_window_days": None,
+        "why_warning": None,
+    }
+    if result["error"]:
+        # The dwell snapshot and the flow query hit the same ERP; when the
+        # snapshot just failed, do not wait on a second timeout.
+        return result
+
+    today = _today_local()
+    try:
+        flow_rows = _fetch_stage_flow_rows()
+        erp_today = next((r.get("ERP_TODAY") for r in flow_rows if r.get("ERP_TODAY") is not None), None)
+        today = stage_inventory._as_date(erp_today) or today
+        result["flow"] = stage_inventory.summarize_flow(flow_rows, today=today, days=STAGE_FLOW_DAYS)
+    except Exception as exc:  # ERP down/misconfigured — degrade, don't 500
+        logger.exception("Stage flow query failed")
+        result["flow_error"] = str(exc)
+
+    staged_by_part: dict[str, int] = {}
+    descriptions: dict[str, str] = {}
+    try:
+        raw = _fetch_dwell_raw()
+        mask = (
+            raw["WAREHOUSE_ID"].astype(str).str.upper().eq("SHIPPING")
+            & raw["LOCATION_ID"].astype(str).str.upper().str.contains(STAGE_LOCATION_TERM, regex=False)
+        )
+        for _, row in raw[mask].iterrows():
+            part = str(row["PART_ID"] or "").strip().upper()
+            staged_by_part[part] = staged_by_part.get(part, 0) + 1
+            if row.get("PART_DESCRIPTION") and part not in descriptions:
+                descriptions[part] = str(row["PART_DESCRIPTION"])
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Stage inventory part breakdown failed")
+        result["why_error"] = str(exc)
+        return result
+
+    try:
+        payload = readiness_service.current_payload()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Readiness snapshot unavailable for stage attribution")
+        result["why_error"] = str(exc)
+        return result
+    if payload.get("never_run"):
+        result["why_error"] = "Order readiness has not run yet, so staged guns cannot be matched to orders."
+        return result
+    if payload.get("error"):
+        # A failed run saves an empty order list; matching against it would
+        # call every staged gun "no open order".
+        result["why_error"] = (
+            f"The latest order readiness run failed ({payload['error']}), "
+            "so staged guns cannot be matched to orders."
+        )
+        return result
+    orders = payload.get("orders") or []
+    result["readiness_evaluated_at"] = payload.get("evaluated_at")
+    result["readiness_window_days"] = READINESS_LOOKAHEAD_DAYS
+    if orders and all(not o.get("gate") for o in orders):
+        result["why_warning"] = (
+            "No order in the latest readiness run has a release-gate decision (gate off or its query failed), "
+            "so release timing is unknown."
+        )
+    gate_horizon = today + timedelta(days=int(get_default_guns_query_options()["lookahead_days"]))
+    result["why"] = stage_inventory.attribute_staged(
+        staged_by_part, orders, descriptions=descriptions, gate_horizon=gate_horizon
+    )
     return result
 
 
