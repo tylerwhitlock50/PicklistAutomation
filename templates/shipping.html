@@ -768,7 +768,9 @@
           VISUAL does not tie a serial to a sales order, so each staged gun is matched by part to the open orders
           that need it{% if si.readiness_window_days %} (due in the next {{ si.readiness_window_days }} days){% endif %}.
           Orders the release gate will let go on their own claim guns first; the rest go oldest-due first.
-          Stock holds are ignored, because readiness and the gate leave stage bins out of supply on purpose.
+          Stock holds are ignored, because readiness and the gate leave stage bins out of supply on purpose. When the
+          gate stopped at "no supply" (or "waiting for completion" on an order stage already covers), its other policies
+          such as ship-to cooldown and batch thresholds never ran, so those guns show as "Gate can't see staged stock".
           A gun can sit on an order with more than one reason, so reason counts within a group can add up to more than the group.
         </p>
         {{ stage_ui.why_block(si, detailed=true) }}

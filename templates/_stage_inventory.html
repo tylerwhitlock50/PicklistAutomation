@@ -59,7 +59,7 @@
     {% if why.early %}<span><strong>{{ why.early }}</strong> staged before due</span>{% endif %}
     {% if why.stuck %}<span class="is-bad"><strong>{{ why.stuck }}</strong> stuck until a hold is fixed</span>{% endif %}
     {% if why.outside %}<span><strong>{{ why.outside }}</strong> RMA / excluded, worked off-picklist</span>{% endif %}
-    {% if why.no_decision %}<span><strong>{{ why.no_decision }}</strong> no release decision</span>{% endif %}
+    {% if why.no_decision %}<span><strong>{{ why.no_decision }}</strong> release timing unknown</span>{% endif %}
     {% if why.unmatched %}<span><strong>{{ why.unmatched }}</strong> not needed by an open order</span>{% endif %}
   </p>
   {% endif %}

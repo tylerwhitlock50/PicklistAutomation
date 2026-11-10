@@ -152,6 +152,8 @@ BUCKETS: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                        "help": "Release gate is holding the order: ship-to cooldown, waiting on a prior major order, scheduled sweep."}),
         ("not_due", {"label": "Staged early", "tone": "early",
                      "help": "The order is not due inside the release gate's window yet, so nothing will release it."}),
+        ("gate_blind", {"label": "Gate can't see staged stock", "tone": "warn",
+                        "help": "The release gate counts racks only, so it stopped at 'no supply' / 'waiting for completion' for this order. Its other policies (cooldown, batch threshold) were never applied, so when it would release is unknown."}),
         ("gate_blocked", {"label": "Gate hard block", "tone": "bad",
                           "help": "Release gate hard-blocks the order on a business rule: a line not available (closed or held), order not released, credit, ship-to."}),
         ("blocked_sales", {"label": "Waiting on Inside Sales", "tone": "bad",
@@ -164,8 +166,10 @@ BUCKETS: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                                 "help": "Order readiness hold owned by Production."}),
         ("no_gate", {"label": "No release decision", "tone": "muted",
                      "help": "Order is due inside the release gate's window but the gate made no decision for it (gate off, failed, or order outside its scope)."}),
-        ("blocked_shipping", {"label": "RMA / international / excluded", "tone": "muted",
-                              "help": "Order is worked outside the picklist (RMA, international, employee or excluded account)."}),
+        ("blocked_shipping", {"label": "Waiting on Shipping", "tone": "bad",
+                              "help": "Order readiness hold owned by Shipping."}),
+        ("off_picklist", {"label": "RMA / international / excluded", "tone": "muted",
+                          "help": "Order is worked outside the picklist (RMA, international, employee or excluded account)."}),
         ("extra", {"label": "More than open orders need", "tone": "muted",
                    "help": "This part has open orders, but fewer open units than are staged."}),
         ("no_order", {"label": "No open order", "tone": "muted",
@@ -181,16 +185,26 @@ _DEFAULT_PRIORITY = 3
 HEADLINE_GROUPS: "OrderedDict[str, tuple[str, ...]]" = OrderedDict([
     ("on_schedule", ("clear", "accumulating", "gate_hold")),   # the gate moves these on its own timing
     ("early", ("not_due",)),
-    ("stuck", ("gate_blocked", "blocked_sales", "blocked_finance", "blocked_compliance", "blocked_production")),
-    ("outside", ("blocked_shipping",)),                          # worked outside the picklist on purpose
-    ("no_decision", ("no_gate",)),
+    ("stuck", ("gate_blocked", "blocked_sales", "blocked_finance", "blocked_compliance",
+               "blocked_production", "blocked_shipping")),
+    ("outside", ("off_picklist",)),                              # worked outside the picklist on purpose
+    ("no_decision", ("gate_blind", "no_gate")),                  # release timing unknown
     ("unmatched", ("extra", "no_order")),
 ])
 # The gate's supply excludes stage bins, so these gate reasons on an order whose
 # guns are already staged describe the gate's blind spot, not why they are here.
+# The gate stops evaluating at the supply check, so its remaining policies
+# (cooldown, batch threshold, ...) were never applied: release timing is unknown,
+# never "clear".
 _STAGE_BLIND_GATE_REASONS = frozenset({"no_supply"})
-# Holding until complete: only real while the staged guns do not cover the order.
+# Holding until complete: only real while the staged guns do not cover the order;
+# once they do, it is the same blind spot.
 _COMPLETION_REASON = "waiting_for_completion"
+# Readiness reasons that mean the order is worked outside the picklist on purpose.
+# Classified by reason, not owner: international exclusions are owned by Compliance.
+_OFF_PICKLIST_REASONS = frozenset({"rma_excluded", "excluded_class"})
+_GATE_BLIND_REASON = {"code": "gate_counts_racks_only",
+                      "label": "Release gate counts racks only; its other policies were not applied"}
 _REASON_ORDER = {code: index for index, code in enumerate(readiness.HOLD_REASONS)}
 _IGNORED_REASONS = frozenset(readiness.STOCK_REASONS) | readiness.RETIRED_REASONS
 _GATE_BUCKETS = {"RELEASE": "clear", "ACCUMULATING": "accumulating", "HOLD": "gate_hold", "BLOCKED": "gate_blocked"}
@@ -224,6 +238,10 @@ def order_bucket(order: Mapping[str, Any], *, gate_horizon: Optional[dt.date] = 
     """
     holds = [h for h in (order.get("holds") or []) if h.get("reason_code") not in _IGNORED_REASONS]
     blocking = [h for h in holds if h.get("blocking")]
+    off_picklist = [h for h in blocking if h.get("reason_code") in _OFF_PICKLIST_REASONS]
+    if off_picklist:
+        return "off_picklist", [{"code": str(h.get("reason_code")), "label": str(h.get("label") or h.get("reason_code"))}
+                                for h in off_picklist]
     if blocking:
         blocking.sort(key=lambda h: _REASON_ORDER.get(h.get("reason_code"), 999))
         owner = str(blocking[0].get("owner_team") or "sales")
@@ -235,7 +253,7 @@ def order_bucket(order: Mapping[str, Any], *, gate_horizon: Optional[dt.date] = 
     gate = order.get("gate") or {}
     decision = str(gate.get("decision") or "").strip().upper()
     if decision == "HOLD" and str(gate.get("reason_code") or "") in _STAGE_BLIND_GATE_REASONS:
-        return "clear", []
+        return "gate_blind", [dict(_GATE_BLIND_REASON)]
     if decision in _GATE_BUCKETS:
         key = _GATE_BUCKETS[decision]
         return key, ([] if key == "clear" else _gate_reason(gate))
@@ -314,7 +332,9 @@ def attribute_staged(
         })
 
     # A gate "waiting for completion" hold cannot see staged guns: when the
-    # staged units already cover the order's whole open quantity, it is ready.
+    # staged units already cover the order's whole open quantity, the hold is
+    # the gate's blind spot. Its other policies were not applied, so this is
+    # "timing unknown", not "clear".
     staged_on_order: dict[str, int] = {}
     for order_id, _part, take, _ in allocations:
         if order_id is not None:
@@ -324,7 +344,7 @@ def attribute_staged(
                 and any(r["code"] == _COMPLETION_REASON for r in info["reasons"])
                 and info["open_qty"] > 0
                 and staged_on_order.get(order_id, 0) >= info["open_qty"]):
-            info["bucket"], info["reasons"] = "clear", []
+            info["bucket"], info["reasons"] = "gate_blind", [dict(_GATE_BLIND_REASON)]
 
     bucket_qty = {key: 0 for key in BUCKETS}
     bucket_orders: dict[str, set] = {key: set() for key in BUCKETS}

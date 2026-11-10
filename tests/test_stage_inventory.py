@@ -84,7 +84,9 @@ def test_gate_decisions_count_even_when_advisory():
     blocked = {"decision": "BLOCKED", "reason_code": "hard_block", "label": "BLOCKED - line not available, order not released"}
     assert si.order_bucket(_order("A", "P", 1, gate=accumulating))[0] == "accumulating"
     assert si.order_bucket(_order("B", "P", 1, gate=held))[0] == "gate_hold"
-    assert si.order_bucket(_order("C", "P", 1, gate=gate_no_supply)) == ("clear", [])
+    # The gate stopped at its supply check (stage is invisible to it), so its
+    # cooldown / batch policies never ran: timing unknown, never "clear".
+    assert si.order_bucket(_order("C", "P", 1, gate=gate_no_supply))[0] == "gate_blind"
     key, reasons = si.order_bucket(_order("D", "P", 1, gate=blocked))
     assert key == "gate_blocked"
     assert [r["label"] for r in reasons] == ["Line not available", "Order not released"]
@@ -134,7 +136,7 @@ def test_every_staged_unit_lands_in_exactly_one_headline_group():
     assert (why["on_schedule"], why["early"], why["stuck"], why["outside"], why["no_decision"], why["unmatched"]) == (2, 1, 1, 1, 0, 4)
     assert sum(why[group] for group in si.HEADLINE_GROUPS) == why["total"]
     by_part = {p["part_id"]: p for p in why["parts"]}
-    assert by_part["P1"]["buckets"] == {"accumulating": 2, "blocked_shipping": 1, "extra": 2}
+    assert by_part["P1"]["buckets"] == {"accumulating": 2, "off_picklist": 1, "extra": 2}
     assert by_part["P1"]["description"] == "Rifle"
     assert by_part["P3"]["buckets"] == {"no_order": 2}  # closed orders do not count as demand
     assert "P4" not in by_part
@@ -149,9 +151,25 @@ def test_headline_groups_cover_every_bucket_exactly_once():
 def test_completion_hold_is_cleared_only_when_stage_covers_the_order():
     waiting = {"decision": "HOLD", "reason_code": "waiting_for_completion", "label": "HOLD - waiting for completion"}
     covered = si.attribute_staged({"P1": 4}, [_order("SO-FULL", "P1", 4, gate=waiting)])
-    assert {b["key"]: b["qty"] for b in covered["buckets"]} == {"clear": 4}
+    # Fully staged: the completion hold is the gate's blind spot, but batch
+    # thresholds etc. were never checked, so it is not "clear to ship".
+    assert {b["key"]: b["qty"] for b in covered["buckets"]} == {"gate_blind": 4}
+    assert covered["clear_to_ship"] == 0 and covered["no_decision"] == 4
     partial = si.attribute_staged({"P1": 2}, [_order("SO-PART", "P1", 4, gate=waiting)])
     assert {b["key"]: b["qty"] for b in partial["buckets"]} == {"gate_hold": 2}
+
+
+def test_off_picklist_is_classified_by_reason_not_owner():
+    # Readiness assigns international exclusions to Compliance; they are still
+    # worked off-picklist on purpose, not "stuck until a hold is fixed".
+    intl = _order("SO-INTL", "P1", 2, holds=[_hold("excluded_class", "compliance"), _hold("order_not_released")])
+    assert si.order_bucket(intl)[0] == "off_picklist"
+    rma = _order("SO-RMA", "P1", 1, holds=[_hold("rma_excluded", "shipping")])
+    assert si.order_bucket(rma)[0] == "off_picklist"
+    genuine = _order("SO-COMP", "P1", 1, holds=[_hold("some_compliance_hold", "compliance")])
+    assert si.order_bucket(genuine)[0] == "blocked_compliance"
+    why = si.attribute_staged({"P1": 3}, [intl, rma])
+    assert (why["outside"], why["stuck"]) == (3, 0)
 
 
 # --------------------------------------------------------------------------- service + routes
