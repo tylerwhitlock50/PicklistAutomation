@@ -36,6 +36,27 @@
         </p>
       </section>
 
+      {% if feature_flags.shipping %}
+      <section class="card stage-panel" id="stage-panel" aria-live="polite" data-stage-panel-url="{{ url_for('shipping.work_stage_panel') }}">
+        <p class="eyebrow">Stage</p>
+        <p class="helper-text" data-stage-loading>Counting guns in stage&hellip;</p>
+        <noscript><a href="{{ url_for('shipping.shipping_page', view='stage') }}">Open the stage report</a></noscript>
+      </section>
+      <script>
+      (function () {
+        const panel = document.getElementById('stage-panel');
+        if (!panel || !window.fetch) return;
+        fetch(panel.dataset.stagePanelUrl, { credentials: 'same-origin', headers: { 'Accept': 'text/html' } })
+          .then(function (response) { if (!response.ok) throw new Error('HTTP ' + response.status); return response.text(); })
+          .then(function (html) { panel.innerHTML = html; })
+          .catch(function () {
+            const loading = panel.querySelector('[data-stage-loading]');
+            if (loading) loading.textContent = 'Stage counts did not load. Refresh the page or open Reports > Staged shipments.';
+          });
+      })();
+      </script>
+      {% endif %}
+
       {% include '_unfinished_work.html' %}
 
       {% if feature_flags.requests and shipping_requests %}
